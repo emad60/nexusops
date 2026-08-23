@@ -1,0 +1,39 @@
+# Development overrides: hot reload everywhere, Vite exposed, code bind-mounted.
+services:
+  api:
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload --proxy-headers
+    volumes:
+      - ./backend/app:/app/app
+      - ./backend/alembic:/app/alembic
+    environment:
+      ENVIRONMENT: development
+      LOG_LEVEL: DEBUG
+
+  worker:
+    command: watchfiles --filter python 'celery -A app.tasks.celery_app:app worker --loglevel=INFO --concurrency=4'
+    volumes:
+      - ./backend/app:/app/app
+    environment:
+      LOG_LEVEL: DEBUG
+
+  scheduler:
+    volumes:
+      - ./backend/app:/app/app
+    environment:
+      LOG_LEVEL: DEBUG
+
+  frontend:
+    # Dev: serve Vite instead of the built static bundle.
+    build:
+      context: ./frontend
+      target: develop
+    command: pnpm dev --host 0.0.0.0 --port 5173
+    volumes:
+      - ./frontend/src:/app/src
+      - ./frontend/public:/app/public
+    ports:
+      - "${NEXUSOPS_VITE_PORT:-5173}:5173"
+
+  nginx:
+    volumes:
+      - ./nginx/dev.conf:/etc/nginx/templates/default.conf.template:ro

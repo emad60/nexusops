@@ -1,0 +1,84 @@
+[project]
+name = "nexusops-backend"
+version = "1.0.0"
+description = "NexusOps control-plane API, workers and domain services"
+requires-python = ">=3.13,<3.15"
+dependencies = [
+    "fastapi>=0.118",
+    "uvicorn[standard]>=0.37",
+    "sqlalchemy[asyncio]>=2.0.43",
+    "psycopg[binary,pool]>=3.2",
+    "alembic>=1.16",
+    "pydantic>=2.11",
+    "pydantic-settings>=2.10",
+    "redis>=6.4",
+    "celery[redis]>=5.5",
+    "argon2-cffi>=25.1",
+    "pyjwt>=2.10",
+    "cryptography>=45",
+    "httpx>=0.28",
+    "structlog>=25.4",
+    "docker>=7.1",
+    "tenacity>=9.1",
+    "orjson>=3.11",
+    "prometheus-client>=0.23",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.4",
+    "pytest-asyncio>=1.1",
+    "pytest-cov>=7",
+    "ruff>=0.13",
+    "mypy>=1.18",
+    "faker>=37",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+src = ["app", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E", "W",   # pycodestyle
+    "F",        # pyflakes
+    "I",        # isort
+    "B",        # bugbear
+    "UP",       # pyupgrade
+    "S",        # bandit
+    "ASYNC",    # async pitfalls
+    "RUF",
+]
+ignore = [
+    "E501",     # line length handled by formatter
+    "B008",     # FastAPI Depends() in defaults is idiomatic
+    "S101",     # asserts are fine outside prod paths; tests rely on them
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S105", "S106", "S107"]
+"backend/app/core/config.py" = []
+"**/migrations/*" = ["E501", "I001"]
+
+[tool.mypy]
+python_version = "3.13"
+plugins = ["pydantic.mypy"]
+strict_optional = true
+disallow_untyped_defs = false
+warn_unused_ignores = true
+ignore_missing_imports = true
+exclude = ["^migrations/", "^build/"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+filterwarnings = ["error::DeprecationWarning:app.*"]
+addopts = "-q --strict-markers"
+markers = [
+    "integration: requires PostgreSQL + Redis",
+]
+
+[tool.coverage.run]
+source = ["app"]
+omit = ["*/migrations/*"]

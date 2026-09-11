@@ -26,7 +26,7 @@ services:
     image: redis:7-alpine
     command: redis-server --appendonly no --save ""
     ports:
-      - "127.0.0.1:${NEXUSOPS_REDIS_PORT:-6380}:6379"
+      - "127.0.0.1:${NEXUSOPS_REDIS_PORT:-6390}:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -71,14 +71,19 @@ services:
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-nexusops}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-nexusops}
       REDIS_URL: redis://redis:6379/0
       SMTP_HOST: mailpit
+      RUN_MIGRATIONS_ON_START: "false"
     command: celery -A app.tasks.celery_app:app worker --loglevel=INFO --concurrency=4 --max-tasks-per-child=200
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
+      api:
+        condition: service_healthy
     healthcheck:
-      test: ["CMD", "celery", "-A", "app.tasks.celery_app:app", "inspect", "ping", "-d", "celery@$$HOSTNAME"]
+      # CMD-SHELL so $HOSTNAME expands at check time; the array form passes it
+      # through literally and no node ever replies.
+      test: ["CMD-SHELL", "celery -A app.tasks.celery_app:app inspect ping -d celery@$$HOSTNAME --timeout=8"]
       interval: 30s
       timeout: 10s
       retries: 5
@@ -93,9 +98,14 @@ services:
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-nexusops}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-nexusops}
       REDIS_URL: redis://redis:6379/0
       SMTP_HOST: mailpit
+      RUN_MIGRATIONS_ON_START: "false"
     command: celery -A app.tasks.celery_app:app beat --loglevel=INFO
     depends_on:
+      postgres:
+        condition: service_healthy
       redis:
+        condition: service_healthy
+      api:
         condition: service_healthy
     restart: unless-stopped
 

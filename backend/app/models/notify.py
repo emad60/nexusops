@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 
 from sqlalchemy import (
     Boolean,
@@ -14,6 +14,8 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    UniqueConstraint,
+    func,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
@@ -51,6 +53,12 @@ class NotificationDelivery(Base):
     __table_args__ = (
         status_check("status", DeliveryStatus),
         Index("ix_deliveries_status_retry", "status", "next_retry_at"),
+        # One delivery per channel per event: every API worker runs the
+        # dispatcher and Redis pubsub broadcasts each frame to ALL of them —
+        # without this, every notification was queued (and emailed) once per
+        # worker. NULL event_id (manual/test sends) stays exempt: Postgres
+        # treats NULLs as distinct.
+        UniqueConstraint("channel_id", "event_id", name="uq_deliveries_channel_event"),
         CheckConstraint("attempts >= 0", name="attempts_nonneg"),
     )
 
@@ -75,3 +83,12 @@ class NotificationDelivery(Base):
     last_error: Mapped[str] = mapped_column(Text, default="", nullable=False)
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     next_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Python-side default keeps the value in object state at flush so sync
+    # serialization never triggers a lazy refresh (see TimestampMixin).
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+        server_default=func.now(),
+        nullable=False,
+        index=True,
+    )

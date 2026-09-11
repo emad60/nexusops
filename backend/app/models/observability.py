@@ -162,6 +162,8 @@ class IncidentEvent(Base):
     data: Mapped[dict[str, Any]] = json_column()
     occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
+    incident: Mapped[Incident] = relationship(back_populates="timeline")
+
 
 class MetricSnapshot(Base):
     __tablename__ = "metric_snapshots"

@@ -139,7 +139,7 @@ class Deployment(TimestampMixin, Base):
     )
 
 
-class DeploymentStep(Base):
+class DeploymentStep(TimestampMixin, Base):
     __tablename__ = "deployment_steps"
     __table_args__ = (
         UniqueConstraint("deployment_id", "idx", name="uq_steps_deployment_idx"),

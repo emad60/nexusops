@@ -11,6 +11,7 @@ from typing import Generic, TypeVar
 from fastapi import Query
 from pydantic import BaseModel
 from sqlalchemy import Select, func, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 T = TypeVar("T")
 
@@ -38,7 +39,7 @@ class Page(BaseModel, Generic[T]):  # noqa: UP046 - pydantic v2 generic model
     offset: int
 
 
-async def paginate(session, stmt: Select, params: PageParams) -> tuple[list, int]:  # type: ignore[no-untyped-def]
+async def paginate(session: AsyncSession, stmt: Select, params: PageParams) -> tuple[list, int]:
     """Execute *stmt* with limit/offset and return ``(rows, total)``."""
     count_stmt = select(func.count()).select_from(stmt.order_by(None).subquery())
     total = (await session.execute(count_stmt)).scalar_one()

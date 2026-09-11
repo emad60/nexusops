@@ -8,6 +8,7 @@ import uuid
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.requests import Request
 from starlette.responses import Response
+from starlette.types import ASGIApp
 
 from app.core.logging import get_logger
 
@@ -29,7 +30,7 @@ class RequestIDMiddleware(BaseHTTPMiddleware):
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
     """Baseline hardening headers on every API response."""
 
-    def __init__(self, app, *, is_production: bool = False):  # type: ignore[no-untyped-def]
+    def __init__(self, app: ASGIApp, *, is_production: bool = False) -> None:
         super().__init__(app)
         self.is_production = is_production
 

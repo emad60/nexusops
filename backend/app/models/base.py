@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import enum
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 
 from sqlalchemy import BigInteger, CheckConstraint, DateTime, Identity, Uuid, func
 from sqlalchemy.dialects.postgresql import JSONB
@@ -42,19 +42,32 @@ def big_serial_pk() -> Mapped[int]:
     return mapped_column(BigInteger, Identity(always=True), primary_key=True)
 
 
+def _utcnow() -> datetime:
+    return datetime.now(UTC)
+
+
 class TimestampMixin:
+    # Python-side defaults: values land in object state at flush so sync
+    # serialization never triggers a lazy refresh (MissingGreenlet in async
+    # SQLAlchemy). The DB-level server_default stays as a fallback for writers
+    # outside the ORM.
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), nullable=False, index=True
+        DateTime(timezone=True),
+        default=_utcnow,
+        server_default=func.now(),
+        nullable=False,
+        index=True,
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
+        default=_utcnow,
+        onupdate=_utcnow,
         server_default=func.now(),
-        onupdate=func.now(),
         nullable=False,
     )
 
 
-def json_column(**kwargs):  # type: ignore[no-untyped-def]
+def json_column(**kwargs):
     return mapped_column(JSONB, nullable=False, default=dict, **kwargs)
 
 

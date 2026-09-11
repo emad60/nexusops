@@ -143,5 +143,16 @@ def decrypt_str(ciphertext: str) -> str:
 
 
 def digest_of(value: str, length: int = 12) -> str:
-    """Short non-reversible digest used for change detection display."""
-    return hashlib.sha256(value.encode()).hexdigest()[:length]
+    """Short server-verifiable digest used for change detection display.
+
+    HMAC-SHA256 keyed with a value derived from ``ENCRYPTION_KEY`` — not a
+    plain hash — so the digest (returned by the secret metadata API) can only
+    be computed or checked by this server. An unsalted/truncated plain hash
+    would be an offline dictionary/confirmation oracle for low-entropy secret
+    values; with the key mixed in, a leaked digest is useless without the key.
+    Digests persisted before this change stop matching and regenerate on the
+    next rotation (the digest is display/change-detection metadata only).
+    """
+    settings = get_settings()
+    key = hashlib.sha256(settings.encryption_key.encode()).digest()
+    return hmac.new(key, value.encode(), hashlib.sha256).hexdigest()[:length]

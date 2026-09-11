@@ -13,6 +13,7 @@ from sqlalchemy import (
     String,
     Text,
     Uuid,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -108,7 +109,10 @@ class RefreshToken(TimestampMixin, Base):
 
     Rotation chain: on refresh the old row gets ``superseded_by_id`` and a
     fresh row is issued. Presenting a superseded token indicates theft and
-    revokes the whole session.
+    revokes the whole session — except for the one-shot grace rescue in
+    ``auth_service.refresh`` (a navigation can abort an in-flight rotation
+    after the server committed it, losing the response cookie); ``grace_used``
+    bounds that rescue to a single use per token.
     """
 
     __tablename__ = "refresh_tokens"
@@ -121,6 +125,9 @@ class RefreshToken(TimestampMixin, Base):
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     superseded_by_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    grace_used: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
 
 
 class ApiKey(TimestampMixin, Base):

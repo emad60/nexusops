@@ -8,6 +8,7 @@ Authentication accepts either:
 from __future__ import annotations
 
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Annotated, Any
@@ -46,13 +47,16 @@ class AuthContext:
         return self.user.email
 
     def has_permission(self, codename: str) -> bool:
+        # API keys are scoped intersections: both the key scope AND the
+        # owning user's role must allow the action. The scope check comes
+        # FIRST — even a superadmin-owned key can never exceed its grant,
+        # so a leaked least-privilege machine key stays least-privilege.
+        if self.api_key is not None and not scope_matches(
+            list(self.api_key.scopes or []), codename
+        ):
+            return False
         if self.user.is_superadmin:
             return True
-        if self.api_key is not None:
-            # API keys are scoped intersections: both the key scope AND the
-            # owning user's role must allow the action.
-            if not scope_matches(list(self.api_key.scopes or []), codename):
-                return False
         return (
             WILDCARD in self._permission_set
             or codename in self._permission_set
@@ -64,11 +68,12 @@ async def _load_permissions(db: AsyncSession, ctx: AuthContext) -> None:
     if ctx.user.is_superadmin:
         ctx._permission_set = {WILDCARD}
         return
-    role = await ctx.user.awaitable_attrs.role
+    # User.role and Role.permissions are both lazy="selectin", so after any
+    # query-loaded user these attributes are already in memory — no IO needed.
+    role = ctx.user.role
     if role is None:
         return
-    perms = await role.awaitable_attrs.permissions
-    ctx._permission_set = {p.codename for p in perms}
+    ctx._permission_set = {p.codename for p in role.permissions}
 
 
 async def resolve_auth(request: Request, db: AsyncSession) -> AuthContext:
@@ -135,10 +140,21 @@ async def get_current_user(request: Request, db: DbSessionDep) -> AuthContext:
 
 
 CurrentUser = Annotated[AuthContext, Depends(get_current_user)]
-OptionalUser = Annotated[AuthContext | None, Depends(get_current_user)]
 
 
-def require_permission(codename: str):  # type: ignore[no-untyped-def]
+async def get_optional_user(request: Request, db: DbSessionDep) -> AuthContext | None:
+    """Like :func:`get_current_user` but returns ``None`` for anonymous callers."""
+    try:
+        request.state.client_ip = client_ip(request)
+        return await resolve_auth(request, db)
+    except Unauthorized:
+        return None
+
+
+OptionalUser = Annotated[AuthContext | None, Depends(get_optional_user)]
+
+
+def require_permission(codename: str) -> Callable[[AuthContext], Awaitable[AuthContext]]:
     """Dependency factory enforcing a permission; returns 403 when denied."""
 
     async def _check(ctx: CurrentUser) -> AuthContext:

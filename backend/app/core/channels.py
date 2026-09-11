@@ -13,6 +13,10 @@ def deployment_log_channel(deployment_id: str) -> str:
     return f"nx:deploy:{deployment_id}"
 
 
+def server_metrics_channel(server_id: str) -> str:
+    return f"nx:metrics:{server_id}"
+
+
 WS_CHANNEL_GLOBAL = "global"
 WS_CHANNEL_SERVER_METRICS = "server-metrics"
 WS_CHANNEL_CONTAINER_LOGS = "container-logs"

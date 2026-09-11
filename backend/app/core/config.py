@@ -52,6 +52,12 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     access_token_ttl_minutes: int = Field(default=15, ge=1, le=1440)
     refresh_token_ttl_days: int = Field(default=14, ge=1, le=180)
+    # Replays of the *immediately* superseded refresh token inside this window
+    # are rescued instead of treated as theft (see auth_service.refresh): a
+    # browser navigation can abort an in-flight refresh after the server
+    # committed the rotation, losing the response cookie. 0 disables the grace
+    # path entirely.
+    refresh_grace_seconds: int = Field(default=30, ge=0, le=3600)
     encryption_key: str
     cors_origins: str = "http://localhost:8080,http://localhost:5173"
     login_max_attempts: int = Field(default=5, ge=1, le=50)
@@ -165,7 +171,7 @@ class Settings(BaseSettings):
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     """Return the cached settings singleton."""
-    return Settings()  # type: ignore[call-arg]
+    return Settings()
 
 
 def fail_on_bad_config() -> None:

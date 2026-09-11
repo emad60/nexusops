@@ -4,15 +4,22 @@ Publishing an event:
   1. persists a :class:`SystemEvent` row (source of truth),
   2. best-effort publishes a compact JSON frame to ``nx:events`` for live fan-out,
   3. deduplicates via ``dedup_key`` where supplied (e.g. state-transition guards).
+
+Frames are published only AFTER their transaction commits: both consumers
+(the WS hub and the notification dispatcher) dereference the event id, so a
+frame that outruns its row breaks them — and an event whose transaction rolls
+back must never be announced at all.
 """
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from datetime import UTC, datetime
 from typing import Any
 
 import orjson
+from sqlalchemy import event as sa_event
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -23,6 +30,49 @@ from app.models import SystemEvent
 from app.models.enums import ActorType, EventLevel
 
 log = get_logger("nexusops.events")
+
+
+#: Strong references to in-flight publish tasks — the loop only keeps weak
+#: ones, and a GC'd task would silently drop its frame mid-publish.
+_background_publishes: set[asyncio.Task[None]] = set()
+
+
+def _after_commit_publish(session: Any) -> None:
+    """Session hook: schedule pending frames once the transaction commits.
+
+    Runs inside the commit's greenlet on the event-loop thread, so scheduling
+    onto the running loop is safe. A rollback never fires this — pending
+    frames die with the session's ``info`` dict.
+    """
+    frames = session.info.pop("_event_bus_pending", [])
+    if not frames:
+        return
+    loop = asyncio.get_running_loop()
+    for frame in frames:
+        task = loop.create_task(_publish_redis(frame))
+        _background_publishes.add(task)
+        task.add_done_callback(_background_publishes.discard)
+
+
+def _after_rollback_drop(session: Any) -> None:
+    """Drop stashed frames on rollback.
+
+    Without this, frames from a rolled-back unit of work sat in
+    ``session.info`` and were published by a LATER, unrelated commit on the
+    same session — announcing events that never happened. (No stash point
+    runs inside a savepoint, so the outer ``after_rollback`` is sufficient.)
+    """
+    session.info.pop("_event_bus_pending", None)
+
+
+def _publish_after_commit(db: AsyncSession, frame: dict[str, Any]) -> None:
+    sync = db.sync_session
+    pending: list[dict[str, Any]] = sync.info.setdefault("_event_bus_pending", [])
+    pending.append(frame)
+    if not sync.info.get("_event_bus_hook_installed"):
+        sync.info["_event_bus_hook_installed"] = True
+        sa_event.listen(sync, "after_commit", _after_commit_publish)
+        sa_event.listen(sync, "after_rollback", _after_rollback_drop)
 
 
 async def publish(
@@ -60,8 +110,6 @@ async def publish(
     )
     db.add(event)
     await db.flush()
-    if commit:
-        await db.commit()
 
     frame = {
         "id": str(event.id),
@@ -75,7 +123,14 @@ async def publish(
         "data": data or {},
         "created_at": (event.created_at or datetime.now(UTC)).isoformat(),
     }
-    await _publish_redis(frame)
+    if commit:
+        await db.commit()
+        await _publish_redis(frame)
+    else:
+        # Publish only once the surrounding transaction commits — see module
+        # docstring. The dispatcher used to FK-fail on frames consumed before
+        # the event row was visible, silently losing the notification.
+        _publish_after_commit(db, frame)
     log.debug("event_published", event_type=type, resource=resource_type)
     return event
 

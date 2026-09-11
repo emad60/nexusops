@@ -151,12 +151,17 @@ def register_exception_handlers(app: FastAPI) -> None:
     @app.exception_handler(Exception)
     async def handle_unexpected(request: Request, exc: Exception) -> ORJSONResponse:
         request_id = getattr(request.state, "request_id", None)
+        # Log the exception CLASS, never str(exc): SQLAlchemy statement errors
+        # (and others) embed bound parameters — password hashes, secret
+        # ciphertext, token hashes — in their message. The engine is created
+        # with hide_parameters=True as the second half of this guard, so the
+        # traceback itself is also parameter-free.
         log.error(
             "unhandled_exception",
             request_id=request_id,
             method=request.method,
             path=request.url.path,
-            error=str(exc),
+            error=exc.__class__.__name__,
             exc_info=True,
         )
         return ORJSONResponse(

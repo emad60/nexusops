@@ -21,13 +21,21 @@ def get_engine() -> AsyncEngine:
         from app.core.config import get_settings
 
         settings = get_settings()
+        # _assemble_database_url guarantees a URL; assert narrows str | None.
+        assert settings.database_url is not None
         _engine = create_async_engine(
             settings.database_url,
             pool_size=settings.db_pool_size,
             max_overflow=settings.db_max_overflow,
             pool_pre_ping=True,
             echo=settings.db_echo,
-            connect_args={"timeout": 10},
+            # Statement errors must never repr bound parameters (password
+            # hashes, secret ciphertext, token hashes) into logs. The 500
+            # handler logs only the exception class; this keeps the traceback
+            # parameter-free as well.
+            hide_parameters=True,
+            # psycopg3 uses the libpq option name connect_timeout.
+            connect_args={"connect_timeout": 10},
         )
     return _engine
 

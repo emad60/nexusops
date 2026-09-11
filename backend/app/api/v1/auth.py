@@ -24,27 +24,45 @@ from app.services import auth_service, role_service
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 
-def _set_refresh_cookie(response: Response, raw_token: str) -> None:
+def _transport_is_https(forwarded_proto: str | None, url_scheme: str) -> bool:
+    """Whether this request's cookie will travel over https.
+
+    The edge always overwrites ``X-Forwarded-Proto`` with its own ``$scheme``
+    (nginx/default.conf.template), so the header is authoritative and not
+    client-spoofable; without it (direct ASGI access) fall back to the request
+    scheme. This must NOT be derived from ``ENVIRONMENT``: tying ``Secure`` to
+    production mode made production-over-plain-http silently drop every auth
+    cookie — browsers refuse Secure cookies over http — so login "succeeded"
+    and every reload bounced back to /login.
+    """
+    scheme = (forwarded_proto or url_scheme).split(",")[0].strip().lower()
+    return scheme == "https"
+
+
+def _cookies_secure(request: Request) -> bool:
+    return _transport_is_https(request.headers.get("x-forwarded-proto"), request.url.scheme)
+
+
+def _set_refresh_cookie(request: Request, response: Response, raw_token: str) -> None:
     settings = get_settings()
     response.set_cookie(
         key=auth_service.REFRESH_COOKIE_NAME,
         value=raw_token,
         httponly=True,
         samesite="strict",
-        secure=settings.cookies_secure,
+        secure=_cookies_secure(request),
         path=auth_service.REFRESH_COOKIE_PATH,
         max_age=settings.refresh_token_ttl,
     )
 
 
-def _clear_refresh_cookie(response: Response) -> None:
-    settings = get_settings()
+def _clear_refresh_cookie(request: Request, response: Response) -> None:
     response.delete_cookie(
         key=auth_service.REFRESH_COOKIE_NAME,
         path=auth_service.REFRESH_COOKIE_PATH,
         httponly=True,
         samesite="strict",
-        secure=settings.cookies_secure,
+        secure=_cookies_secure(request),
     )
 
 
@@ -97,7 +115,7 @@ async def login(
         user_agent=_user_agent(request),
         request=request,
     )
-    _set_refresh_cookie(response, issued.refresh_token)
+    _set_refresh_cookie(request, response, issued.refresh_token)
     return TokenOut(
         access_token=issued.access_token,
         expires_in=issued.expires_in,
@@ -116,7 +134,7 @@ async def refresh(
     if not raw_token:
         raise Unauthorized("Missing refresh token", code="REFRESH_MISSING")
     issued = await auth_service.refresh(db, raw_token=raw_token, request=request)
-    _set_refresh_cookie(response, issued.refresh_token)
+    _set_refresh_cookie(request, response, issued.refresh_token)
     return TokenOut(
         access_token=issued.access_token,
         expires_in=issued.expires_in,
@@ -128,7 +146,7 @@ async def refresh(
 async def logout(ctx: CurrentUser, db: DbSessionDep, response: Response, request: Request) -> None:
     """Revoke the current session and clear the refresh cookie."""
     await auth_service.logout(db, ctx=ctx, request=request)
-    _clear_refresh_cookie(response)
+    _clear_refresh_cookie(request, response)
 
 
 @router.get("/me", response_model=MeOut)

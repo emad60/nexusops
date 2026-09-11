@@ -77,9 +77,11 @@ function fillAndSubmit(email: string, password: string) {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  // AuthProvider probes /auth/me on mount.
+  // AuthProvider probes /auth/me on mount; the page probes /meta to decide
+  // whether the bootstrap Register tab is offered.
   mocks.apiGet.mockImplementation((path: string) => {
     if (path === "/auth/me") return Promise.resolve(ME);
+    if (path === "/meta") return Promise.resolve({ bootstrap_available: false });
     return Promise.reject(new Error(`unexpected GET ${path}`));
   });
 });
@@ -146,5 +148,85 @@ describe("LoginPage", () => {
       expect(screen.getAllByText(/Invalid email or password/)).toHaveLength(2);
     });
     expect(screen.getByRole("button", { name: /sign in/i })).toBeEnabled();
+  });
+
+  it("offers no register tab on a used instance", async () => {
+    await renderLogin();
+
+    await waitFor(() => expect(mocks.apiGet).toHaveBeenCalledWith("/meta"));
+    expect(screen.queryByRole("tab", { name: /register/i })).not.toBeInTheDocument();
+  });
+
+  it("shows the bootstrap register tab while the instance has no users", async () => {
+    mocks.apiGet.mockImplementation((path: string) => {
+      if (path === "/auth/me") return Promise.resolve(ME);
+      if (path === "/meta") return Promise.resolve({ bootstrap_available: true });
+      return Promise.reject(new Error(`unexpected GET ${path}`));
+    });
+    await renderLogin();
+
+    expect(await screen.findByRole("tab", { name: /register/i })).toBeInTheDocument();
+    // The sign-in form stays the default view until the tab is chosen.
+    expect(screen.getByRole("heading", { name: "Sign in" })).toBeInTheDocument();
+    expect(screen.queryByLabelText("Full name")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("tab", { name: /register/i }));
+
+    expect(screen.getByRole("heading", { name: /create the first account/i })).toBeInTheDocument();
+    expect(screen.getByLabelText("Full name")).toBeInTheDocument();
+    expect(screen.getByLabelText("Email")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /create account/i })).toBeEnabled();
+  });
+
+  it("registers the first owner, then signs in with the fresh credentials", async () => {
+    mocks.apiGet.mockImplementation((path: string) => {
+      if (path === "/auth/me") return Promise.resolve(ME);
+      if (path === "/meta") return Promise.resolve({ bootstrap_available: true });
+      return Promise.reject(new Error(`unexpected GET ${path}`));
+    });
+    mocks.apiPost.mockResolvedValue({ access_token: "tok-1", expires_in: 900, user: ME.user });
+    await renderLogin();
+
+    fireEvent.click(await screen.findByRole("tab", { name: /register/i }));
+    fireEvent.change(screen.getByLabelText("Full name"), { target: { value: "Root User" } });
+    fireEvent.change(screen.getByLabelText("Email"), { target: { value: "root@nexusops.io" } });
+    fireEvent.change(screen.getByLabelText("Password"), { target: { value: "hunter22" } });
+    fireEvent.click(screen.getByRole("button", { name: /create account/i }));
+
+    expect(await screen.findByText("Dashboard marker")).toBeInTheDocument();
+    expect(mocks.apiPost).toHaveBeenCalledWith("/auth/register", {
+      email: "root@nexusops.io",
+      password: "hunter22",
+      full_name: "Root User",
+    });
+    expect(mocks.apiPost).toHaveBeenCalledWith("/auth/login", {
+      email: "root@nexusops.io",
+      password: "hunter22",
+    });
+  });
+
+  it("surfaces bootstrap rejection (registration raced an owner) inline", async () => {
+    const { ApiError } = await import("../api/client");
+    mocks.apiGet.mockImplementation((path: string) => {
+      if (path === "/auth/me") return Promise.resolve(ME);
+      if (path === "/meta") return Promise.resolve({ bootstrap_available: true });
+      return Promise.reject(new Error(`unexpected GET ${path}`));
+    });
+    mocks.apiPost.mockRejectedValue(
+      new ApiError(409, "INVITATION_REQUIRED", "Registration requires an invitation"),
+    );
+    await renderLogin();
+
+    fireEvent.click(await screen.findByRole("tab", { name: /register/i }));
+    fireEvent.change(screen.getByLabelText("Full name"), { target: { value: "Latecomer" } });
+    fireEvent.change(screen.getByLabelText("Email"), { target: { value: "late@nexusops.io" } });
+    fireEvent.change(screen.getByLabelText("Password"), { target: { value: "hunter22" } });
+    fireEvent.click(screen.getByRole("button", { name: /create account/i }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "INVITATION_REQUIRED: Registration requires an invitation",
+    );
+    // The login call must not fire when registration itself failed.
+    expect(mocks.apiPost).toHaveBeenCalledTimes(1);
   });
 });

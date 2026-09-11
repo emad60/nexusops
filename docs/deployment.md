@@ -224,13 +224,15 @@ the `NEXUSOPS_*_PORT` host-port mappings.
 Grounded in `backend/app/core/config.py`, `backend/app/core/middleware.py`,
 `backend/app/main.py` and `backend/app/core/logging.py`:
 
-- **Refresh-token cookie gets `Secure`.** The refresh cookie (`nxo_rt`, scoped to
-  path `/api/v1/auth`) is always `HttpOnly; SameSite=Strict`
-  (`backend/app/api/v1/auth.py`, `backend/app/services/auth_service.py`); the
-  `Secure` flag is added only when `ENVIRONMENT=production`
-  (`Settings.cookies_secure`). **Consequence:** browsers refuse Secure cookies
-  over plain HTTP, so login breaks — production requires HTTPS (see
-  [TLS](#tls)).
+- **Refresh-token cookie gets `Secure` on https traffic.** The refresh cookie
+  (`nxo_rt`, scoped to path `/api/v1/auth`) is always
+  `HttpOnly; SameSite=Strict` (`backend/app/api/v1/auth.py`,
+  `backend/app/services/auth_service.py`); the `Secure` flag follows the
+  actual transport — `X-Forwarded-Proto`, which the nginx edge always
+  overwrites with its own scheme — not the `ENVIRONMENT` label. **Consequence:**
+  plain-HTTP access (including a laptop running `ENVIRONMENT=production`)
+  keeps working, and the flag flips on automatically once TLS terminates in
+  front of the edge (see [TLS](#tls)).
 - **HSTS header** `Strict-Transport-Security: max-age=63072000;
   includeSubDomains` is emitted by `SecurityHeadersMiddleware` in production only
   (alongside the always-on `Content-Security-Policy`, `X-Content-Type-Options`,

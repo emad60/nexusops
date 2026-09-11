@@ -10,6 +10,7 @@ from fastapi import APIRouter
 from app.api.deps import DbSessionDep, OptionalUser
 from app.core.config import get_settings
 from app.schemas.meta import EVENT_TYPES, MetaOut
+from app.services import auth_service
 
 meta_router = APIRouter(prefix="/meta", tags=["meta"])
 
@@ -22,6 +23,7 @@ async def get_meta(db: DbSessionDep, ctx: OptionalUser) -> MetaOut:
         environment=settings.environment,
         simulation_mode=settings.simulation_mode,
         event_types=list(EVENT_TYPES),
+        bootstrap_available=await auth_service.count_users(db) == 0,
     )
 
     if ctx is None:

@@ -100,11 +100,6 @@ class Settings(BaseSettings):
         return self.environment == "test"
 
     @property
-    def cookies_secure(self) -> bool:
-        """Secure flag for auth cookies (browsers refuse Secure cookies over http)."""
-        return self.is_production
-
-    @property
     def access_token_ttl(self) -> int:
         return self.access_token_ttl_minutes * 60
 

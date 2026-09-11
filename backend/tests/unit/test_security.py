@@ -243,3 +243,23 @@ def test_missing_required_claim_rejected() -> None:
     )
     with pytest.raises(Unauthorized):
         decode_access_token(token)
+
+
+def test_transport_is_https_decision() -> None:
+    """The Secure-cookie decision follows the wire, not the environment label.
+
+    Regression: production-over-plain-http used to mint Secure cookies, which
+    browsers silently drop over http — login "succeeded" and every reload
+    bounced back to /login. The edge always overwrites X-Forwarded-Proto, so
+    the flag must follow it (or the direct scheme when there is no edge).
+    """
+    from app.api.v1.auth import _transport_is_https
+
+    assert _transport_is_https(None, "http") is False
+    assert _transport_is_https(None, "https") is True
+    # The edge's header is authoritative over the direct scheme.
+    assert _transport_is_https("http", "https") is False
+    assert _transport_is_https("https", "http") is True
+    # Chained proxies and case noise.
+    assert _transport_is_https("HTTPS", "http") is True
+    assert _transport_is_https("https, http", "http") is True

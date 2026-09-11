@@ -50,6 +50,11 @@ class MetaOut(APIModel):
     environment: str
     simulation_mode: bool
     event_types: list[str] = Field(default_factory=list)
+    #: True while no user exists: the next registration bootstraps the Owner
+    #: superadmin, so the login page must offer account creation. Public by
+    #: necessity — an anonymous visitor learns the same by attempting
+    #: registration and distinguishing success from INVITATION_REQUIRED.
+    bootstrap_available: bool = False
     permissions: list[str] | None = None
     role: str | None = None
     is_superadmin: bool | None = None

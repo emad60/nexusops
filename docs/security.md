@@ -99,7 +99,7 @@ A three-lens adversarial review (exploit-oriented, correctness, hardening) over 
 full backend, frontend, nginx config, scripts, and agent produced 26 candidate
 findings; 20 were confirmed by adversarial verification. Severity split: **3 HIGH**,
 5 MEDIUM, 12 LOW. All 20 were fixed and covered by regression tests before this
-document was written; the full backend suite (366 tests, including the
+document was written; the full backend suite (368 tests, including the
 regression tests added since the audit) passes:
 
 | # | Severity | Finding | Fix |

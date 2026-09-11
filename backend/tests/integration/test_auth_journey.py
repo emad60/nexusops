@@ -243,3 +243,38 @@ async def test_locked_account_response_is_indistinguishable(client, owner):
     locked_error = assert_error_code(locked.json(), "INVALID_CREDENTIALS")
     assert locked_error["message"] == unknown_error["message"]
     assert locked_error["code"] == unknown_error["code"]
+
+
+async def test_refresh_cookie_secure_follows_transport(client):
+    """Regression: ``Secure`` must reflect the actual transport, not ENVIRONMENT.
+
+    Tying the flag to production mode made production-over-plain-http (this
+    compose stack's default shape) drop every auth cookie in the browser:
+    login returned 200 but the browser refused the Secure cookie, so the
+    silent refresh never worked and every reload bounced back to /login.
+    """
+    credentials, _body = await register_account(client)
+    payload = {"email": credentials["email"], "password": credentials["password"]}
+
+    http_login = await client.post(f"{API}/auth/login", json=payload)
+    assert http_login.status_code == 200, http_login.text
+    http_attrs = cookie_attributes(refresh_cookie_header(http_login))
+    assert "secure" not in http_attrs, "no Secure attribute over plain http"
+
+    https_login = await client.post(
+        f"{API}/auth/login", json=payload, headers={"X-Forwarded-Proto": "https"}
+    )
+    assert https_login.status_code == 200, https_login.text
+    https_attrs = cookie_attributes(refresh_cookie_header(https_login))
+    assert https_attrs.get("secure") == "", "Secure required when the edge reports https"
+
+
+async def test_meta_advertises_bootstrap_until_first_owner(client):
+    """The login page learns whether to offer account creation from /meta."""
+    fresh = (await client.get(f"{API}/meta")).json()["bootstrap_available"]
+    assert fresh is True, "empty database must advertise bootstrap"
+
+    await register_account(client)
+
+    used = (await client.get(f"{API}/meta")).json()["bootstrap_available"]
+    assert used is False, "bootstrap flag must drop once an owner exists"

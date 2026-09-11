@@ -17,7 +17,7 @@ NexusOps is delivered as a running, tested, audited system:
   (TypeScript, Vite, TanStack Query, custom design system — no component
   framework), stdlib-only agent, nginx edge. Eight services on one compose
   network; `make up` builds, boots, migrates and seeds with zero manual steps.
-- **Tests**: 366 backend pytest, 109 frontend vitest, and a 10-step Playwright
+- **Tests**: 368 backend pytest, 113 frontend vitest, and a 10-step Playwright
   journey that walks the real product loop — register → login → enroll a server
   → heartbeat ONLINE → monitor fails → incident opens → email delivered →
   monitor recovers → incident resolves → deploy succeeds → broken deploy fails
@@ -113,8 +113,8 @@ agents separate from the author; test suites were re-run after every fix wave.
 
 | Suite | Command | Result |
 | --- | --- | --- |
-| Backend (unit + integration) | `make test-backend` | **366 passed** (incl. security + E2E-defect regression tests) |
-| Frontend unit | `make test-frontend` | **109 passed** (23 files) |
+| Backend (unit + integration) | `make test-backend` | **368 passed** (incl. security + E2E-defect regression tests) |
+| Frontend unit | `make test-frontend` | **113 passed** (23 files) |
 | Playwright journey | `make e2e` | 10-step journey, green (see §5.3 for the defects it flushed out) |
 | Lint | `make lint` | ruff clean (147 files formatted); eslint clean |
 | Types | `make typecheck` | tsc clean; mypy 0 errors across 115 files (see §5.4) |
@@ -290,6 +290,27 @@ not test bugs:
   except tuple, so uvicorn printed a scary stack trace for what is a
   routine browser navigation. Harmless, but noise that would have buried a
   real error; the disconnect is now caught and the socket released quietly.
+- **Production over plain HTTP was unusable — the login bounce loop**: the
+  refresh cookie's `Secure` flag was tied to `ENVIRONMENT=production`
+  (`Settings.cookies_secure`), and browsers silently refuse Secure cookies
+  over plain HTTP. On the default http://localhost:8080 with production
+  settings, every login returned 200 but the session cookie never stuck, so
+  the silent refresh failed on the next boot and the SPA bounced back to
+  /login forever. The flag now follows the actual transport —
+  `X-Forwarded-Proto`, which the nginx edge always overwrites with its own
+  scheme (so it is not client-spoofable) — and flips on automatically once
+  TLS terminates in front of the edge. Regression-tested at both layers: a
+  pure decision function, and the real login route asserting `Secure`
+  appears exactly when the edge reports https.
+- **A fresh instance had no way to create its first user from the UI**: the
+  login page deliberately shipped no sign-up surface (registration is
+  invite-only once an owner exists) — but on an empty database the only
+  route to the bootstrap owner was a hand-rolled API call, and the E2E
+  suite's register branch pointed at a Register tab that did not exist (it
+  never ran, because the test stack was always seeded). `/meta` now
+  advertises `bootstrap_available` while no user exists, and the login page
+  grows a Register tab for exactly that window; the first account becomes
+  the Owner superadmin and is signed straight in.
 
 ### 5.4 Defects surfaced by driving mypy to zero (and fixed)
 
@@ -318,7 +339,7 @@ often means code that never ran:
   pointless `await` on a sync call, and ~80 typing-only corrections (no
   `# type: ignore` suppressions were added to hide real errors).
 
-The full backend suite (366 tests), ruff and mypy were re-run green after the
+The full backend suite (368 tests), ruff and mypy were re-run green after the
 pass; nothing was weakened to satisfy the type checker.
 
 ## 6. Known limitations (honest list)

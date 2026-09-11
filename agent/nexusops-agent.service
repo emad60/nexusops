@@ -1,0 +1,22 @@
+[Unit]
+Description=NexusOps monitoring agent
+Documentation=https://github.com/your-org/nexusops/blob/main/docs/agent.md
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/default/nexusops-agent
+ExecStart=/usr/bin/env python3 /usr/local/lib/nexusops-agent/nexusops_agent.py
+Restart=always
+RestartSec=10
+# Least privilege: read-only filesystem, only what metric collection needs.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+ReadOnlyPaths=/proc /sys
+SupplementaryGroups=docker
+
+[Install]
+WantedBy=multi-user.target

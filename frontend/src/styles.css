@@ -101,6 +101,12 @@ code, .mono { font-family: var(--font-mono); font-size: 12px; }
   color: var(--text-faint);
 }
 
+.nav-icon {
+  display: inline-flex;
+  flex-shrink: 0;
+}
+.nav-icon svg { display: block; }
+
 .nav-link {
   display: flex;
   align-items: center;
@@ -159,6 +165,10 @@ code, .mono { font-family: var(--font-mono); font-size: 12px; }
   padding: 16px;
 }
 .card + .card { margin-top: 14px; }
+/* Stacked-card spacing is for block flow only; inside grids the track gap
+   already spaces items, and the margin made the first card in a row render
+   14px taller than its neighbors (stretch fills the leftover). */
+.grid > .card + .card { margin-top: 0; }
 .card-title { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
 
 .grid { display: grid; gap: 14px; }

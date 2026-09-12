@@ -1,8 +1,8 @@
 # Deployment & Operations Guide
 
 How to run NexusOps in a production-shaped way: the compose topology, what happens
-on first boot, what to set before exposing it, TLS, backups, upgrades, scaling and
-monitoring the platform itself.
+on first boot, what to set before exposing it, TLS, client-IP resolution behind
+proxies, backups, upgrades, scaling and monitoring the platform itself.
 
 This guide describes the **default compose profile** (`docker-compose.yml`). The
 `docker-compose.dev.yml` overrides (hot reload, Vite on :5173) are development
@@ -19,7 +19,7 @@ docker compose up -d          # 8 services on one compose network ("nexusops")
 ```mermaid
 flowchart LR
     subgraph host["Host (published ports)"]
-        P8080[":8080"]
+        P8080["127.0.0.1:8080"]
         P5433["127.0.0.1:5433"]
         P6390["127.0.0.1:6390"]
         P8025["127.0.0.1:8025"]
@@ -66,11 +66,13 @@ Every service is defined in `docker-compose.yml`. The essentials per service:
 
 Port publishing:
 
-- **`:8080` → `nginx`** — the only service published on all interfaces. This is the
-  single entry point: UI, REST API (`/api/v1/...`) and the WebSocket hub
-  (`/api/v1/ws`, channels: `global | server-metrics | container-logs |
-  deployment-logs | incidents`, defined in `backend/app/core/channels.py`). Change
-  with `NEXUSOPS_HTTP_PORT`.
+- **`127.0.0.1:8080` → `nginx`** — the edge is loopback-bound
+  (`127.0.0.1:${NEXUSOPS_HTTP_PORT:-8080}:8080` in `docker-compose.yml`), so it is
+  not directly reachable from other machines; put a TLS-terminating proxy in front
+  of it ([TLS](#tls)). This is the single entry point: UI, REST API (`/api/v1/...`)
+  and the WebSocket hub (`/api/v1/ws`, channels: `global | server-metrics |
+  container-logs | deployment-logs | incidents`, defined in
+  `backend/app/core/channels.py`). Change with `NEXUSOPS_HTTP_PORT`.
 - **`postgres`, `redis`, `mailpit`** are bound to `127.0.0.1` only
   (`127.0.0.1:5433`, `127.0.0.1:6390`, `127.0.0.1:8025`). They are not reachable
   from other machines — keep it that way.
@@ -228,8 +230,10 @@ Grounded in `backend/app/core/config.py`, `backend/app/core/middleware.py`,
   (`nxo_rt`, scoped to path `/api/v1/auth`) is always
   `HttpOnly; SameSite=Strict` (`backend/app/api/v1/auth.py`,
   `backend/app/services/auth_service.py`); the `Secure` flag follows the
-  actual transport — `X-Forwarded-Proto`, which the nginx edge always
-  overwrites with its own scheme — not the `ENVIRONMENT` label. **Consequence:**
+  actual transport — `X-Forwarded-Proto`, which the edge takes from the outer
+  TLS terminator when one is present (passthrough map in
+  `nginx/default.conf.template`) and falls back to its own scheme on direct
+  access — not the `ENVIRONMENT` label. **Consequence:**
   plain-HTTP access (including a laptop running `ENVIRONMENT=production`)
   keeps working, and the flag flips on automatically once TLS terminates in
   front of the edge (see [TLS](#tls)).
@@ -283,7 +287,10 @@ server {
         proxy_pass http://127.0.0.1:8080;      # the repo's nginx edge
         proxy_http_version 1.1;
         proxy_set_header Host $host;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        # Stamp the client address at the trust boundary — OVERWRITE, don't
+        # append ($proxy_add_x_forwarded_for would pass client-injected XFF
+        # entries upstream). See "Client IP resolution" below.
+        proxy_set_header X-Forwarded-For $remote_addr;
         proxy_set_header X-Forwarded-Proto https;
         # WebSocket channels (server-metrics, container-logs, deployment-logs, ...)
         proxy_set_header Upgrade $http_upgrade;
@@ -325,6 +332,130 @@ services:
 
 You would also need to add the port-80 → HTTPS redirect and adjust the plain
 8080 listener. Until that work is done, Option A is the honest answer.
+
+---
+
+## Client IP resolution (sessions, audit, rate limits)
+
+Everything the platform records about *where a request came from* — session
+rows, audit entries, rate-limit buckets, access logs — passes through
+`resolve_client_ip()` in `backend/app/core/client_ip.py`. Behind chained
+proxies this is not trivial: `request.client.host` is always the **last hop's
+address** (a docker-network IP when the edge calls the API), and
+`X-Forwarded-For` is a chain of *claims* — every proxy appends what it saw,
+and any client can inject fake entries into the leftmost positions.
+
+### The trust model
+
+The resolver walks `X-Forwarded-For` **right-to-left**, skipping entries that
+fall inside `TRUSTED_PROXY_CIDRS` (default: loopback + RFC1918 private ranges,
+set via `.env`; see `backend/app/core/config.py`). The first entry it does
+**not** trust is the client address as stamped by the outermost proxy you
+control. If every entry is trusted — or the header is absent — it falls back
+to the TCP peer. The walk is bounded (`_MAX_FORWARDED_ENTRIES = 10`) so a
+hostile multi-thousand-entry header cannot burn CPU.
+
+For this to be truthful, two conditions must hold:
+
+1. **The outermost proxy you control must OVERWRITE `X-Forwarded-For`** at the
+   trust boundary — `proxy_set_header X-Forwarded-For $remote_addr;` — not
+   append to it. Appending (`$proxy_add_x_forwarded_for`) lets client-injected
+   entries ride the chain upstream. They would still be ignored by the
+   right-to-left walk (they sit leftmost of the outer proxy's stamp), but
+   overwriting removes them entirely and keeps the header bounded.
+2. **Nothing outside `TRUSTED_PROXY_CIDRS` may reach the API or the edge
+   directly.** A direct connection can present any `X-Forwarded-For` it likes,
+   and the resolver would take it at face value. The edge's loopback binding
+   (`127.0.0.1:${NEXUSOPS_HTTP_PORT:-8080}`) is what enforces this — keep it.
+
+### Production chain: Cloudflare → host nginx → edge
+
+```mermaid
+flowchart LR
+    B["Browser<br/>78.x.x.x"] -->|"HTTPS"| CF["Cloudflare<br/>sets CF-Connecting-IP"]
+    CF -->|"HTTPS"| HN["Host nginx :443<br/>real_ip → $remote_addr = 78.x.x.x<br/>X-Forwarded-For: 78.x.x.x (overwrite)"]
+    HN -->|"127.0.0.1:8090"| E["Edge (compose)<br/>X-Forwarded-For: 78.x.x.x, 172.23.0.1 (append)"]
+    E -->|"api:8000"| A["API<br/>walk: 172.23.0.1 trusted → 78.x.x.x untrusted → client"]
+```
+
+Step by step, with the spoofed header case:
+
+1. **Cloudflare** terminates public TLS and sets `CF-Connecting-IP` to the
+   real visitor address. It appends the visitor to any client-supplied
+   `X-Forwarded-For` — so a browser sending `X-Forwarded-For: 6.6.6.6` arrives
+   at the host as `6.6.6.6, 78.x.x.x` from a Cloudflare edge IP.
+2. **The host nginx vhost** remaps `$remote_addr` from `CF-Connecting-IP`, but
+   only for connections *from Cloudflare's ranges* (a non-CF visitor keeps
+   their socket address). It then **overwrites** the forwarded header:
+   `proxy_set_header X-Forwarded-For $remote_addr;` — the spoofed `6.6.6.6`
+   dies here.
+3. **The edge** appends its own peer with `$proxy_add_x_forwarded_for`
+   (`nginx/default.conf.template`): the API receives
+   `78.x.x.x, 172.23.0.1`.
+4. **The API** walks right-to-left: `172.23.0.1` is trusted, `78.x.x.x` is
+   not → the client address is `78.x.x.x`. Session rows, audit entries and
+   the Redis rate-limit keys (`nx:rl:{name}:{ip}`) all carry the real
+   address.
+
+The deployed host-vhost pattern (this is what makes step 2 work):
+
+```nginx
+# Cloudflare is the only legitimate direct client of this vhost:
+include /etc/nginx/cloudflare-ips.conf;   # one `set_real_ip_from <cidr>;` per CF range
+real_ip_header CF-Connecting-IP;
+real_ip_recursive on;
+
+location / {
+    proxy_pass http://127.0.0.1:8090;     # the compose edge (NEXUSOPS_HTTP_PORT)
+    proxy_set_header X-Forwarded-For $remote_addr;   # stamp, don't append
+    ...
+}
+```
+
+Cloudflare's IP ranges change occasionally. Regenerate the include file with:
+
+```bash
+{ curl -s https://www.cloudflare.com/ips-v4; curl -s https://www.cloudflare.com/ips-v6; } \
+    | awk 'NF {print "set_real_ip_from " $1 ";"}' > /etc/nginx/cloudflare-ips.conf
+nginx -t && systemctl reload nginx   # only reload on a clean test
+```
+
+If a new Cloudflare range is missing from the file, visitors from it are not
+remapped — the host forwards a Cloudflare edge IP instead of the visitor
+(`real_ip_recursive on` cannot fix a missing `set_real_ip_from`).
+
+### Topologies and their fidelity
+
+| Topology | Session/audit/rate-limit IP | Why |
+|---|---|---|
+| Direct browser → published edge (default compose) | **Unreliable** | Docker's published-port proxy SNATs every client to the bridge gateway (`172.x.0.1`). That address is trusted, so the resolver falls back to the TCP peer — the edge's own container IP. All clients collapse into one bucket. |
+| Outer proxy → edge (TLS Option A, no Cloudflare) | Real client IP | The outer proxy stamps `X-Forwarded-For $remote_addr` at the trust boundary (sample above). |
+| Cloudflare → host nginx → edge (deployed) | Real client IP | Full chain described above. |
+
+**Honest limitation of the default topology:** per-client IPs are only
+meaningful once a proxy outside the containers stamps the header. If you must
+serve direct-to-edge (e.g. plain LAN use), expect every request to record the
+edge's docker address, and expect all clients to share one rate-limit bucket —
+another reason the edge is loopback-bound by default.
+
+### Verifying the resolution
+
+The rate-limit Redis keys double as an oracle — the bucket suffix is the
+resolved client address:
+
+```bash
+docker compose exec redis redis-cli --scan --pattern 'nx:rl:auth:*'
+# → nx:rl:auth:78.137.68.154    (a real public IP: working)
+# → nx:rl:auth:172.23.0.1       (a docker address: chain not stamped — see above)
+```
+
+Regression tests pin the behaviour: `backend/tests/unit/test_client_ip.py`
+(resolver walk, spoofing, malformed entries) and
+`test_login_records_forwarded_client_ip_in_session` /
+`test_login_ignores_spoofed_forwarded_entries` in
+`backend/tests/integration/test_auth_journey.py` (end-to-end through the auth
+flow). Sessions recorded before the chain was stamped keep their historical
+(proxy-hop) addresses; new logins record the real one.
 
 ---
 

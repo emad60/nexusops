@@ -1,6 +1,24 @@
 import { useEffect, useState } from "react";
 import { NavLink, Outlet, useLocation } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
+import {
+  Activity,
+  ArrowLeftRight,
+  Bell,
+  Boxes,
+  Container,
+  FolderKanban,
+  KeyRound,
+  KeySquare,
+  LayoutDashboard,
+  MonitorSmartphone,
+  Rocket,
+  ScrollText,
+  Server,
+  TriangleAlert,
+  Users,
+  type LucideIcon,
+} from "lucide-react";
 import { useAuth } from "../auth/AuthContext";
 import { apiGet } from "../api/client";
 import { useEventStream } from "../hooks/useEventStream";
@@ -14,7 +32,19 @@ interface MetaInfo {
   simulation_mode?: boolean;
 }
 
-function navItem(path: string, label: string, icon: string, badge?: number) {
+/**
+ * Sidebar navigation icon sizing: every tab shares one LucideIcon rendering
+ * (16px box, 1.75 stroke) so the whole rail reads as a single icon family.
+ */
+function NavIcon({ icon: Icon }: { icon: LucideIcon }) {
+  return (
+    <span aria-hidden className="nav-icon">
+      <Icon size={16} strokeWidth={1.75} />
+    </span>
+  );
+}
+
+function navItem(path: string, label: string, icon: LucideIcon, badge?: number) {
   return (
     <NavLink
       to={path}
@@ -22,7 +52,7 @@ function navItem(path: string, label: string, icon: string, badge?: number) {
       className={({ isActive }) => `nav-link ${isActive ? "active" : ""}`}
     >
       <span className="flex gap-8">
-        <span aria-hidden>{icon}</span>
+        <NavIcon icon={icon} />
         <span className="nav-label-text">{label}</span>
       </span>
       {badge ? <span className="count">{badge > 99 ? "99+" : badge}</span> : null}
@@ -77,17 +107,17 @@ export function Layout() {
         </div>
 
         <div className="nav-group-label">Overview</div>
-        {navItem("/", "Dashboard", "▦")}
-        {navItem("/events", "Events", "⇄")}
+        {navItem("/", "Dashboard", LayoutDashboard)}
+        {navItem("/events", "Events", ArrowLeftRight)}
 
         <div className="nav-group-label">Infrastructure</div>
-        {hasPermission("server.read") && navItem("/servers", "Servers", "▣")}
-        {hasPermission("container.read") && navItem("/containers", "Containers", "▤")}
-        {hasPermission("container.read") && navItem("/docker-hosts", "Docker hosts", "◍")}
-        {hasPermission("project.read") && navItem("/projects", "Projects", "❏")}
+        {hasPermission("server.read") && navItem("/servers", "Servers", Server)}
+        {hasPermission("container.read") && navItem("/containers", "Containers", Container)}
+        {hasPermission("container.read") && navItem("/docker-hosts", "Docker hosts", Boxes)}
+        {hasPermission("project.read") && navItem("/projects", "Projects", FolderKanban)}
 
         <div className="nav-group-label">Observability</div>
-        {hasPermission("monitor.read") && navItem("/monitors", "Monitors", "◉")}
+        {hasPermission("monitor.read") && navItem("/monitors", "Monitors", Activity)}
         {hasPermission("monitor.read") && (
           <NavLink
             key={incidentTick}
@@ -96,20 +126,20 @@ export function Layout() {
             className={({ isActive }) => `nav-link ${isActive ? "active" : ""}`}
           >
             <span className="flex gap-8">
-              <span aria-hidden>⚠</span>
+              <NavIcon icon={TriangleAlert} />
               <span className="nav-label-text">Incidents</span>
             </span>
           </NavLink>
         )}
-        {navItem("/alerts", "Alerts", "◆", unread?.count ?? 0)}
-        {hasPermission("deployment.read") && navItem("/deployments", "Deployments", "⇪")}
-        {hasPermission("audit.read") && navItem("/audit-logs", "Audit log", "☰")}
-        {hasPermission("secret.read") && navItem("/secrets", "Secrets", "🔑")}
+        {navItem("/alerts", "Alerts", Bell, unread?.count ?? 0)}
+        {hasPermission("deployment.read") && navItem("/deployments", "Deployments", Rocket)}
+        {hasPermission("audit.read") && navItem("/audit-logs", "Audit log", ScrollText)}
+        {hasPermission("secret.read") && navItem("/secrets", "Secrets", KeyRound)}
 
         <div className="nav-group-label">Settings</div>
-        {hasPermission("user.read") && navItem("/settings/users", "Users & roles", "👥")}
-        {navItem("/settings/api-keys", "API keys", "⚿")}
-        {navItem("/settings/sessions", "Sessions", "💻")}
+        {hasPermission("user.read") && navItem("/settings/users", "Users & roles", Users)}
+        {navItem("/settings/api-keys", "API keys", KeySquare)}
+        {navItem("/settings/sessions", "Sessions", MonitorSmartphone)}
 
         {meta?.simulation_mode ? (
           <div className="simulation-badge" title="Simulated infrastructure — no real hosts are contacted">

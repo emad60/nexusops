@@ -132,6 +132,5 @@ export function useEventStream(
     };
     // Re-establish the whole connection (with fresh auth) whenever the
     // subscription set changes or a new access token lands.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [signature]);
 }

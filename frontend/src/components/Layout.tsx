@@ -10,6 +10,10 @@ interface UnreadCount {
   count: number;
 }
 
+interface MetaInfo {
+  simulation_mode?: boolean;
+}
+
 function navItem(path: string, label: string, icon: string, badge?: number) {
   return (
     <NavLink
@@ -38,6 +42,13 @@ export function Layout() {
     queryFn: () => apiGet<UnreadCount>("/alerts/unread-count"),
     staleTime: 15_000,
     refetchInterval: 60_000,
+  });
+  // The simulation badge must reflect the runtime instance, not a build-time
+  // guess — share the dashboard's ["meta"] cache so both read one request.
+  const { data: meta } = useQuery({
+    queryKey: ["meta"],
+    queryFn: ({ signal }) => apiGet<MetaInfo>("/meta", undefined, signal),
+    staleTime: 5 * 60_000,
   });
   useEventStream([{ channel: "incidents" }], (frame) => {
     if (frame.type === "event") setIncidentTick((t) => t + 1);
@@ -100,9 +111,11 @@ export function Layout() {
         {navItem("/settings/api-keys", "API keys", "⚿")}
         {navItem("/settings/sessions", "Sessions", "💻")}
 
-        <div className="simulation-badge" title="Simulated infrastructure — no real hosts are contacted">
-          SIMULATION MODE
-        </div>
+        {meta?.simulation_mode ? (
+          <div className="simulation-badge" title="Simulated infrastructure — no real hosts are contacted">
+            SIMULATION MODE
+          </div>
+        ) : null}
       </aside>
 
       <div className="main-col">

@@ -8,6 +8,17 @@ map $http_upgrade $connection_upgrade {
     ''      close;
 }
 
+# Chained-proxy topology: when this edge sits behind another TLS-terminating
+# proxy (host nginx / Cloudflare in production), honor the scheme the OUTER
+# proxy recorded instead of this loopback hop's plain http — the Secure flag
+# on auth cookies follows it. Direct access sends no header and falls back to
+# $scheme, so the standalone edge (development) is unchanged. The outer proxy
+# always overwrites the header, so a browser cannot spoof it end-to-end.
+map $http_x_forwarded_proto $nx_fwd_proto {
+    ''      $scheme;
+    default $http_x_forwarded_proto;
+}
+
 # Docker's embedded DNS. Upstreams are resolved at REQUEST time (valid=10s
 # cache): a static hostname in proxy_pass is resolved once at config load and
 # cached forever, so any `compose up -d` that recreates api/frontend hands out
@@ -38,7 +49,7 @@ server {
         proxy_http_version 1.1;
         proxy_set_header Host $host;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Proto $nx_fwd_proto;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection $connection_upgrade;
         proxy_read_timeout 3600s;
@@ -57,7 +68,10 @@ server {
         proxy_http_version 1.1;
         proxy_set_header Host $host;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Proto $nx_fwd_proto;
+        # Upgrade headers here too: vite's HMR websocket rides this route in dev.
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
     }
 }
 

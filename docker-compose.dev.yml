@@ -35,5 +35,10 @@ services:
       - "${NEXUSOPS_VITE_PORT:-5173}:5173"
 
   nginx:
+    # Same edge template as production; only the web upstream differs (vite
+    # listens on 5173, not 8080). Mounting the real template keeps this file
+    # from drifting — dev.conf used to be referenced here but never existed.
+    environment:
+      WEB_UPSTREAM: frontend:5173
     volumes:
-      - ./nginx/dev.conf:/etc/nginx/templates/default.conf.template:ro
+      - ./nginx/default.conf.template:/etc/nginx/templates/default.conf.template:ro

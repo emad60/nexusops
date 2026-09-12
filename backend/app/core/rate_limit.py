@@ -13,6 +13,7 @@ from collections.abc import Awaitable, Callable
 
 from fastapi import Request
 
+from app.core.client_ip import resolve_client_ip
 from app.core.errors import RateLimited
 from app.core.logging import get_logger
 from app.core.redis_client import get_redis
@@ -27,13 +28,14 @@ _MEMORY_MAX_KEYS = 10_000
 
 
 def client_ip(request: Request) -> str:
-    """Best-effort client IP; honours X-Forwarded-For from trusted proxies."""
-    forwarded = request.headers.get("x-forwarded-for")
-    if forwarded:
-        # Rightmost entry is added by our own nginx; leftmost is spoofable,
-        # so use the last hop value.
-        return forwarded.split(",")[-1].strip()
-    return request.client.host if request.client else "unknown"
+    """Best-effort client IP; honours X-Forwarded-For from trusted proxies.
+
+    Delegates to the chain-aware resolver — the naive "rightmost entry" read
+    is wrong behind more than one proxy hop (e.g. Cloudflare → host nginx →
+    edge): the rightmost entry is then the edge's docker-network peer, which
+    would collapse every client into one rate-limit bucket.
+    """
+    return resolve_client_ip(request)
 
 
 def _memory_count_and_ttl(key: str, window_seconds: int) -> tuple[int, int]:

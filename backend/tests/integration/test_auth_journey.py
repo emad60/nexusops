@@ -278,3 +278,46 @@ async def test_meta_advertises_bootstrap_until_first_owner(client):
 
     used = (await client.get(f"{API}/meta")).json()["bootstrap_available"]
     assert used is False, "bootstrap flag must drop once an owner exists"
+
+
+async def test_login_records_forwarded_client_ip_in_session(client, owner):
+    """Sessions must carry the real client address, not the proxy hop's peer.
+
+    Behind Cloudflare → host nginx → edge, ``request.client.host`` is a docker
+    network address; X-Forwarded-For (stamped by the outer proxy we control)
+    is the only truthful source. Regression: every session used to show the
+    docker gateway IP, and the login rate limiter collapsed into one bucket.
+    """
+    payload = {"email": owner["credentials"]["email"], "password": owner["credentials"]["password"]}
+    login = await client.post(
+        f"{API}/auth/login",
+        json=payload,
+        headers={"X-Forwarded-For": "203.0.113.7, 172.23.0.1"},
+    )
+    assert login.status_code == 200, login.text
+
+    sessions = await client.get(
+        f"{API}/sessions", headers=bearer(login.json()["access_token"])
+    )
+    assert sessions.status_code == 200, sessions.text
+    ips = [item["ip_address"] for item in sessions.json()["items"]]
+    assert "203.0.113.7" in ips, f"forwarded client IP not recorded: {ips}"
+    assert "172.23.0.1" not in ips, "proxy hop's docker address must never be recorded"
+
+
+async def test_login_ignores_spoofed_forwarded_entries(client, owner):
+    """Client-injected leftmost XFF entries must not poison the session IP."""
+    payload = {"email": owner["credentials"]["email"], "password": owner["credentials"]["password"]}
+    login = await client.post(
+        f"{API}/auth/login",
+        json=payload,
+        headers={"X-Forwarded-For": "6.6.6.6, 198.51.100.9, 172.23.0.1"},
+    )
+    assert login.status_code == 200, login.text
+
+    sessions = await client.get(
+        f"{API}/sessions", headers=bearer(login.json()["access_token"])
+    )
+    ips = [item["ip_address"] for item in sessions.json()["items"]]
+    assert "198.51.100.9" in ips, f"outermost trusted stamp should win: {ips}"
+    assert "6.6.6.6" not in ips, "spoofed leftmost entry must be ignored"

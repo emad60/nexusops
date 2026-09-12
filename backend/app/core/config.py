@@ -60,6 +60,11 @@ class Settings(BaseSettings):
     refresh_grace_seconds: int = Field(default=30, ge=0, le=3600)
     encryption_key: str
     cors_origins: str = "http://localhost:8080,http://localhost:5173"
+    # Reverse proxies whose X-Forwarded-For entries are trusted when resolving
+    # the real client address (see app/core/client_ip.py for the trust model).
+    # Default: loopback + RFC1918 — the compose edge and docker gateway land
+    # here without configuration.
+    trusted_proxy_cidrs: str = "127.0.0.0/8,::1/128,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
     login_max_attempts: int = Field(default=5, ge=1, le=50)
     login_lockout_seconds: int = Field(default=900, ge=10)
     session_idle_timeout_days: int = Field(default=30, ge=1)

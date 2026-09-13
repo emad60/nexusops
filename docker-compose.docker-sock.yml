@@ -1,17 +1,27 @@
 # Opt-in override: give the backend direct access to the host docker daemon.
 #
-#   COMPOSE_FILE=docker-compose.yml:docker-compose.docker-sock.yml docker compose up -d
+#   echo "DOCKER_GID=$(stat -c %g /var/run/docker.sock)" >> .env
+#   echo 'COMPOSE_FILE=docker-compose.yml:docker-compose.docker-sock.yml' >> .env
+#   docker compose up -d
 #
 # Mounting /var/run/docker.sock makes unix:///var/run/docker.sock a usable
 # docker-host endpoint (docker hosts → edit the agent-backed host's endpoint),
 # which enables container controls and the log collector for agent-mirrored
 # containers on this machine. The socket is root-equivalent on the host — only
 # enable this on a host you trust the platform to control.
+#
+# The socket is group-writable by the host's docker group, whose GID differs
+# per host; DOCKER_GID (required) is added as a supplementary group so the
+# non-root container user can talk to the daemon.
 services:
   api:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+    group_add:
+      - "${DOCKER_GID:?set DOCKER_GID to the host docker group: stat -c %g /var/run/docker.sock}"
 
   worker:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+    group_add:
+      - "${DOCKER_GID:?set DOCKER_GID to the host docker group: stat -c %g /var/run/docker.sock}"

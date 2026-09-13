@@ -631,6 +631,9 @@ it with the committed override and the usual commands keep working:
 ```bash
 # in the server's .env (compose reads COMPOSE_FILE from there):
 COMPOSE_FILE=docker-compose.yml:docker-compose.docker-sock.yml
+# the socket is group-writable by the host's docker group; its GID differs
+# per host and is required by the override:
+DOCKER_GID=$(stat -c %g /var/run/docker.sock)
 
 docker compose up -d   # recreates api + worker with the socket mounted
 ```

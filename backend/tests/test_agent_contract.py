@@ -16,7 +16,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-
 from app.models.enums import ContainerHealth
 from app.schemas.agent import AgentContainerIn, AgentHeartbeatIn
 
@@ -50,7 +49,7 @@ def test_build_heartbeat_matches_schema(agent: Any, monkeypatch: pytest.MonkeyPa
     _patch_stats(monkeypatch, agent)
     monkeypatch.setattr(agent, "collect_containers", lambda max_inspect=10: [])
 
-    payload, prev_cpu = agent.build_heartbeat(None)
+    payload, prev_cpu, _prev_container_cpu = agent.build_heartbeat(None)
 
     assert prev_cpu == (100, 10)
     # extra="forbid" on the schema makes this reject any key the agent adds
@@ -87,12 +86,55 @@ def test_build_heartbeat_containers_match_schema(
         ],
     )
 
-    payload, _ = agent.build_heartbeat((100, 10))
+    payload, _cpu, _container_cpu = agent.build_heartbeat((100, 10))
 
     parsed = AgentHeartbeatIn(**payload)
     assert [c.status for c in parsed.containers] == ["RUNNING", "EXITED"]
     assert parsed.containers[0].health == ContainerHealth.HEALTHY
     assert parsed.containers[1].health is None
+
+
+def test_collect_container_stats_matches_schema(
+    agent: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One-shot docker stats reduce to cpu/mem/limit fields the schema accepts,
+    with CPU appearing only from the second cycle (no prior sample to diff)."""
+    sample: dict[str, Any] = {
+        "cpu_stats": {
+            "cpu_usage": {"total_usage": 2_000_000},
+            "system_cpu_usage": 10_000_000_000,
+            "online_cpus": 2,
+        },
+        "memory_stats": {
+            "usage": 300_000_000,
+            "limit": 8_000_000_000,
+            "stats": {"inactive_file": 50_000_000},
+        },
+    }
+
+    def fake_stats(method: str, path: str, timeout: float = 5.0) -> tuple[int, Any]:
+        if "stats" in path:
+            return 200, sample
+        raise AssertionError(f"unexpected request {method} {path}")
+
+    monkeypatch.setattr(agent, "_docker_request", fake_stats)
+    cid = "e" * 64
+
+    updates, prev = agent.collect_container_stats([cid], {})
+
+    # First sighting: memory present, CPU absent (nothing to diff against).
+    assert "cpu_percent" not in updates[cid]
+    assert updates[cid]["mem_used_mb"] > 0
+    assert updates[cid]["mem_limit_mb"] > 0
+    AgentContainerIn(container_id=cid, name="x", status="RUNNING", **updates[cid])
+
+    # Second cycle with both counters advanced: a real percentage comes out.
+    sample["cpu_stats"]["cpu_usage"]["total_usage"] = 3_000_000
+    sample["cpu_stats"]["system_cpu_usage"] = 11_000_000_000
+    updates2, _ = agent.collect_container_stats([cid], prev)
+    assert updates2[cid]["cpu_percent"] is not None
+    assert 0 < updates2[cid]["cpu_percent"] <= 200  # 2 online cpus → ≤ 200%
+    AgentContainerIn(container_id=cid, name="x", status="RUNNING", **updates2[cid])
 
 
 def test_collect_containers_shape_matches_schema(
@@ -145,5 +187,5 @@ def test_collect_containers_shape_matches_schema(
     published = [e for e in entries if e["container_id"].startswith("c")]
     assert published[0]["restart_count"] == 1
     assert published[0]["health"] == "HEALTHY"
-    no_health = [e for e in entries if e["container_id"].startswith("d")][0]
+    no_health = next(e for e in entries if e["container_id"].startswith("d"))
     assert no_health["health"] is None

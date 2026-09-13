@@ -620,6 +620,35 @@ Access log event (`AccessLogMiddleware` in `backend/app/core/middleware.py`):
   `[nexusops] Invalid configuration:` in `docker compose logs api` with exit
   code 2.
 
+### Giving the backend the host docker socket (self-monitoring)
+
+The agent reports host metrics and container *state* for the machine it runs
+on, but container **logs** and container **controls** (restart/stop/remove)
+come from the backend talking to a docker daemon directly. On the host that
+runs the stack itself, that daemon is reachable over the unix socket — mount
+it with the committed override and the usual commands keep working:
+
+```bash
+# in the server's .env (compose reads COMPOSE_FILE from there):
+COMPOSE_FILE=docker-compose.yml:docker-compose.docker-sock.yml
+
+docker compose up -d   # recreates api + worker with the socket mounted
+```
+
+Then point the agent-backed docker host at the socket: **Docker hosts → the
+`agent-<server>` host → edit → endpoint `unix:///var/run/docker.sock`** (or
+`PATCH /docker-hosts/{id}`). Editing the endpoint *adopts* the existing
+agent-mirrored container rows instead of creating a second host's worth of
+duplicates, and the next maintenance cycle starts collecting recent logs and
+serving container controls.
+
+Security: `/var/run/docker.sock` is root-equivalent on the host — mounting it
+into `api`/`worker` means anyone with the platform's `container.manage`
+permission effectively has root on that host. That is the product's intended
+capability, but only enable the override on hosts you trust it with. Keep the
+socket out of containers you don't (the override is opt-in for exactly that
+reason).
+
 ---
 
 ## Development profile (for completeness)

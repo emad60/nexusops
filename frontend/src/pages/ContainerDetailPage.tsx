@@ -87,6 +87,11 @@ export default function ContainerDetailPage() {
   const [tailPaused, setTailPaused] = useState(false);
   const [removeOpen, setRemoveOpen] = useState(false);
   const [confirmName, setConfirmName] = useState("");
+  // Logs load on demand: the history fetch and the live stream stay idle
+  // until "Show logs" — a container you merely inspect should not pull a
+  // page of rows and open a websocket as a side effect.
+  const [logsEnabled, setLogsEnabled] = useState(false);
+  const [tailSize, setTailSize] = useState(LOG_HISTORY_LIMIT);
   const liveCounter = useRef(0);
   const logScrollRef = useRef<HTMLDivElement | null>(null);
 
@@ -98,14 +103,14 @@ export default function ContainerDetailPage() {
   });
 
   const logsQuery = useQuery({
-    queryKey: ["container-logs", containerId],
+    queryKey: ["container-logs", containerId, tailSize],
     queryFn: ({ signal }) =>
       apiGet<CursorPage<LogEntryRow>>(
         `/containers/${containerId}/logs`,
-        { limit: LOG_HISTORY_LIMIT },
+        { limit: tailSize },
         signal,
       ),
-    enabled: containerId !== undefined,
+    enabled: containerId !== undefined && logsEnabled,
   });
 
   const appendLiveLine = useCallback((frame: WsFrame) => {
@@ -131,7 +136,7 @@ export default function ContainerDetailPage() {
   }, []);
 
   useEventStream(
-    containerId
+    containerId && logsEnabled
       ? [{ channel: "container-logs", params: { container_id: containerId } }]
       : [],
     appendLiveLine,
@@ -454,23 +459,55 @@ export default function ContainerDetailPage() {
         <div className="card-title">
           <h2>Logs</h2>
           <div className="flex gap-8">
-            <span className="small muted" aria-live="polite">
-              {tailPaused ? "paused — scrolling locked" : "following"}
-            </span>
-            <button
-              type="button"
-              className="btn ghost sm"
-              onClick={() => {
-                setLiveLines([]);
-                setHistoryCleared(true);
-              }}
-            >
-              Clear
-            </button>
+            {logsEnabled ? (
+              <>
+                <select
+                  className="input"
+                  aria-label="Number of log lines to show"
+                  value={tailSize}
+                  onChange={(event) => {
+                    setTailSize(Number(event.target.value));
+                    // A new tail size means fresh history.
+                    setHistoryCleared(false);
+                  }}
+                >
+                  <option value={20}>last 20</option>
+                  <option value={50}>last 50</option>
+                  <option value={100}>last 100</option>
+                </select>
+                <span className="small muted" aria-live="polite">
+                  {tailPaused ? "paused — scrolling locked" : "following"}
+                </span>
+                <button
+                  type="button"
+                  className="btn ghost sm"
+                  onClick={() => {
+                    setLiveLines([]);
+                    setHistoryCleared(true);
+                  }}
+                >
+                  Clear
+                </button>
+              </>
+            ) : (
+              <button
+                type="button"
+                className="btn primary sm"
+                onClick={() => setLogsEnabled(true)}
+              >
+                Show logs
+              </button>
+            )}
           </div>
         </div>
         {logsQuery.isError ? (
           <ErrorBlock error={logsQuery.error} />
+        ) : !logsEnabled ? (
+          <EmptyState
+            icon="≡"
+            title="Logs are not loaded"
+            hint="Load recent output and follow live lines on demand."
+          />
         ) : displayLines.length === 0 ? (
           logsQuery.isPending ? (
             <LoadingBlock label="Loading logs…" />

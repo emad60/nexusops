@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type FormEvent } from "react";
 import {
   keepPreviousData,
   useMutation,
@@ -7,13 +7,13 @@ import {
   useQueryClient,
 } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
-import { apiGet, apiPost, ApiError } from "../api/client";
+import { apiGet, apiPatch, apiPost, ApiError } from "../api/client";
 import type { DockerHostOut, Page, ServerSummary } from "../api/types";
 import { Pagination } from "../components/Pagination";
-import { EmptyState, ErrorBlock, StatusBadge } from "../components/ui";
+import { EmptyState, ErrorBlock, Modal, StatusBadge } from "../components/ui";
 import { TableSkeleton } from "../components/Skeleton";
 import { InfoHint } from "../components/InfoHint";
-import { SearchInput } from "../components/form";
+import { CheckboxField, SearchInput, TextField } from "../components/form";
 import { useToast } from "../components/toast";
 import type { ContainerRow } from "./ContainerListPage";
 
@@ -35,6 +35,14 @@ const PAGE_SIZE = 20;
 
 const HOST_STATUS_OPTIONS = ["AVAILABLE", "UNAVAILABLE", "UNKNOWN"];
 
+interface HostEditForm {
+  name: string;
+  endpointUrl: string;
+  tlsVerify: boolean;
+}
+
+const EMPTY_EDIT: HostEditForm = { name: "", endpointUrl: "", tlsVerify: true };
+
 /** Absolute UTC stamp — deterministic regardless of the viewer's timezone. */
 function formatUtc(iso: string | null | undefined): string {
   if (!iso) return "—";
@@ -49,6 +57,10 @@ export default function DockerHostsPage() {
   const [offset, setOffset] = useState(0);
   const [status, setStatus] = useState("");
   const [search, setSearch] = useState("");
+  const [editTarget, setEditTarget] = useState<DockerHostOut | null>(null);
+  const [editForm, setEditForm] = useState<HostEditForm>(EMPTY_EDIT);
+  const [editErrors, setEditErrors] = useState<Partial<Record<"name" | "endpointUrl", string>>>({});
+  const [editFormError, setEditFormError] = useState<string | null>(null);
 
   const hostsQuery = useQuery({
     queryKey: ["docker-hosts", { offset, status, search }],
@@ -122,6 +134,49 @@ export default function DockerHostsPage() {
       );
     },
   });
+
+  const openEdit = (host: DockerHostOut) => {
+    setEditTarget(host);
+    setEditForm({ name: host.name, endpointUrl: host.endpoint_url, tlsVerify: host.tls_verify });
+    setEditErrors({});
+    setEditFormError(null);
+  };
+
+  const updateHost = useMutation({
+    mutationFn: (input: { id: string; form: HostEditForm }) =>
+      apiPatch<DockerHostOut>(`/docker-hosts/${input.id}`, {
+        name: input.form.name.trim(),
+        endpoint_url: input.form.endpointUrl.trim(),
+        tls_verify: input.form.tlsVerify,
+      }),
+    onSuccess: (updated) => {
+      notify(`Host ${updated.name} updated`, "success");
+      void queryClient.invalidateQueries({ queryKey: ["docker-hosts"] });
+      setEditTarget(null);
+    },
+    onError: (error) => {
+      setEditFormError(
+        error instanceof ApiError ? `${error.code}: ${error.message}` : "Update request failed",
+      );
+    },
+  });
+
+  const submitEdit = (event: FormEvent) => {
+    event.preventDefault();
+    if (!editTarget) return;
+    const next: Partial<Record<"name" | "endpointUrl", string>> = {};
+    if (!editForm.name.trim()) next.name = "Name is required.";
+    const endpoint = editForm.endpointUrl.trim();
+    if (endpoint && /\s/.test(endpoint)) {
+      next.endpointUrl = "Endpoint must not contain whitespace.";
+    } else if (endpoint && !/^[a-z][a-z0-9+.-]*:\/\//i.test(endpoint)) {
+      next.endpointUrl = "Use a scheme like unix:// or tcp:// — or leave empty for agent-inherited.";
+    }
+    setEditErrors(next);
+    setEditFormError(null);
+    if (Object.keys(next).length > 0) return;
+    updateHost.mutate({ id: editTarget.id, form: editForm });
+  };
 
   return (
     <div>
@@ -263,15 +318,25 @@ export default function DockerHostsPage() {
                           )}
                         </td>
                         <td>
-                          <button
-                            type="button"
-                            className="btn sm"
-                            aria-label={`Ping host ${host.name}`}
-                            disabled={pingMutation.isPending && pingMutation.variables === host.id}
-                            onClick={() => pingMutation.mutate(host.id)}
-                          >
-                            Ping
-                          </button>
+                          <div className="flex gap-8">
+                            <button
+                              type="button"
+                              className="btn sm"
+                              aria-label={`Edit host ${host.name}`}
+                              onClick={() => openEdit(host)}
+                            >
+                              Edit
+                            </button>
+                            <button
+                              type="button"
+                              className="btn sm"
+                              aria-label={`Ping host ${host.name}`}
+                              disabled={pingMutation.isPending && pingMutation.variables === host.id}
+                              onClick={() => pingMutation.mutate(host.id)}
+                            >
+                              Ping
+                            </button>
+                          </div>
                         </td>
                       </tr>
                     );
@@ -288,6 +353,48 @@ export default function DockerHostsPage() {
           </>
         )}
       </div>
+
+      <Modal
+        open={editTarget !== null}
+        title={editTarget ? `Edit host ${editTarget.name}` : "Edit host"}
+        onClose={() => setEditTarget(null)}
+      >
+        <form noValidate onSubmit={submitEdit}>
+          <TextField
+            id="host-edit-name"
+            label="Name"
+            required
+            error={editErrors.name ?? null}
+            value={editForm.name}
+            onChange={(event) => setEditForm({ ...editForm, name: event.target.value })}
+          />
+          <TextField
+            id="host-edit-endpoint"
+            label="Endpoint"
+            mono
+            error={editErrors.endpointUrl ?? null}
+            hint="unix:///var/run/docker.sock, tcp://host:2375 — leave empty for agent-inherited."
+            placeholder="unix:///var/run/docker.sock"
+            value={editForm.endpointUrl}
+            onChange={(event) => setEditForm({ ...editForm, endpointUrl: event.target.value })}
+          />
+          <CheckboxField
+            id="host-edit-tls"
+            label="Verify the daemon's TLS certificate"
+            checked={editForm.tlsVerify}
+            onChange={(event) => setEditForm({ ...editForm, tlsVerify: event.target.checked })}
+          />
+          {editFormError ? <div className="form-error">{editFormError}</div> : null}
+          <div className="modal-actions">
+            <button type="button" className="btn" onClick={() => setEditTarget(null)}>
+              Cancel
+            </button>
+            <button type="submit" className="btn primary" disabled={updateHost.isPending}>
+              {updateHost.isPending ? "Saving…" : "Save changes"}
+            </button>
+          </div>
+        </form>
+      </Modal>
     </div>
   );
 }

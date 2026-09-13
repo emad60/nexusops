@@ -517,6 +517,8 @@ async def upsert_containers(
             row.cpu_percent = entry.cpu_percent
         if entry.mem_used_mb is not None:
             row.mem_used_mb = entry.mem_used_mb
+        if entry.mem_limit_mb is not None:
+            row.mem_limit_mb = entry.mem_limit_mb
         row.observed_at = now
         row.simulated = True
         row.server_id = server.id

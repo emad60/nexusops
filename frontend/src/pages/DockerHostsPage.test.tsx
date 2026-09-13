@@ -19,7 +19,7 @@ vi.mock("../api/client", () => {
   return { apiGet: vi.fn(), apiPost: vi.fn(), apiPatch: vi.fn(), apiDelete: vi.fn(), ApiError };
 });
 
-import { apiGet, apiPost, ApiError } from "../api/client";
+import { apiGet, apiPatch, apiPost, ApiError } from "../api/client";
 
 const host: DockerHostOut = {
   id: "h-1",
@@ -124,6 +124,7 @@ function mockCountApi() {
 beforeEach(() => {
   vi.mocked(apiGet).mockReset();
   vi.mocked(apiPost).mockReset();
+  vi.mocked(apiPatch).mockReset();
 });
 
 describe("DockerHostsPage", () => {
@@ -143,6 +144,54 @@ describe("DockerHostsPage", () => {
       "href",
       "/servers/srv-1",
     );
+  });
+
+  it("edits a host through the dialog and PATCHes name, endpoint and TLS flag", async () => {
+    mockCountApi();
+    vi.mocked(apiPatch).mockResolvedValue({ ...host, name: "edge docker" });
+    renderHosts();
+    await screen.findByRole("table");
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit host docker on build-01" }));
+
+    const dialog = screen.getByRole("dialog");
+    // The required marker "*" sits inside the label after the text ("Name *").
+    fireEvent.change(within(dialog).getByLabelText(/^Name/), {
+      target: { value: "edge docker" },
+    });
+    fireEvent.change(within(dialog).getByLabelText("Endpoint"), {
+      target: { value: "unix:///var/run/docker.sock" },
+    });
+    fireEvent.click(within(dialog).getByLabelText("Verify the daemon's TLS certificate"));
+    fireEvent.click(within(dialog).getByRole("button", { name: "Save changes" }));
+
+    await waitFor(() =>
+      expect(apiPatch).toHaveBeenCalledWith("/docker-hosts/h-1", {
+        name: "edge docker",
+        endpoint_url: "unix:///var/run/docker.sock",
+        tls_verify: false,
+      }),
+    );
+    expect(await screen.findByText("Host edge docker updated")).toBeInTheDocument();
+  });
+
+  it("rejects a malformed endpoint client-side without PATCHing", async () => {
+    mockCountApi();
+    renderHosts();
+    await screen.findByRole("table");
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit host docker on build-01" }));
+    const dialog = screen.getByRole("dialog");
+    // No scheme (and no whitespace, which would trip the other rule first).
+    fireEvent.change(within(dialog).getByLabelText("Endpoint"), {
+      target: { value: "not-a-url" },
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Save changes" }));
+
+    expect(
+      await screen.findByText(/Use a scheme like unix:\/\/ or tcp:\/\//),
+    ).toBeInTheDocument();
+    expect(apiPatch).not.toHaveBeenCalled();
   });
 
   it("shows the empty state when no hosts are registered", async () => {

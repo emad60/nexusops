@@ -296,9 +296,7 @@ async def test_login_records_forwarded_client_ip_in_session(client, owner):
     )
     assert login.status_code == 200, login.text
 
-    sessions = await client.get(
-        f"{API}/sessions", headers=bearer(login.json()["access_token"])
-    )
+    sessions = await client.get(f"{API}/sessions", headers=bearer(login.json()["access_token"]))
     assert sessions.status_code == 200, sessions.text
     ips = [item["ip_address"] for item in sessions.json()["items"]]
     assert "203.0.113.7" in ips, f"forwarded client IP not recorded: {ips}"
@@ -315,9 +313,7 @@ async def test_login_ignores_spoofed_forwarded_entries(client, owner):
     )
     assert login.status_code == 200, login.text
 
-    sessions = await client.get(
-        f"{API}/sessions", headers=bearer(login.json()["access_token"])
-    )
+    sessions = await client.get(f"{API}/sessions", headers=bearer(login.json()["access_token"]))
     ips = [item["ip_address"] for item in sessions.json()["items"]]
     assert "198.51.100.9" in ips, f"outermost trusted stamp should win: {ips}"
     assert "6.6.6.6" not in ips, "spoofed leftmost entry must be ignored"

@@ -139,6 +139,11 @@ describe("ContainerDetailPage", () => {
 
   it("shows the log history oldest-first", async () => {
     renderDetail();
+    await screen.findByRole("heading", { name: "Logs" });
+
+    // Logs load on demand — history appears only after "Show logs".
+    expect(screen.queryByRole("log")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Show logs" }));
 
     const viewer = await screen.findByRole("log");
     const first = within(viewer).getByText("listening on 8080");
@@ -146,8 +151,30 @@ describe("ContainerDetailPage", () => {
     expect(first.compareDocumentPosition(second) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
+  it("respects the tail-size selector when loading history", async () => {
+    renderDetail();
+    await screen.findByRole("heading", { name: "Logs" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Show logs" }));
+    await screen.findByRole("log");
+
+    fireEvent.change(screen.getByLabelText("Number of log lines to show"), {
+      target: { value: "20" },
+    });
+
+    await waitFor(() =>
+      expect(apiGet).toHaveBeenCalledWith(
+        `/containers/${CID}/logs`,
+        { limit: 20 },
+        expect.anything(),
+      ),
+    );
+  });
+
   it("appends live log frames from the container-logs stream", async () => {
     renderDetail();
+    await screen.findByRole("heading", { name: "Logs" });
+    fireEvent.click(screen.getByRole("button", { name: "Show logs" }));
     await screen.findByRole("log");
 
     expect(useEventStream).toHaveBeenCalledWith(

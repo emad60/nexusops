@@ -52,6 +52,7 @@ class AgentContainerIn(APIModel):
     restart_count: int = Field(default=0, ge=0, le=1_000_000)
     cpu_percent: float | None = Field(default=None, ge=0, le=10_000)
     mem_used_mb: float | None = Field(default=None, ge=0)
+    mem_limit_mb: float | None = Field(default=None, ge=0)
 
     @field_validator("status")
     @classmethod

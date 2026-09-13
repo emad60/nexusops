@@ -1,0 +1,17 @@
+# Opt-in override: give the backend direct access to the host docker daemon.
+#
+#   COMPOSE_FILE=docker-compose.yml:docker-compose.docker-sock.yml docker compose up -d
+#
+# Mounting /var/run/docker.sock makes unix:///var/run/docker.sock a usable
+# docker-host endpoint (docker hosts → edit the agent-backed host's endpoint),
+# which enables container controls and the log collector for agent-mirrored
+# containers on this machine. The socket is root-equivalent on the host — only
+# enable this on a host you trust the platform to control.
+services:
+  api:
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+
+  worker:
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock

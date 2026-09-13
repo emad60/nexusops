@@ -18,6 +18,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    func,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -224,8 +225,11 @@ class SystemEvent(Base):
     )
 
     id: Mapped[uuid.UUID] = uuid_pk()
+    # func.now(), not the string "now()": a quoted string default is folded to
+    # a constant at CREATE TABLE time, freezing every future row's timestamp
+    # at the moment the table was created (exactly what bit production).
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default="now()", nullable=False
+        DateTime(timezone=True), server_default=func.now(), nullable=False
     )
     type: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     level: Mapped[EventLevel] = mapped_column(String(12), default=EventLevel.INFO, nullable=False)
@@ -252,8 +256,9 @@ class AuditLog(Base):
     )
 
     id: Mapped[uuid.UUID] = uuid_pk()
+    # func.now(), not the string "now()" — see SystemEvent.created_at.
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default="now()", nullable=False
+        DateTime(timezone=True), server_default=func.now(), nullable=False
     )
     actor_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True

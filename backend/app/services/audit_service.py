@@ -9,6 +9,7 @@ from fastapi import Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import AuthContext
+from app.core.client_ip import resolve_client_ip
 from app.core.logging import get_logger, redact_mapping
 from app.models import AuditLog
 from app.models.enums import AuditResult
@@ -34,9 +35,11 @@ async def record(
     ip = ""
     user_agent = ""
     if request is not None:
-        ip = getattr(request.state, "client_ip", "") or (
-            request.client.host if request.client else ""
-        )
+        # state.client_ip is set by the auth dependencies; anonymous routes
+        # (login, register, refresh) never pass through them, so fall back to
+        # the chain-aware resolver. request.client.host would record the edge
+        # proxy's docker-network address, not the real client.
+        ip = getattr(request.state, "client_ip", "") or resolve_client_ip(request)
         user_agent = (request.headers.get("user-agent") or "")[:400]
 
     entry = AuditLog(

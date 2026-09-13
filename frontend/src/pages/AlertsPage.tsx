@@ -15,6 +15,7 @@ import {
   Modal,
   StatusBadge,
 } from "../components/ui";
+import { SelectField, TextAreaField, TextField } from "../components/form";
 import { useToast } from "../components/toast";
 import { useAuth } from "../auth/AuthContext";
 import { formatDateTime, formatRelative, truncate } from "../lib/format";
@@ -88,7 +89,14 @@ function ChannelDialog({
   const [url, setUrl] = useState("");
   const [recipients, setRecipients] = useState("");
   const [events, setEvents] = useState(channel?.events.join(", ") ?? "");
-  const [formError, setFormError] = useState("");
+  // Per-field errors come from client-side validation; formError carries server
+  // errors only, so an API failure can never masquerade as a field problem.
+  const [fieldErrors, setFieldErrors] = useState<{
+    name?: string;
+    url?: string;
+    recipients?: string;
+  }>({});
+  const [formError, setFormError] = useState<string | null>(null);
 
   const isEdit = channel != null;
 
@@ -131,19 +139,21 @@ function ChannelDialog({
   });
 
   const submit = () => {
-    if (!name.trim()) {
-      setFormError("Name is required.");
-      return;
+    const next: typeof fieldErrors = {};
+    if (!name.trim()) next.name = "Name is required.";
+    // In edit mode the config may be left empty — the PATCH then omits it and
+    // the stored (never-echoed) target is kept, as the placeholder promises.
+    if (!isEdit) {
+      if (type === "WEBHOOK" && !url.trim()) {
+        next.url = "A webhook URL is required.";
+      }
+      if (type === "EMAIL" && parseRecipients(recipients).length === 0) {
+        next.recipients = "At least one recipient email is required.";
+      }
     }
-    if (type === "WEBHOOK" && !url.trim()) {
-      setFormError("A webhook URL is required.");
-      return;
-    }
-    if (type === "EMAIL" && parseRecipients(recipients).length === 0) {
-      setFormError("At least one recipient email is required.");
-      return;
-    }
-    setFormError("");
+    setFieldErrors(next);
+    setFormError(null);
+    if (Object.keys(next).length > 0) return;
     saveMutation.mutate();
   };
 
@@ -159,75 +169,62 @@ function ChannelDialog({
           submit();
         }}
       >
-        <div className="field">
-          <label htmlFor="channel-name">Name</label>
-          <input
-            id="channel-name"
-            className="input"
-            value={name}
-            onChange={(event) => setName(event.target.value)}
-            placeholder="Ops webhook"
-          />
-        </div>
+        <TextField
+          id="channel-name"
+          label="Name"
+          required
+          error={fieldErrors.name ?? null}
+          value={name}
+          onChange={(event) => setName(event.target.value)}
+          placeholder="Ops webhook"
+        />
         {!isEdit ? (
-          <div className="field">
-            <label htmlFor="channel-type">Type</label>
-            <select
-              id="channel-type"
-              className="input"
-              value={type}
-              onChange={(event) => setType(event.target.value as ChannelOut["type"])}
-            >
-              <option value="WEBHOOK">WEBHOOK</option>
-              <option value="EMAIL">EMAIL</option>
-            </select>
-          </div>
+          <SelectField
+            id="channel-type"
+            label="Type"
+            value={type}
+            onChange={(event) => setType(event.target.value as ChannelOut["type"])}
+          >
+            <option value="WEBHOOK">WEBHOOK</option>
+            <option value="EMAIL">EMAIL</option>
+          </SelectField>
         ) : null}
         {type === "WEBHOOK" ? (
-          <div className="field">
-            <label htmlFor="channel-url">Webhook URL</label>
-            <input
-              id="channel-url"
-              className="input"
-              value={url}
-              onChange={(event) => setUrl(event.target.value)}
-              placeholder={
-                isEdit && channel
-                  ? `Current target: ${channel.display_target || "hidden"} — leave empty to keep`
-                  : "https://hooks.example.com/nexusops"
-              }
-            />
-            <span className="small faint">
-              Stored encrypted and never echoed back — only a masked target is shown.
-            </span>
-          </div>
-        ) : (
-          <div className="field">
-            <label htmlFor="channel-recipients">Recipients</label>
-            <textarea
-              id="channel-recipients"
-              className="input"
-              rows={2}
-              value={recipients}
-              onChange={(event) => setRecipients(event.target.value)}
-              placeholder="ops@example.com, oncall@example.com"
-            />
-          </div>
-        )}
-        <div className="field">
-          <label htmlFor="channel-events">Event subscriptions</label>
-          <input
-            id="channel-events"
-            className="input"
-            value={events}
-            onChange={(event) => setEvents(event.target.value)}
-            placeholder="INCIDENT_OPENED, MONITOR_DOWN"
+          <TextField
+            id="channel-url"
+            label="Webhook URL"
+            required={!isEdit}
+            error={fieldErrors.url ?? null}
+            hint="Stored encrypted and never echoed back — only a masked target is shown. Leave empty when editing to keep the current target."
+            value={url}
+            onChange={(event) => setUrl(event.target.value)}
+            placeholder={
+              isEdit && channel
+                ? `Current target: ${channel.display_target || "hidden"} — leave empty to keep`
+                : "https://hooks.example.com/nexusops"
+            }
           />
-          <span className="small faint">
-            Comma-separated event types (e.g. INCIDENT_OPENED, MONITOR_DOWN). Leave empty to
-            subscribe to all events.
-          </span>
-        </div>
+        ) : (
+          <TextAreaField
+            id="channel-recipients"
+            label="Recipients"
+            required={!isEdit}
+            error={fieldErrors.recipients ?? null}
+            rows={2}
+            showCount={false}
+            value={recipients}
+            onChange={(event) => setRecipients(event.target.value)}
+            placeholder="ops@example.com, oncall@example.com"
+          />
+        )}
+        <TextField
+          id="channel-events"
+          label="Event subscriptions"
+          hint="Comma-separated event types (e.g. INCIDENT_OPENED, MONITOR_DOWN). Leave empty to subscribe to all events."
+          value={events}
+          onChange={(event) => setEvents(event.target.value)}
+          placeholder="INCIDENT_OPENED, MONITOR_DOWN"
+        />
         {formError ? <div className="form-error">{formError}</div> : null}
         <div className="modal-actions">
           <button type="button" className="btn" onClick={onClose}>

@@ -11,7 +11,8 @@ import { useState, type FormEvent } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { apiGet } from "../api/client";
 import type { AuditEntry, Page } from "../api/types";
-import { EmptyState, ErrorBlock, LoadingBlock, StatusBadge } from "../components/ui";
+import { EmptyState, ErrorBlock, StatusBadge } from "../components/ui";
+import { TableSkeleton } from "../components/Skeleton";
 import { Pagination } from "../components/Pagination";
 
 const LIMIT = 25;
@@ -186,7 +187,7 @@ export default function AuditLogPage() {
       </form>
 
       {query.isPending ? (
-        <LoadingBlock label="Loading audit entries…" />
+        <TableSkeleton label="Loading audit entries" rows={10} cols={5} />
       ) : query.isError ? (
         <ErrorBlock error={query.error} />
       ) : rows.length === 0 ? (
@@ -195,7 +196,7 @@ export default function AuditLogPage() {
           hint="Audit entries are written automatically on every privileged action."
         />
       ) : (
-        <div className="table-wrap">
+        <div className="table-wrap sticky-first">
           <table className="data">
             <thead>
               <tr>

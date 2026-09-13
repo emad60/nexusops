@@ -2,7 +2,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi, type Mock } from "vitest";
-import { ApiError, apiGet, apiPost } from "../api/client";
+import { ApiError, apiGet, apiPatch, apiPost } from "../api/client";
 import type { AlertOut, ChannelOut, CursorPage, DeliveryOut, Page } from "../api/types";
 import { ToastProvider } from "../components/toast";
 import AlertsPage from "./AlertsPage";
@@ -30,6 +30,7 @@ vi.mock("../auth/AuthContext", () => ({
 
 const mockedGet = apiGet as unknown as Mock;
 const mockedPost = apiPost as unknown as Mock;
+const mockedPatch = apiPatch as unknown as Mock;
 
 const unreadAlert: AlertOut = {
   id: "a1",
@@ -170,8 +171,8 @@ describe("AlertsPage", () => {
     fireEvent.click(await screen.findByRole("button", { name: "+ New channel" }));
 
     const dialog = screen.getByRole("dialog", { name: "New notification channel" });
-    fireEvent.change(within(dialog).getByLabelText("Name"), { target: { value: "Pagerduty" } });
-    fireEvent.change(within(dialog).getByLabelText("Webhook URL"), {
+    fireEvent.change(within(dialog).getByLabelText("Name *"), { target: { value: "Pagerduty" } });
+    fireEvent.change(within(dialog).getByLabelText("Webhook URL *"), {
       target: { value: "https://hooks.example.com/pd" },
     });
     fireEvent.click(within(dialog).getByRole("button", { name: "Create channel" }));
@@ -183,6 +184,26 @@ describe("AlertsPage", () => {
         events: [],
         enabled: true,
         config: { url: "https://hooks.example.com/pd" },
+      });
+    });
+  });
+
+  it("keeps the stored target when editing a channel with an empty config", async () => {
+    mockedPatch.mockResolvedValue(webhookChannel);
+
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "Edit" }));
+
+    const dialog = screen.getByRole("dialog", { name: "Edit channel Ops webhook" });
+    // Name is prefilled, the stored target is never echoed — leave the config
+    // field empty and save: the PATCH must omit `config` so nothing changes.
+    fireEvent.click(within(dialog).getByRole("button", { name: "Save changes" }));
+
+    await waitFor(() => {
+      expect(mockedPatch).toHaveBeenCalledWith("/notification-channels/ch-1", {
+        name: "Ops webhook",
+        enabled: true,
+        events: ["INCIDENT_OPENED", "MONITOR_DOWN"],
       });
     });
   });

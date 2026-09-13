@@ -11,7 +11,8 @@ import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { apiGet } from "../api/client";
 import type { CursorPage, EventItem, Page } from "../api/types";
-import { EmptyState, ErrorBlock, LoadingBlock, StatusBadge } from "../components/ui";
+import { EmptyState, ErrorBlock, StatusBadge } from "../components/ui";
+import { TableSkeleton } from "../components/Skeleton";
 import { Pagination } from "../components/Pagination";
 import { useEventStream, type WsFrame } from "../hooks/useEventStream";
 
@@ -250,7 +251,7 @@ export default function EventsPage() {
       </div>
 
       {eventsQuery.isPending ? (
-        <LoadingBlock label="Loading events…" />
+        <TableSkeleton label="Loading events" rows={10} cols={5} />
       ) : eventsQuery.isError ? (
         <ErrorBlock error={eventsQuery.error} />
       ) : displayed.length === 0 ? (
@@ -259,7 +260,7 @@ export default function EventsPage() {
           hint="Try widening the time range or clearing a filter."
         />
       ) : (
-        <div className="table-wrap">
+        <div className="table-wrap sticky-first">
           <table className="data">
             <thead>
               <tr>

@@ -15,6 +15,7 @@ import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { ApiError, apiGet, apiPost } from "../api/client";
 import { useAuth } from "../auth/AuthContext";
+import { PasswordField, TextField } from "../components/form";
 import { useToast } from "../components/toast";
 
 /** Split-screen layout, scoped with the nx-login- prefix and design tokens. */
@@ -212,71 +213,37 @@ export default function LoginPage() {
                 (superadmin).
               </p>
               <form onSubmit={handleSubmit} noValidate aria-label="Create account">
-                <div className="field">
-                  <label htmlFor="register-name">Full name</label>
-                  <input
-                    id="register-name"
-                    className="input"
-                    type="text"
-                    autoComplete="name"
-                    autoFocus
-                    value={fullName}
-                    onChange={(event) => setFullName(event.target.value)}
-                    aria-invalid={fieldErrors.fullName ? true : undefined}
-                    aria-describedby={fieldErrors.fullName ? "register-name-error" : undefined}
-                    disabled={submitting}
-                  />
-                  {fieldErrors.fullName ? (
-                    <p id="register-name-error" className="small" style={{ color: "var(--err)" }}>
-                      {fieldErrors.fullName}
-                    </p>
-                  ) : null}
-                </div>
-
-                <div className="field">
-                  <label htmlFor="register-email">Email</label>
-                  <input
-                    id="register-email"
-                    className="input"
-                    type="email"
-                    autoComplete="email"
-                    value={email}
-                    onChange={(event) => setEmail(event.target.value)}
-                    aria-invalid={fieldErrors.email ? true : undefined}
-                    aria-describedby={fieldErrors.email ? "register-email-error" : undefined}
-                    disabled={submitting}
-                  />
-                  {fieldErrors.email ? (
-                    <p id="register-email-error" className="small" style={{ color: "var(--err)" }}>
-                      {fieldErrors.email}
-                    </p>
-                  ) : null}
-                </div>
-
-                <div className="field">
-                  <label htmlFor="register-password">Password</label>
-                  <input
-                    id="register-password"
-                    className="input"
-                    type="password"
-                    autoComplete="new-password"
-                    value={password}
-                    onChange={(event) => setPassword(event.target.value)}
-                    aria-invalid={fieldErrors.password ? true : undefined}
-                    aria-describedby={
-                      fieldErrors.password ? "register-password-error" : "register-password-hint"
-                    }
-                    disabled={submitting}
-                  />
-                  <p id="register-password-hint" className="small faint">
-                    At least 10 characters, with letters and numbers.
-                  </p>
-                  {fieldErrors.password ? (
-                    <p id="register-password-error" className="small" style={{ color: "var(--err)" }}>
-                      {fieldErrors.password}
-                    </p>
-                  ) : null}
-                </div>
+                <TextField
+                  id="register-name"
+                  label="Full name"
+                  type="text"
+                  autoComplete="name"
+                  autoFocus
+                  error={fieldErrors.fullName}
+                  value={fullName}
+                  onChange={(event) => setFullName(event.target.value)}
+                  disabled={submitting}
+                />
+                <TextField
+                  id="register-email"
+                  label="Email"
+                  type="email"
+                  autoComplete="email"
+                  error={fieldErrors.email}
+                  value={email}
+                  onChange={(event) => setEmail(event.target.value)}
+                  disabled={submitting}
+                />
+                <PasswordField
+                  id="register-password"
+                  label="Password"
+                  autoComplete="new-password"
+                  hint="At least 10 characters, with letters and numbers."
+                  error={fieldErrors.password}
+                  value={password}
+                  onChange={(event) => setPassword(event.target.value)}
+                  disabled={submitting}
+                />
 
                 {formError ? (
                   <div className="form-error" role="alert">
@@ -307,46 +274,26 @@ export default function LoginPage() {
               <h2>Sign in</h2>
               <p className="muted small mb-16">Use your NexusOps account credentials.</p>
               <form onSubmit={handleSubmit} noValidate aria-label="Sign in">
-                <div className="field">
-                  <label htmlFor="login-email">Email</label>
-                  <input
-                    id="login-email"
-                    className="input"
-                    type="email"
-                    autoComplete="email"
-                    autoFocus
-                    value={email}
-                    onChange={(event) => setEmail(event.target.value)}
-                    aria-invalid={fieldErrors.email ? true : undefined}
-                    aria-describedby={fieldErrors.email ? "login-email-error" : undefined}
-                    disabled={submitting}
-                  />
-                  {fieldErrors.email ? (
-                    <p id="login-email-error" className="small" style={{ color: "var(--err)" }}>
-                      {fieldErrors.email}
-                    </p>
-                  ) : null}
-                </div>
-
-                <div className="field">
-                  <label htmlFor="login-password">Password</label>
-                  <input
-                    id="login-password"
-                    className="input"
-                    type="password"
-                    autoComplete="current-password"
-                    value={password}
-                    onChange={(event) => setPassword(event.target.value)}
-                    aria-invalid={fieldErrors.password ? true : undefined}
-                    aria-describedby={fieldErrors.password ? "login-password-error" : undefined}
-                    disabled={submitting}
-                  />
-                  {fieldErrors.password ? (
-                    <p id="login-password-error" className="small" style={{ color: "var(--err)" }}>
-                      {fieldErrors.password}
-                    </p>
-                  ) : null}
-                </div>
+                <TextField
+                  id="login-email"
+                  label="Email"
+                  type="email"
+                  autoComplete="email"
+                  autoFocus
+                  error={fieldErrors.email}
+                  value={email}
+                  onChange={(event) => setEmail(event.target.value)}
+                  disabled={submitting}
+                />
+                <PasswordField
+                  id="login-password"
+                  label="Password"
+                  autoComplete="current-password"
+                  error={fieldErrors.password}
+                  value={password}
+                  onChange={(event) => setPassword(event.target.value)}
+                  disabled={submitting}
+                />
 
                 {formError ? (
                   <div className="form-error" role="alert">

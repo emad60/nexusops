@@ -90,8 +90,8 @@ describe("SecretsPage", () => {
     fireEvent.click(screen.getByRole("button", { name: "New secret" }));
     expect(await screen.findByRole("dialog")).toHaveTextContent(/never be viewed/i);
 
-    fireEvent.change(screen.getByLabelText("Key"), { target: { value: "STRIPE_API_KEY" } });
-    fireEvent.change(screen.getByLabelText("Value"), { target: { value: "hunter2" } });
+    fireEvent.change(screen.getByLabelText("Key *"), { target: { value: "STRIPE_API_KEY" } });
+    fireEvent.change(screen.getByLabelText("Value *"), { target: { value: "hunter2" } });
     fireEvent.click(screen.getByRole("button", { name: "Create secret" }));
 
     await waitFor(() =>
@@ -108,8 +108,8 @@ describe("SecretsPage", () => {
     await screen.findByText("DB_PASSWORD");
 
     fireEvent.click(screen.getByRole("button", { name: "New secret" }));
-    fireEvent.change(await screen.findByLabelText("Key"), { target: { value: "lowercase_key" } });
-    fireEvent.change(screen.getByLabelText("Value"), { target: { value: "hunter2" } });
+    fireEvent.change(await screen.findByLabelText("Key *"), { target: { value: "lowercase_key" } });
+    fireEvent.change(screen.getByLabelText("Value *"), { target: { value: "hunter2" } });
     fireEvent.click(screen.getByRole("button", { name: "Create secret" }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent(/UPPERCASE/i);
@@ -122,8 +122,8 @@ describe("SecretsPage", () => {
     await screen.findByText("DB_PASSWORD");
 
     fireEvent.click(screen.getByRole("button", { name: "New secret" }));
-    fireEvent.change(await screen.findByLabelText("Key"), { target: { value: "DB_PASSWORD" } });
-    fireEvent.change(screen.getByLabelText("Value"), { target: { value: "hunter2" } });
+    fireEvent.change(await screen.findByLabelText("Key *"), { target: { value: "DB_PASSWORD" } });
+    fireEvent.change(screen.getByLabelText("Value *"), { target: { value: "hunter2" } });
     fireEvent.click(screen.getByRole("button", { name: "Create secret" }));
 
     expect(

@@ -12,6 +12,15 @@ import { useAuth } from "../auth/AuthContext";
 import { EmptyState, ErrorBlock, LoadingBlock, Modal, StatusBadge, TagChip } from "../components/ui";
 import { Pagination } from "../components/Pagination";
 import { LineChart, type ChartSeries } from "../components/LineChart";
+import { InfoHint } from "../components/InfoHint";
+import {
+  buildServerPayload,
+  ServerFormFields,
+  validateServerForm,
+  type ServerFormErrors,
+  type ServerFormValues,
+  type ServerPayload,
+} from "../components/ServerForm";
 import { useToast } from "../components/toast";
 import { useEventStream } from "../hooks/useEventStream";
 import {
@@ -69,39 +78,6 @@ interface CurrentMetrics {
   disk_percent: number | null;
 }
 
-interface ServerFormValues {
-  name: string;
-  hostname: string;
-  ip_address: string;
-  os_name: string;
-  os_version: string;
-  arch: string;
-  environment: string;
-  location: string;
-  description: string;
-  heartbeat_interval_seconds: string;
-  offline_after_seconds: string;
-  tags: string;
-  simulated: boolean;
-}
-
-/** Partial payload for PATCH /servers/{id} (mirrors the backend ServerUpdate schema). */
-interface ServerUpdatePayload {
-  name?: string;
-  hostname?: string;
-  ip_address?: string | null;
-  os_name?: string;
-  os_version?: string;
-  arch?: string;
-  environment?: string;
-  location?: string;
-  description?: string;
-  heartbeat_interval_seconds?: number;
-  offline_after_seconds?: number | null;
-  tags?: string[];
-  simulated?: boolean;
-}
-
 function errorMessage(error: unknown): string {
   if (error instanceof ApiError) return `${error.code}: ${error.message}`;
   if (error instanceof Error) return error.message;
@@ -129,50 +105,6 @@ function initialValues(server: ServerDetail): ServerFormValues {
       server.offline_after_seconds == null ? "" : String(server.offline_after_seconds),
     tags: server.tags.map((tag) => tag.name).join(", "),
     simulated: server.simulated,
-  };
-}
-
-function buildUpdatePayload(values: ServerFormValues): ServerUpdatePayload | string {
-  const name = values.name.trim();
-  const hostname = values.hostname.trim();
-  if (!name) return "Name is required.";
-  if (!hostname) return "Hostname is required.";
-
-  const intervalRaw = values.heartbeat_interval_seconds.trim();
-  let interval = 30;
-  if (intervalRaw) {
-    interval = Number(intervalRaw);
-    if (!Number.isFinite(interval) || interval < 5 || interval > 3600) {
-      return "Heartbeat interval must be between 5 and 3600 seconds.";
-    }
-  }
-
-  const offlineRaw = values.offline_after_seconds.trim();
-  let offlineAfter: number | null = null;
-  if (offlineRaw) {
-    offlineAfter = Number(offlineRaw);
-    if (!Number.isFinite(offlineAfter) || offlineAfter <= 0) {
-      return "Offline threshold must be a positive number of seconds.";
-    }
-  }
-
-  return {
-    name,
-    hostname,
-    ip_address: values.ip_address.trim(),
-    os_name: values.os_name.trim(),
-    os_version: values.os_version.trim(),
-    arch: values.arch.trim(),
-    environment: values.environment.trim() || "production",
-    location: values.location.trim(),
-    description: values.description.trim(),
-    heartbeat_interval_seconds: interval,
-    offline_after_seconds: offlineAfter,
-    tags: values.tags
-      .split(",")
-      .map((tag) => tag.trim())
-      .filter(Boolean),
-    simulated: values.simulated,
   };
 }
 
@@ -206,10 +138,10 @@ function EditServerModal({ server, onClose }: { server: ServerDetail; onClose: (
   const notify = useToast();
   const queryClient = useQueryClient();
   const [values, setValues] = useState<ServerFormValues>(() => initialValues(server));
-  const [formError, setFormError] = useState<string | null>(null);
+  const [errors, setErrors] = useState<ServerFormErrors>({});
 
   const updateMutation = useMutation({
-    mutationFn: (payload: ServerUpdatePayload) =>
+    mutationFn: (payload: ServerPayload) =>
       apiPatch<ServerDetail>(`/servers/${server.id}`, payload),
     onSuccess: (updated) => {
       notify(`Server ${updated.name} updated`, "success");
@@ -220,17 +152,11 @@ function EditServerModal({ server, onClose }: { server: ServerDetail; onClose: (
     onError: (error) => notify(errorMessage(error), "error"),
   });
 
-  const set = <K extends keyof ServerFormValues>(key: K, value: ServerFormValues[K]) =>
-    setValues((current) => ({ ...current, [key]: value }));
-
   const submit = () => {
-    const payload = buildUpdatePayload(values);
-    if (typeof payload === "string") {
-      setFormError(payload);
-      return;
-    }
-    setFormError(null);
-    updateMutation.mutate(payload);
+    const nextErrors = validateServerForm(values);
+    setErrors(nextErrors);
+    if (Object.keys(nextErrors).length > 0) return;
+    updateMutation.mutate(buildServerPayload(values));
   };
 
   return (
@@ -241,144 +167,12 @@ function EditServerModal({ server, onClose }: { server: ServerDetail; onClose: (
           submit();
         }}
       >
-        <div className="field-row">
-          <div className="field">
-            <label htmlFor="server-edit-name">Name *</label>
-            <input
-              id="server-edit-name"
-              className="input"
-              value={values.name}
-              onChange={(e) => set("name", e.target.value)}
-            />
-          </div>
-          <div className="field">
-            <label htmlFor="server-edit-hostname">Hostname *</label>
-            <input
-              id="server-edit-hostname"
-              className="input"
-              value={values.hostname}
-              onChange={(e) => set("hostname", e.target.value)}
-            />
-          </div>
-        </div>
-        <div className="field-row">
-          <div className="field">
-            <label htmlFor="server-edit-ip">IP address</label>
-            <input
-              id="server-edit-ip"
-              className="input"
-              value={values.ip_address}
-              onChange={(e) => set("ip_address", e.target.value)}
-            />
-          </div>
-          <div className="field">
-            <label htmlFor="server-edit-environment">Environment</label>
-            <input
-              id="server-edit-environment"
-              className="input"
-              value={values.environment}
-              onChange={(e) => set("environment", e.target.value)}
-            />
-          </div>
-          <div className="field">
-            <label htmlFor="server-edit-arch">Architecture</label>
-            <input
-              id="server-edit-arch"
-              className="input"
-              value={values.arch}
-              onChange={(e) => set("arch", e.target.value)}
-            />
-          </div>
-        </div>
-        <div className="field-row">
-          <div className="field">
-            <label htmlFor="server-edit-os-name">OS</label>
-            <input
-              id="server-edit-os-name"
-              className="input"
-              value={values.os_name}
-              onChange={(e) => set("os_name", e.target.value)}
-            />
-          </div>
-          <div className="field">
-            <label htmlFor="server-edit-os-version">OS version</label>
-            <input
-              id="server-edit-os-version"
-              className="input"
-              value={values.os_version}
-              onChange={(e) => set("os_version", e.target.value)}
-            />
-          </div>
-          <div className="field">
-            <label htmlFor="server-edit-location">Location</label>
-            <input
-              id="server-edit-location"
-              className="input"
-              value={values.location}
-              onChange={(e) => set("location", e.target.value)}
-            />
-          </div>
-        </div>
-        <div className="field-row">
-          <div className="field">
-            <label htmlFor="server-edit-heartbeat">Heartbeat interval (seconds)</label>
-            <input
-              id="server-edit-heartbeat"
-              className="input"
-              type="number"
-              min={5}
-              max={3600}
-              value={values.heartbeat_interval_seconds}
-              onChange={(e) => set("heartbeat_interval_seconds", e.target.value)}
-            />
-          </div>
-          <div className="field">
-            <label htmlFor="server-edit-offline-after">Offline after (seconds, optional)</label>
-            <input
-              id="server-edit-offline-after"
-              className="input"
-              type="number"
-              min={1}
-              value={values.offline_after_seconds}
-              onChange={(e) => set("offline_after_seconds", e.target.value)}
-            />
-          </div>
-          <div className="field">
-            <label htmlFor="server-edit-tags">Tags (comma separated)</label>
-            <input
-              id="server-edit-tags"
-              className="input"
-              value={values.tags}
-              onChange={(e) => set("tags", e.target.value)}
-            />
-          </div>
-        </div>
-        <div className="field">
-          <label htmlFor="server-edit-description">Description</label>
-          <textarea
-            id="server-edit-description"
-            className="input"
-            rows={2}
-            value={values.description}
-            onChange={(e) => set("description", e.target.value)}
-          />
-        </div>
-        <div className="field">
-          <label htmlFor="server-edit-simulated">
-            <input
-              id="server-edit-simulated"
-              type="checkbox"
-              checked={values.simulated}
-              onChange={(e) => set("simulated", e.target.checked)}
-            />{" "}
-            Simulated server (demo data)
-          </label>
-        </div>
-        {formError ? (
-          <p className="form-error" role="alert">
-            {formError}
-          </p>
-        ) : null}
+        <ServerFormFields
+          values={values}
+          onChange={setValues}
+          errors={errors}
+          idPrefix="server-edit"
+        />
         <div className="modal-actions">
           <button type="button" className="btn" onClick={onClose}>
             Cancel
@@ -598,7 +392,15 @@ export default function ServerDetailPage() {
         <div className="page-title">
           <h1 id="server-heading">
             {server.name} <StatusBadge value={server.status} />
-            {server.simulated ? <span className="badge WARNING no-dot">SIMULATED</span> : null}
+            {server.simulated ? (
+              <span className="badge WARNING no-dot">
+                SIMULATED
+                <InfoHint label="About simulated servers">
+                  This server generates demo data — no real host is contacted and none of its
+                  metrics, containers or deployments are real.
+                </InfoHint>
+              </span>
+            ) : null}
           </h1>
           <p className="page-sub">
             {server.hostname} · {server.environment}

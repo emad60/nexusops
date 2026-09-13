@@ -4,7 +4,9 @@ import { Link, useNavigate } from "react-router-dom";
 import { apiGet } from "../api/client";
 import type { Page, ServerSummary } from "../api/types";
 import { Pagination } from "../components/Pagination";
-import { EmptyState, ErrorBlock, LoadingBlock, StatusBadge } from "../components/ui";
+import { EmptyState, ErrorBlock, StatusBadge } from "../components/ui";
+import { TableSkeleton } from "../components/Skeleton";
+import { SearchInput } from "../components/form";
 
 /** Host/server summary embedded in container payloads. */
 export interface ContainerRef {
@@ -134,14 +136,16 @@ export default function ContainerListPage() {
       <div className="card">
         <div className="table-toolbar">
           <div className="filters">
-            <input
-              type="search"
-              className="input search-input"
+            <SearchInput
               placeholder="Search name or image…"
               aria-label="Search containers"
               value={search}
               onChange={(event) => {
                 setSearch(event.target.value);
+                setOffset(0);
+              }}
+              onClear={() => {
+                setSearch("");
                 setOffset(0);
               }}
             />
@@ -204,7 +208,7 @@ export default function ContainerListPage() {
         </div>
 
         {containersQuery.isPending ? (
-          <LoadingBlock label="Loading containers…" />
+          <TableSkeleton label="Loading containers" rows={10} cols={10} />
         ) : containersQuery.isError ? (
           <ErrorBlock error={containersQuery.error} />
         ) : showEmpty ? (
@@ -216,7 +220,7 @@ export default function ContainerListPage() {
         ) : (
           <>
             <div
-              className="table-wrap"
+              className="table-wrap sticky-first"
               style={{ opacity: containersQuery.isFetching ? 0.65 : 1 }}
             >
               <table className="data">

@@ -1,4 +1,17 @@
 import { createContext, useCallback, useContext, useRef, useState, type ReactNode } from "react";
+import { CheckCircle2, Info, XCircle } from "lucide-react";
+
+const TOAST_ICONS = {
+  info: Info,
+  success: CheckCircle2,
+  error: XCircle,
+} as const;
+
+const TOAST_ARIA_LABEL = {
+  info: "Information",
+  success: "Success",
+  error: "Error",
+} as const;
 
 interface Toast {
   id: number;
@@ -24,11 +37,16 @@ export function ToastProvider({ children }: { children: ReactNode }) {
     <ToastContext.Provider value={{ notify }}>
       {children}
       <div className="toast-region" role="status" aria-live="polite">
-        {toasts.map((toast) => (
-          <div key={toast.id} className={`toast ${toast.kind}`}>
-            {toast.message}
-          </div>
-        ))}
+        {toasts.map((toast) => {
+          const Icon = TOAST_ICONS[toast.kind];
+          return (
+            <div key={toast.id} className={`toast ${toast.kind}`}>
+              <Icon size={15} aria-hidden className="toast-icon" />
+              <span className="toast-message">{toast.message}</span>
+              <span className="sr-only">({TOAST_ARIA_LABEL[toast.kind]})</span>
+            </div>
+          );
+        })}
       </div>
     </ToastContext.Provider>
   );

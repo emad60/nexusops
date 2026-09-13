@@ -12,6 +12,7 @@ import type { Page, Role } from "../api/types";
 import { useAuth } from "../auth/AuthContext";
 import { Pagination } from "../components/Pagination";
 import { EmptyState, ErrorBlock, LoadingBlock, Modal } from "../components/ui";
+import { InfoHint } from "../components/InfoHint";
 import { useToast } from "../components/toast";
 
 const PAGE_SIZE = 100;
@@ -178,7 +179,14 @@ export default function RolesPage() {
             <table className="data">
               <thead>
                 <tr>
-                  <th scope="col">Permission</th>
+                  <th scope="col">
+                    Permission{" "}
+                    <InfoHint label="About the matrix">
+                      Rows are permission registry entries, grouped by domain; columns are roles.
+                      A ✓ means the role grants that permission. "*" as a role permission means
+                      every permission.
+                    </InfoHint>
+                  </th>
                   {roles.map((role) => (
                     <th scope="col" key={role.id}>
                       <div title={role.description}>{role.name}</div>

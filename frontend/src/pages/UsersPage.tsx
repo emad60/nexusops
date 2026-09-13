@@ -11,9 +11,14 @@ import { ApiError, apiDelete, apiGet, apiPatch, apiPost } from "../api/client";
 import type { Page, Role, User } from "../api/types";
 import { useAuth } from "../auth/AuthContext";
 import { Pagination } from "../components/Pagination";
-import { EmptyState, ErrorBlock, LoadingBlock, Modal, StatusBadge } from "../components/ui";
+import { EmptyState, ErrorBlock, Modal, StatusBadge } from "../components/ui";
+import { TableSkeleton } from "../components/Skeleton";
+import { PasswordField, SearchInput, SelectField, TextField } from "../components/form";
 import { useToast } from "../components/toast";
 import { formatDateTime } from "../lib/format";
+
+// Same address check as LoginPage — kept in sync on purpose.
+const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 const PAGE_SIZE = 25;
 
@@ -78,6 +83,7 @@ export default function UsersPage() {
   const [roleFilter, setRoleFilter] = useState("");
   const [inviteOpen, setInviteOpen] = useState(false);
   const [invite, setInvite] = useState<InviteForm>(EMPTY_INVITE);
+  const [inviteEmailError, setInviteEmailError] = useState<string | null>(null);
   const [created, setCreated] = useState<{ email: string; password: string } | null>(null);
 
   // Debounce the search box; the fetch itself stays inside useQuery.
@@ -123,6 +129,7 @@ export default function UsersPage() {
       void refresh();
       setInviteOpen(false);
       setInvite(EMPTY_INVITE);
+      setInviteEmailError(null);
       if (res.initial_password) {
         setCreated({ email: res.user.email, password: res.initial_password });
       }
@@ -191,14 +198,16 @@ export default function UsersPage() {
       <div className="card">
         <div className="table-toolbar">
           <div className="filters">
-            <input
-              className="input search-input"
-              type="search"
+            <SearchInput
               placeholder="Search email or name…"
               aria-label="Search users"
               value={search}
               onChange={(event) => {
                 setSearch(event.target.value);
+                setOffset(0);
+              }}
+              onClear={() => {
+                setSearch("");
                 setOffset(0);
               }}
             />
@@ -237,7 +246,7 @@ export default function UsersPage() {
         </div>
 
         {usersQuery.isPending ? (
-          <LoadingBlock label="Loading users…" />
+          <TableSkeleton label="Loading users" rows={8} cols={7} />
         ) : usersQuery.isError ? (
           <ErrorBlock error={usersQuery.error} />
         ) : !usersPage || usersPage.items.length === 0 ? (
@@ -247,6 +256,13 @@ export default function UsersPage() {
               offset > 0 || debouncedQ || statusFilter || roleFilter
                 ? "No users match the current filters."
                 : "Invite a teammate to get started."
+            }
+            action={
+              canManage && !(offset > 0 || debouncedQ || statusFilter || roleFilter) ? (
+                <button type="button" className="btn primary" onClick={() => setInviteOpen(true)}>
+                  Invite user
+                </button>
+              ) : null
             }
           />
         ) : (
@@ -338,66 +354,67 @@ export default function UsersPage() {
 
       <Modal open={inviteOpen} title="Invite user" onClose={() => setInviteOpen(false)}>
         <form
+          noValidate
           onSubmit={(event) => {
             event.preventDefault();
+            // The TextField retrofit dropped this form's native email
+            // validation (required is a visual marker in form.tsx), so the
+            // same check lives here now — same pattern and message as LoginPage.
+            if (!EMAIL_PATTERN.test(invite.email.trim())) {
+              setInviteEmailError("Enter a valid email address.");
+              return;
+            }
+            setInviteEmailError(null);
             if (invite.roleId) createUser.mutate(invite);
           }}
         >
-          <div className="field">
-            <label htmlFor="invite-email">Email</label>
-            <input
-              id="invite-email"
-              className="input"
-              type="email"
-              required
-              placeholder="name@example.com"
-              value={invite.email}
-              onChange={(event) => setInvite({ ...invite, email: event.target.value })}
-            />
-          </div>
-          <div className="field">
-            <label htmlFor="invite-name">Full name</label>
-            <input
-              id="invite-name"
-              className="input"
-              type="text"
-              maxLength={160}
-              value={invite.fullName}
-              onChange={(event) => setInvite({ ...invite, fullName: event.target.value })}
-            />
-          </div>
+          <TextField
+            id="invite-email"
+            label="Email"
+            type="email"
+            required
+            error={inviteEmailError}
+            placeholder="name@example.com"
+            value={invite.email}
+            onChange={(event) => {
+              setInvite({ ...invite, email: event.target.value });
+              if (inviteEmailError) setInviteEmailError(null);
+            }}
+          />
+          <TextField
+            id="invite-name"
+            label="Full name"
+            type="text"
+            maxLength={160}
+            value={invite.fullName}
+            onChange={(event) => setInvite({ ...invite, fullName: event.target.value })}
+          />
           <div className="field-row">
-            <div className="field">
-              <label htmlFor="invite-password">Initial password</label>
-              <input
-                id="invite-password"
-                className="input"
-                type="password"
-                autoComplete="new-password"
-                placeholder="Blank = auto-generate"
-                value={invite.password}
-                onChange={(event) => setInvite({ ...invite, password: event.target.value })}
-              />
-            </div>
-            <div className="field">
-              <label htmlFor="invite-role">Role</label>
-              <select
-                id="invite-role"
-                className="input"
-                required
-                value={invite.roleId}
-                onChange={(event) => setInvite({ ...invite, roleId: event.target.value })}
-              >
-                <option value="" disabled>
-                  Select a role…
+            <PasswordField
+              id="invite-password"
+              label="Initial password"
+              autoComplete="new-password"
+              placeholder="Blank = auto-generate"
+              value={invite.password}
+              onChange={(event) => setInvite({ ...invite, password: event.target.value })}
+            />
+            <SelectField
+              id="invite-role"
+              label="Role"
+              required
+              info="Determines what the new user can do — see Settings → Roles for the full permission matrix."
+              value={invite.roleId}
+              onChange={(event) => setInvite({ ...invite, roleId: event.target.value })}
+            >
+              <option value="" disabled>
+                Select a role…
+              </option>
+              {roles.map((role) => (
+                <option key={role.id} value={role.id}>
+                  {role.name}
                 </option>
-                {roles.map((role) => (
-                  <option key={role.id} value={role.id}>
-                    {role.name}
-                  </option>
-                ))}
-              </select>
-            </div>
+              ))}
+            </SelectField>
           </div>
           {rolesQuery.isError && (
             <p className="form-error">Could not load roles: {describeError(rolesQuery.error)}</p>

@@ -1,16 +1,17 @@
 import { useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ApiError, apiGet, apiPost } from "../api/client";
 import type { CheckOut, MonitorOut, Page } from "../api/types";
 import { Pagination } from "../components/Pagination";
+import { TableSkeleton } from "../components/Skeleton";
 import {
   EmptyState,
   ErrorBlock,
-  LoadingBlock,
   Modal,
   StatusBadge,
 } from "../components/ui";
+import { SelectField, TextField } from "../components/form";
 import { useToast } from "../components/toast";
 import { useAuth } from "../auth/AuthContext";
 import { formatDateTime, formatRelative, truncate } from "../lib/format";
@@ -44,7 +45,9 @@ function CreateMonitorDialog({
   const [url, setUrl] = useState("");
   const [method, setMethod] = useState<(typeof METHODS)[number]>("GET");
   const [intervalSeconds, setIntervalSeconds] = useState(60);
-  const [formError, setFormError] = useState("");
+  const [nameError, setNameError] = useState<string | null>(null);
+  const [urlError, setUrlError] = useState<string | null>(null);
+  const [formError, setFormError] = useState<string | null>(null);
 
   const createMutation = useMutation({
     mutationFn: (body: { name: string; url: string; method: string; interval_seconds: number }) =>
@@ -54,7 +57,9 @@ function CreateMonitorDialog({
       notify(`Monitor "${created.name}" created`, "success");
       setName("");
       setUrl("");
-      setFormError("");
+      setNameError(null);
+      setUrlError(null);
+      setFormError(null);
       onClose();
     },
     onError: (err) => {
@@ -64,11 +69,12 @@ function CreateMonitorDialog({
   });
 
   const submit = () => {
-    if (!name.trim() || !url.trim()) {
-      setFormError("Name and URL are required.");
-      return;
-    }
-    setFormError("");
+    const nextNameError = name.trim() ? null : "Name is required.";
+    const nextUrlError = url.trim() ? null : "Target URL is required.";
+    setNameError(nextNameError);
+    setUrlError(nextUrlError);
+    if (nextNameError || nextUrlError) return;
+    setFormError(null);
     createMutation.mutate({
       name: name.trim(),
       url: url.trim(),
@@ -85,58 +91,49 @@ function CreateMonitorDialog({
           submit();
         }}
       >
-        <div className="field">
-          <label htmlFor="monitor-name">Name</label>
-          <input
-            id="monitor-name"
-            className="input"
-            value={name}
-            onChange={(event) => setName(event.target.value)}
-            placeholder="Marketing site"
-            autoFocus
-          />
-        </div>
-        <div className="field">
-          <label htmlFor="monitor-url">Target URL</label>
-          <input
-            id="monitor-url"
-            className="input"
-            value={url}
-            onChange={(event) => setUrl(event.target.value)}
-            placeholder="https://example.com/health"
-          />
-          <span className="small faint">
-            Validated by the server-side SSRF guard before storage.
-          </span>
-        </div>
+        <TextField
+          id="monitor-name"
+          label="Name"
+          required
+          error={nameError}
+          value={name}
+          onChange={(event) => setName(event.target.value)}
+          placeholder="Marketing site"
+          autoFocus
+        />
+        <TextField
+          id="monitor-url"
+          label="Target URL"
+          required
+          error={urlError}
+          hint="Validated by the server-side SSRF guard before storage."
+          value={url}
+          onChange={(event) => setUrl(event.target.value)}
+          placeholder="https://example.com/health"
+        />
         <div className="field-row">
-          <div className="field">
-            <label htmlFor="monitor-method">Method</label>
-            <select
-              id="monitor-method"
-              className="input"
-              value={method}
-              onChange={(event) => setMethod(event.target.value as (typeof METHODS)[number])}
-            >
-              {METHODS.map((m) => (
-                <option key={m} value={m}>
-                  {m}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div className="field">
-            <label htmlFor="monitor-interval">Interval (seconds)</label>
-            <input
-              id="monitor-interval"
-              className="input"
-              type="number"
-              min={10}
-              max={86400}
-              value={intervalSeconds}
-              onChange={(event) => setIntervalSeconds(Number(event.target.value))}
-            />
-          </div>
+          <SelectField
+            id="monitor-method"
+            label="Method"
+            value={method}
+            onChange={(event) => setMethod(event.target.value as (typeof METHODS)[number])}
+          >
+            {METHODS.map((m) => (
+              <option key={m} value={m}>
+                {m}
+              </option>
+            ))}
+          </SelectField>
+          <TextField
+            id="monitor-interval"
+            label="Interval (seconds)"
+            info="How often the monitor runs. 60s suits most sites; anything below 30s hammers the target and inflates your check history — raise it for slow or rate-limited endpoints."
+            type="number"
+            min={10}
+            max={86400}
+            value={intervalSeconds}
+            onChange={(event) => setIntervalSeconds(Number(event.target.value))}
+          />
         </div>
         {formError ? <div className="form-error">{formError}</div> : null}
         <div className="modal-actions">
@@ -153,6 +150,7 @@ function CreateMonitorDialog({
 }
 
 export default function MonitorListPage() {
+  const navigate = useNavigate();
   const { hasPermission } = useAuth();
   const canManage = hasPermission("monitor.manage");
   const notify = useToast();
@@ -264,7 +262,7 @@ export default function MonitorListPage() {
       </div>
 
       {monitorsQuery.isLoading ? (
-        <LoadingBlock label="Loading monitors…" />
+        <TableSkeleton label="Loading monitors" rows={8} cols={7} />
       ) : monitorsQuery.isError ? (
         <ErrorBlock error={monitorsQuery.error} />
       ) : monitors.length === 0 ? (
@@ -275,6 +273,13 @@ export default function MonitorListPage() {
             canManage && !search && !statusFilter
               ? "Create your first uptime monitor to start tracking availability."
               : undefined
+          }
+          action={
+            canManage && !search && !statusFilter ? (
+              <button type="button" className="btn primary" onClick={() => setCreateOpen(true)}>
+                + New monitor
+              </button>
+            ) : null
           }
         />
       ) : (
@@ -296,7 +301,7 @@ export default function MonitorListPage() {
               </thead>
               <tbody>
                 {monitors.map((monitor) => (
-                  <tr key={monitor.id}>
+                  <tr key={monitor.id} className="clickable" onClick={() => navigate(`/monitors/${monitor.id}`)}>
                     <td>
                       <Link to={`/monitors/${monitor.id}`}>{monitor.name}</Link>
                       {monitor.current_open_incident_id ? (
@@ -325,7 +330,7 @@ export default function MonitorListPage() {
                       <StatusBadge value={monitor.status} />
                     </td>
                     {canManage ? (
-                      <td>
+                      <td onClick={(event) => event.stopPropagation()}>
                         <div className="flex gap-8">
                           <button
                             type="button"

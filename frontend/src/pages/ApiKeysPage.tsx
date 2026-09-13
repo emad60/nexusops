@@ -9,7 +9,9 @@ import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tansta
 import { ApiError, apiDelete, apiGet, apiPost } from "../api/client";
 import type { ApiKeyOut, Page } from "../api/types";
 import { Pagination } from "../components/Pagination";
-import { EmptyState, ErrorBlock, LoadingBlock, Modal, StatusBadge } from "../components/ui";
+import { EmptyState, ErrorBlock, Modal, StatusBadge } from "../components/ui";
+import { TableSkeleton } from "../components/Skeleton";
+import { InfoHint } from "../components/InfoHint";
 import { useToast } from "../components/toast";
 import { formatDateTime, formatRelative } from "../lib/format";
 
@@ -122,6 +124,15 @@ const OPTION_STYLE: CSSProperties = {
   padding: "3px 0",
   cursor: "pointer",
 };
+/** Row wrapper for an option label that carries an InfoHint — the hint must
+    stay outside the <label> so its trigger is not part of the checkbox's
+    accessible name and clicking it never toggles the checkbox. */
+const OPTION_ROW_STYLE: CSSProperties = {
+  display: "flex",
+  gap: 8,
+  alignItems: "baseline",
+  padding: "3px 0",
+};
 
 export default function ApiKeysPage() {
   const notify = useToast();
@@ -225,13 +236,25 @@ export default function ApiKeysPage() {
 
       <div className="card">
         {keysQuery.isPending ? (
-          <LoadingBlock label="Loading API keys…" />
+          <TableSkeleton label="Loading API keys" rows={6} cols={6} />
         ) : keysQuery.isError ? (
           <ErrorBlock error={keysQuery.error} />
         ) : !keysPage || keysPage.items.length === 0 ? (
           <EmptyState
             title="No API keys yet"
             hint="Create a scoped key to let scripts act on your behalf."
+            action={
+              <button
+                type="button"
+                className="btn primary"
+                onClick={() => {
+                  setForm(EMPTY_FORM);
+                  setFormOpen(true);
+                }}
+              >
+                Create key
+              </button>
+            }
           />
         ) : (
           <>
@@ -340,11 +363,22 @@ export default function ApiKeysPage() {
             <span className="small faint">Pick at least one scope.</span>
           </div>
 
-          <label style={OPTION_STYLE}>
-            <input type="checkbox" checked={form.scopes.has("*")} onChange={toggleWildcard} />
-            <span className="mono">*</span>
-            <span className="small faint">Full access — every scope (use sparingly)</span>
-          </label>
+          <div style={OPTION_ROW_STYLE}>
+            <label htmlFor="scope-wildcard" style={OPTION_STYLE}>
+              <input
+                id="scope-wildcard"
+                type="checkbox"
+                checked={form.scopes.has("*")}
+                onChange={toggleWildcard}
+              />
+              <span className="mono">*</span>
+              <span className="small faint">Full access — every scope</span>
+            </label>
+            <InfoHint label="About the wildcard scope">
+              Grants every current and future scope, including destructive ones (delete servers,
+              rotate secrets). Prefer listing the specific scopes a CI job actually needs.
+            </InfoHint>
+          </div>
 
           {SCOPE_GROUPS.map(([group, specs]) => (
             <fieldset key={group} style={GROUP_STYLE}>

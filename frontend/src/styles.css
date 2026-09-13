@@ -134,6 +134,10 @@ code, .mono { font-family: var(--font-mono); font-size: 12px; }
   font-size: 11px;
   padding: 6px 8px;
   text-align: center;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
 }
 
 .main-col { flex: 1; min-width: 0; display: flex; flex-direction: column; }
@@ -165,6 +169,58 @@ code, .mono { font-family: var(--font-mono); font-size: 12px; }
   padding: 16px;
 }
 .card + .card { margin-top: 14px; }
+/* InfoHint: inline ⓘ trigger with a hover/focus tooltip bubble.
+   The trigger is a real <button> so keyboard focus and screen readers work;
+   the bubble is portaled to <body> and position:fixed (see InfoHint.tsx) —
+   absolute positioning gets clipped to a sliver inside .table-wrap/.modal
+   scroll containers. z-index must beat the modal overlay (100). */
+.info-hint {
+  position: relative;
+  display: inline-flex;
+  vertical-align: baseline;
+}
+.info-hint-trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-faint);
+  cursor: help;
+  transition: color 120ms ease;
+}
+.info-hint-trigger:hover,
+.info-hint-trigger:focus-visible,
+.info-hint:hover .info-hint-trigger {
+  color: var(--accent);
+}
+.info-hint-trigger:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.info-hint-bubble {
+  position: fixed;
+  z-index: 120;
+  width: max-content;
+  max-width: 260px;
+  padding: 6px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg-raised);
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.45;
+  text-align: left;
+  white-space: normal;
+  box-shadow: var(--shadow);
+  pointer-events: none;
+}
+
 /* Stacked-card spacing is for block flow only; inside grids the track gap
    already spaces items, and the margin made the first card in a row render
    14px taller than its neighbors (stretch fills the leftover). */
@@ -256,6 +312,7 @@ table.data td {
 }
 table.data tbody tr:hover { background: var(--bg-hover); }
 table.data tr.clickable { cursor: pointer; }
+table.data tr.clickable:hover td { background: var(--bg-hover); }
 table.data tr:last-child td { border-bottom: none; }
 td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 
@@ -284,14 +341,19 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
   font-weight: 550;
   cursor: pointer;
   transition: filter 120ms ease, background 120ms ease;
+  min-height: 30px; /* matches .input height so toolbars align */
 }
 .btn:hover { filter: brightness(1.15); text-decoration: none; }
+.btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .btn:disabled { opacity: 0.55; cursor: not-allowed; }
 .btn.primary { background: var(--accent-strong); border-color: var(--accent-strong); color: #04121d; }
 .btn.danger { background: transparent; border-color: var(--err); color: var(--err); }
 .btn.danger:hover { background: var(--err-soft); }
 .btn.ghost { background: transparent; border-color: transparent; color: var(--text-dim); }
-.btn.sm { padding: 3px 9px; font-size: 12px; }
+.btn.sm { padding: 3px 9px; font-size: 12px; min-height: 24px; }
+
+/* Burger: phone-only nav opener (shown ≤720px, see the phone breakpoint). */
+.burger { display: none; }
 
 .input, select.input, textarea.input {
   background: var(--bg);
@@ -309,6 +371,8 @@ textarea.input { resize: vertical; font-family: var(--font-mono); }
 
 .field { display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; }
 .field label { font-size: 12px; color: var(--text-dim); font-weight: 550; }
+.label-row { display: flex; align-items: center; gap: 4px; min-height: 18px; }
+.label-row .info-hint { margin-left: 1px; }
 .field-row { display: flex; gap: 10px; }
 .field-row .field { flex: 1; }
 .form-error {
@@ -322,7 +386,19 @@ textarea.input { resize: vertical; font-family: var(--font-mono); }
 /* --- Misc ------------------------------------------------------------------ */
 
 .empty-state { text-align: center; padding: 40px 16px; color: var(--text-faint); }
-.empty-state .icon { font-size: 26px; margin-bottom: 8px; opacity: 0.7; }
+.empty-state .icon {
+  font-size: 24px;
+  margin: 0 auto 10px;
+  width: 44px;
+  height: 44px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  background: var(--bg-hover);
+  opacity: 0.9;
+}
+.empty-state .empty-title { color: var(--text-dim); font-weight: 550; }
 
 .spinner {
   width: 18px; height: 18px;
@@ -334,6 +410,27 @@ textarea.input { resize: vertical; font-family: var(--font-mono); }
 }
 @keyframes spin { to { transform: rotate(360deg); } }
 .loading-block { display: grid; place-items: center; padding: 48px; color: var(--text-faint); gap: 10px; }
+
+/* Skeletons: muted bars with a slow shimmer sweep. aria-hidden bars inside a
+   role="status" wrapper so screen readers announce one state, not N shapes. */
+.skeleton {
+  display: inline-block;
+  border-radius: var(--radius-sm);
+  background: linear-gradient(90deg, var(--bg-hover) 25%, var(--border) 50%, var(--bg-hover) 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.4s ease-in-out infinite;
+}
+@keyframes shimmer {
+  from { background-position: 200% 0; }
+  to { background-position: -200% 0; }
+}
+.skeleton-table { display: flex; flex-direction: column; gap: 18px; padding: 4px 0 8px; }
+.skeleton-row { display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; gap: 16px; align-items: center; }
+.skeleton-row.head { margin-bottom: -6px; opacity: 0.8; }
+.skeleton-grid { display: grid; gap: 14px; }
+@media (prefers-reduced-motion: reduce) {
+  .skeleton { animation: none; }
+}
 
 .kv { display: grid; grid-template-columns: 160px 1fr; row-gap: 6px; column-gap: 12px; font-size: 13px; }
 .kv dt { color: var(--text-faint); }
@@ -405,10 +502,30 @@ textarea.input { resize: vertical; font-family: var(--font-mono); }
   padding: 10px 14px;
   min-width: 240px;
   max-width: 420px;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
   animation: rise 180ms ease-out;
 }
+.toast .toast-icon { flex-shrink: 0; margin-top: 2px; color: var(--accent); }
+.toast.error .toast-icon { color: var(--err); }
+.toast.success .toast-icon { color: var(--ok); }
 .toast.error { border-left-color: var(--err); }
 .toast.success { border-left-color: var(--ok); }
+.toast-message { min-width: 0; overflow-wrap: anywhere; }
+
+/* Visually hidden, still announced by screen readers. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
 @keyframes rise { from { transform: translateY(8px); opacity: 0; } }
 
 .chart-wrap svg { display: block; width: 100%; height: auto; }
@@ -480,6 +597,55 @@ kbd {
 .gap-8 { gap: 8px; } .gap-12 { gap: 12px; }
 .wrap { flex-wrap: wrap; }
 
+/* --- Form primitives (components/form.tsx) -------------------------------- */
+
+.field.has-error .input { border-color: var(--err); }
+.field.has-error .input:focus { box-shadow: 0 0 0 2px var(--err-soft); }
+
+.field-error {
+  color: var(--err);
+  font-size: 12px;
+  margin: 0;
+}
+.field-hint {
+  color: var(--text-faint);
+  font-size: 12px;
+  margin: 0;
+}
+.req { color: var(--err); }
+
+/* Wrapper for the control plus optional trailing actions / counters. */
+.field-control { position: relative; display: flex; flex-direction: column; gap: 4px; }
+.input.has-trailing { padding-right: 34px; }
+.field-trailing {
+  position: absolute;
+  right: 4px;
+  top: 4px;
+  padding: 3px 6px;
+}
+.char-counter {
+  align-self: flex-end;
+  color: var(--text-faint);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.check-field {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 12px;
+  cursor: pointer;
+  color: var(--text-dim);
+  font-size: 13px;
+}
+.check-field input { accent-color: var(--accent-strong); }
+
+.search-field { position: relative; display: inline-flex; align-items: center; }
+.search-lead { position: absolute; left: 10px; color: var(--text-faint); pointer-events: none; }
+.search-field .search-input { padding-left: 30px; padding-right: 28px; }
+.search-clear { position: absolute; right: 2px; padding: 3px 5px; }
+
 /* Responsive: collapse sidebar under 900px */
 @media (max-width: 900px) {
   :root { --sidebar-w: 64px; }
@@ -487,6 +653,107 @@ kbd {
   .nav-link { justify-content: center; }
   .content { padding: 14px; }
   .kv { grid-template-columns: 110px 1fr; }
+}
+
+/* --- Phone breakpoint -------------------------------------------------------
+   Below 720px the icon rail is replaced by an off-canvas drawer. The sidebar
+   element never leaves the DOM: default = its desktop column, 900px = rail,
+   720px = fixed off-canvas panel, slid in only while .drawer-open is set. */
+@media (max-width: 720px) {
+  .sidebar {
+    position: fixed;
+    inset: 0 auto 0 0;
+    z-index: 90; /* below modal-overlay (100), above page content */
+    width: min(78vw, 300px);
+    transform: translateX(-100%);
+    /* visibility keeps the closed drawer out of the tab order and the
+       accessibility tree (transform alone leaves ~15 invisible Tab stops);
+       the 200ms delay lets the slide-out finish before it disappears. */
+    visibility: hidden;
+    transition: transform 200ms ease, visibility 0s 200ms;
+    background: var(--bg-raised);
+    box-shadow: none;
+    border-right: 1px solid var(--border);
+  }
+  .drawer-open .sidebar {
+    transform: translateX(0);
+    visibility: visible;
+    transition: transform 200ms ease; /* visibility flips immediately on open */
+    box-shadow: var(--shadow);
+  }
+
+  .sidebar-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 89;
+    background: rgb(2 6 23 / 0.6);
+  }
+
+  /* The rail hides labels via display:none; the drawer must show them again. */
+  .sidebar .nav-label-text,
+  .sidebar .brand span:not(.logo),
+  .sidebar .nav-group-label { display: block; }
+  .sidebar .simulation-badge { display: flex; }
+  .nav-link { justify-content: flex-start; }
+
+  /* Full-width comfortable rows instead of the desktop rail rhythm. */
+  .nav-link { padding: 12px 14px; }
+  .sidebar { padding: 14px 12px; gap: 2px; }
+
+  /* Burger is phone-only: hidden at desktop widths, shown here. */
+  .burger { display: inline-flex; }
+
+  .content { padding: 12px; }
+
+  /* Modals become bottom sheets; a 520px box on a phone wastes half the screen.
+     vh lines are fallbacks for browsers without dvh. Height stays content-driven
+     so short confirm dialogs don't stretch into a sea of empty space. */
+  .modal-overlay { padding: 0; place-items: end center; }
+  .modal {
+    max-width: 100vw;
+    max-height: 92vh;
+    max-height: 92dvh;
+    border-radius: 12px 12px 0 0;
+  }
+  .modal.wide { max-width: 100vw; }
+
+  /* Filter rows become a horizontal swipe strip: every filter stays reachable
+     with one gesture instead of stacking into a tall column. */
+  .table-toolbar .filters {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    max-width: 100%;
+    padding-bottom: 4px;
+    -webkit-overflow-scrolling: touch;
+  }
+  .table-toolbar .filters > * { flex-shrink: 0; }
+
+  /* Sticky first column for wide tables so the identity cell stays visible
+     while scrolling horizontally. `.sticky-first` is opt-in per page. */
+  .table-wrap.sticky-first th:first-child,
+  .table-wrap.sticky-first td:first-child {
+    position: sticky;
+    left: 0;
+    z-index: 2;
+    background: var(--bg-raised);
+    box-shadow: 6px 0 8px -6px rgb(2 6 23 / 0.55);
+  }
+
+  /* Coarse pointers get fat tap targets (iOS/Android guidance ≥44px), and
+     16px inputs stop iOS Safari auto-zooming the page on focus. */
+  @media (pointer: coarse) {
+    .btn { min-height: 44px; }
+    .btn.sm { min-height: 36px; }
+    .nav-link { min-height: 44px; }
+    .input { min-height: 44px; font-size: 16px; }
+  }
+
+  /* Stat cards flow 2-up instead of the desktop 4-up grid. */
+  .grid.cols-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+
+  /* page heads stack: title on top, actions below, both full-width. */
+  .page-head { flex-direction: column; align-items: stretch; }
+  .page-actions { justify-content: flex-start; }
 }
 
 @media (prefers-reduced-motion: reduce) {

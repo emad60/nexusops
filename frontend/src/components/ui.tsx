@@ -15,14 +15,28 @@ export function TagChip({ name, color }: { name: string; color?: string }) {
   );
 }
 
-export function EmptyState({ icon = "◎", title, hint }: { icon?: string; title: string; hint?: string }) {
+export function EmptyState({
+  icon = "◎",
+  title,
+  hint,
+  action,
+}: {
+  icon?: string;
+  title: string;
+  hint?: string;
+  /** Optional call-to-action (usually a button) under the hint. */
+  action?: ReactNode;
+}) {
   return (
     <div className="empty-state">
       <div className="icon" aria-hidden>
         {icon}
       </div>
-      <p>{title}</p>
+      <p className="empty-title">{title}</p>
       {hint ? <p className="small faint mt-8">{hint}</p> : null}
+      {action ? (
+        <div style={{ marginTop: 14 }}>{action}</div>
+      ) : null}
     </div>
   );
 }
@@ -58,7 +72,8 @@ export interface ModalProps {
   children: ReactNode;
 }
 
-const FOCUSABLE_SELECTOR =
+/** Shared with the sidebar drawer, which mirrors the modal's focus management. */
+export const FOCUSABLE_SELECTOR =
   'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
 export function Modal({ open, title, onClose, wide, children }: ModalProps) {

@@ -13,8 +13,11 @@ import { useState, type FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ApiError, apiDelete, apiGet, apiPost } from "../api/client";
 import type { Page, SecretRow } from "../api/types";
-import { EmptyState, ErrorBlock, LoadingBlock, Modal } from "../components/ui";
+import { EmptyState, ErrorBlock, Modal } from "../components/ui";
+import { TableSkeleton } from "../components/Skeleton";
+import { InfoHint } from "../components/InfoHint";
 import { Pagination } from "../components/Pagination";
+import { PasswordField, TextAreaField, TextField } from "../components/form";
 import { useToast } from "../components/toast";
 import { useAuth } from "../auth/AuthContext";
 
@@ -47,7 +50,9 @@ function CreateSecretModal({ open, onClose }: { open: boolean; onClose: () => vo
   const [key, setKey] = useState("");
   const [value, setValue] = useState("");
   const [description, setDescription] = useState("");
-  const [error, setError] = useState<string | null>(null);
+  const [keyError, setKeyError] = useState<string | null>(null);
+  const [valueError, setValueError] = useState<string | null>(null);
+  const [formError, setFormError] = useState<string | null>(null);
 
   const createMutation = useMutation({
     mutationFn: (payload: { key: string; value: string; description: string }) =>
@@ -60,21 +65,20 @@ function CreateSecretModal({ open, onClose }: { open: boolean; onClose: () => vo
     onError: (cause) => {
       const message = errorMessage(cause);
       notify(message, "error");
-      setError(message);
+      setFormError(message);
     },
   });
 
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    setError(null);
-    if (!KEY_PATTERN.test(key.trim())) {
-      setError("Key must be UPPERCASE — letters, digits, underscore, dot or dash (e.g. DB_PASSWORD).");
-      return;
-    }
-    if (value.length === 0) {
-      setError("A value is required.");
-      return;
-    }
+    setFormError(null);
+    const nextKeyError = KEY_PATTERN.test(key.trim())
+      ? null
+      : "Key must be UPPERCASE — letters, digits, underscore, dot or dash (e.g. DB_PASSWORD).";
+    const nextValueError = value.length === 0 ? "A value is required." : null;
+    setKeyError(nextKeyError);
+    setValueError(nextValueError);
+    if (nextKeyError || nextValueError) return;
     createMutation.mutate({ key: key.trim(), value, description: description.trim() });
   }
 
@@ -85,44 +89,41 @@ function CreateSecretModal({ open, onClose }: { open: boolean; onClose: () => vo
           Secret values are write-only: once submitted, a value is encrypted and can never be
           viewed, retrieved, or exported again. Keep a copy somewhere safe before you submit.
         </p>
-        <div className="field">
-          <label htmlFor="secret-key">Key</label>
-          <input
-            id="secret-key"
-            className="input mono"
-            value={key}
-            onChange={(event) => setKey(event.target.value)}
-            placeholder="DB_PASSWORD"
-            autoComplete="off"
-            spellCheck={false}
-            autoFocus
-          />
-        </div>
-        <div className="field">
-          <label htmlFor="secret-value">Value</label>
-          <input
-            id="secret-value"
-            className="input mono"
-            type="password"
-            value={value}
-            onChange={(event) => setValue(event.target.value)}
-            autoComplete="new-password"
-          />
-        </div>
-        <div className="field">
-          <label htmlFor="secret-description">Description</label>
-          <textarea
-            id="secret-description"
-            className="input"
-            rows={2}
-            maxLength={300}
-            value={description}
-            onChange={(event) => setDescription(event.target.value)}
-          />
-        </div>
-        {error ? (
+        <TextField
+          id="secret-key"
+          label="Key"
+          mono
+          required
+          error={keyError}
+          value={key}
+          onChange={(event) => setKey(event.target.value)}
+          placeholder="DB_PASSWORD"
+          autoComplete="off"
+          spellCheck={false}
+          autoFocus
+        />
+        <PasswordField
+          id="secret-value"
+          label="Value"
+          mono
+          required
+          error={valueError}
+          hint="Hidden by default — the reveal toggle only shows it on this screen."
+          value={value}
+          onChange={(event) => setValue(event.target.value)}
+          autoComplete="new-password"
+        />
+        <TextAreaField
+          id="secret-description"
+          label="Description"
+          rows={2}
+          maxLength={300}
+          value={description}
+          onChange={(event) => setDescription(event.target.value)}
+        />
+        {formError ? (
           <p className="form-error" role="alert">
-            {error}
+            {formError}
           </p>
         ) : null}
         <div className="modal-actions">
@@ -142,7 +143,8 @@ function RotateSecretModal({ secret, onClose }: { secret: SecretRow; onClose: ()
   const notify = useToast();
   const queryClient = useQueryClient();
   const [value, setValue] = useState("");
-  const [error, setError] = useState<string | null>(null);
+  const [valueError, setValueError] = useState<string | null>(null);
+  const [formError, setFormError] = useState<string | null>(null);
 
   const rotateMutation = useMutation({
     mutationFn: (newValue: string) =>
@@ -155,17 +157,18 @@ function RotateSecretModal({ secret, onClose }: { secret: SecretRow; onClose: ()
     onError: (cause) => {
       const message = errorMessage(cause);
       notify(message, "error");
-      setError(message);
+      setFormError(message);
     },
   });
 
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    setError(null);
+    setFormError(null);
     if (value.length === 0) {
-      setError("A new value is required.");
+      setValueError("A new value is required.");
       return;
     }
+    setValueError(null);
     rotateMutation.mutate(value);
   }
 
@@ -177,21 +180,20 @@ function RotateSecretModal({ secret, onClose }: { secret: SecretRow; onClose: ()
           {secret.version + 1}. Like every secret value, the replacement can never be viewed
           again after submission.
         </p>
-        <div className="field">
-          <label htmlFor="rotate-value">New value</label>
-          <input
-            id="rotate-value"
-            className="input mono"
-            type="password"
-            value={value}
-            onChange={(event) => setValue(event.target.value)}
-            autoComplete="new-password"
-            autoFocus
-          />
-        </div>
-        {error ? (
+        <PasswordField
+          id="rotate-value"
+          label="New value"
+          mono
+          required
+          error={valueError}
+          value={value}
+          onChange={(event) => setValue(event.target.value)}
+          autoComplete="new-password"
+          autoFocus
+        />
+        {formError ? (
           <p className="form-error" role="alert">
-            {error}
+            {formError}
           </p>
         ) : null}
         <div className="modal-actions">
@@ -322,7 +324,7 @@ export default function SecretsPage() {
       </form>
 
       {query.isPending ? (
-        <LoadingBlock label="Loading secrets…" />
+        <TableSkeleton label="Loading secrets" rows={6} cols={6} />
       ) : query.isError ? (
         <ErrorBlock error={query.error} />
       ) : rows.length === 0 ? (
@@ -355,8 +357,25 @@ export default function SecretsPage() {
                   <td>
                     <span className="badge no-dot NEUTRAL">v{row.version}</span>
                   </td>
-                  <td className="mono small" title="First 12 hex chars of the value's SHA-256 fingerprint">
-                    {row.digest}
+                  <td className="mono small">
+                    <span
+                      style={{
+                        display: "inline-block",
+                        maxWidth: 160,
+                        whiteSpace: "nowrap",
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        verticalAlign: "bottom",
+                      }}
+                      title={`SHA-256 fingerprint of the current value (v${row.version}): ${row.digest}`}
+                    >
+                      {row.digest}
+                    </span>{" "}
+                    <InfoHint label={`About digest of ${row.key}`}>
+                      First 12 hex chars of the value's SHA-256 fingerprint — proof two values
+                      differ without ever revealing them. It changes every time the secret is
+                      rotated.
+                    </InfoHint>
                   </td>
                   <td
                     title={

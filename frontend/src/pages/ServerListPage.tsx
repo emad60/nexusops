@@ -4,62 +4,24 @@ import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tansta
 import { ApiError, apiGet, apiPost } from "../api/client";
 import type { Page, ServerSummary } from "../api/types";
 import { useAuth } from "../auth/AuthContext";
-import { EmptyState, ErrorBlock, LoadingBlock, Modal, StatusBadge, TagChip } from "../components/ui";
+import { EmptyState, ErrorBlock, Modal, StatusBadge, TagChip } from "../components/ui";
+import { TableSkeleton } from "../components/Skeleton";
 import { Pagination } from "../components/Pagination";
+import {
+  buildServerPayload,
+  EMPTY_SERVER_FORM,
+  ServerFormFields,
+  validateServerForm,
+  type ServerFormErrors,
+  type ServerFormValues,
+  type ServerPayload,
+} from "../components/ServerForm";
+import { SearchInput } from "../components/form";
 import { useToast } from "../components/toast";
 import { formatBytesMb, formatGb, formatRelative } from "../lib/format";
 
 const PAGE_SIZE = 20;
 const SERVER_STATUSES = ["ONLINE", "OFFLINE", "DEGRADED", "UNKNOWN"] as const;
-
-/** Payload for POST /servers (mirrors the backend ServerCreate schema). */
-interface ServerCreatePayload {
-  name: string;
-  hostname: string;
-  ip_address: string;
-  os_name: string;
-  os_version: string;
-  arch: string;
-  environment: string;
-  location: string;
-  description: string;
-  heartbeat_interval_seconds: number;
-  offline_after_seconds: number | null;
-  tags: string[];
-  simulated: boolean;
-}
-
-interface ServerFormValues {
-  name: string;
-  hostname: string;
-  ip_address: string;
-  os_name: string;
-  os_version: string;
-  arch: string;
-  environment: string;
-  location: string;
-  description: string;
-  heartbeat_interval_seconds: string;
-  offline_after_seconds: string;
-  tags: string;
-  simulated: boolean;
-}
-
-const EMPTY_FORM: ServerFormValues = {
-  name: "",
-  hostname: "",
-  ip_address: "",
-  os_name: "",
-  os_version: "",
-  arch: "",
-  environment: "production",
-  location: "",
-  description: "",
-  heartbeat_interval_seconds: "30",
-  offline_after_seconds: "",
-  tags: "",
-  simulated: false,
-};
 
 function errorMessage(error: unknown): string {
   if (error instanceof ApiError) return `${error.code}: ${error.message}`;
@@ -70,209 +32,6 @@ function errorMessage(error: unknown): string {
 function setParam(params: URLSearchParams, key: string, value: string): void {
   if (value) params.set(key, value);
   else params.delete(key);
-}
-
-function buildPayload(values: ServerFormValues): ServerCreatePayload | string {
-  const name = values.name.trim();
-  const hostname = values.hostname.trim();
-  if (!name) return "Name is required.";
-  if (!hostname) return "Hostname is required.";
-
-  const intervalRaw = values.heartbeat_interval_seconds.trim();
-  let interval = 30;
-  if (intervalRaw) {
-    interval = Number(intervalRaw);
-    if (!Number.isFinite(interval) || interval < 5 || interval > 3600) {
-      return "Heartbeat interval must be between 5 and 3600 seconds.";
-    }
-  }
-
-  const offlineRaw = values.offline_after_seconds.trim();
-  let offlineAfter: number | null = null;
-  if (offlineRaw) {
-    offlineAfter = Number(offlineRaw);
-    if (!Number.isFinite(offlineAfter) || offlineAfter <= 0) {
-      return "Offline threshold must be a positive number of seconds.";
-    }
-  }
-
-  return {
-    name,
-    hostname,
-    ip_address: values.ip_address.trim(),
-    os_name: values.os_name.trim(),
-    os_version: values.os_version.trim(),
-    arch: values.arch.trim(),
-    environment: values.environment.trim() || "production",
-    location: values.location.trim(),
-    description: values.description.trim(),
-    heartbeat_interval_seconds: interval,
-    offline_after_seconds: offlineAfter,
-    tags: values.tags
-      .split(",")
-      .map((tag) => tag.trim())
-      .filter(Boolean),
-    simulated: values.simulated,
-  };
-}
-
-function ServerFormFields({
-  values,
-  onChange,
-}: {
-  values: ServerFormValues;
-  onChange: (next: ServerFormValues) => void;
-}) {
-  const set = <K extends keyof ServerFormValues>(key: K, value: ServerFormValues[K]) =>
-    onChange({ ...values, [key]: value });
-
-  return (
-    <>
-      <div className="field-row">
-        <div className="field">
-          <label htmlFor="server-name">Name *</label>
-          <input
-            id="server-name"
-            className="input"
-            value={values.name}
-            onChange={(e) => set("name", e.target.value)}
-            placeholder="edge-01"
-            autoFocus
-          />
-        </div>
-        <div className="field">
-          <label htmlFor="server-hostname">Hostname *</label>
-          <input
-            id="server-hostname"
-            className="input"
-            value={values.hostname}
-            onChange={(e) => set("hostname", e.target.value)}
-            placeholder="edge01.example.net"
-          />
-        </div>
-      </div>
-      <div className="field-row">
-        <div className="field">
-          <label htmlFor="server-ip">IP address</label>
-          <input
-            id="server-ip"
-            className="input"
-            value={values.ip_address}
-            onChange={(e) => set("ip_address", e.target.value)}
-            placeholder="10.0.0.14"
-          />
-        </div>
-        <div className="field">
-          <label htmlFor="server-environment">Environment</label>
-          <input
-            id="server-environment"
-            className="input"
-            value={values.environment}
-            onChange={(e) => set("environment", e.target.value)}
-            placeholder="production"
-          />
-        </div>
-        <div className="field">
-          <label htmlFor="server-arch">Architecture</label>
-          <input
-            id="server-arch"
-            className="input"
-            value={values.arch}
-            onChange={(e) => set("arch", e.target.value)}
-            placeholder="x86_64"
-          />
-        </div>
-      </div>
-      <div className="field-row">
-        <div className="field">
-          <label htmlFor="server-os-name">OS</label>
-          <input
-            id="server-os-name"
-            className="input"
-            value={values.os_name}
-            onChange={(e) => set("os_name", e.target.value)}
-            placeholder="Ubuntu"
-          />
-        </div>
-        <div className="field">
-          <label htmlFor="server-os-version">OS version</label>
-          <input
-            id="server-os-version"
-            className="input"
-            value={values.os_version}
-            onChange={(e) => set("os_version", e.target.value)}
-            placeholder="24.04"
-          />
-        </div>
-        <div className="field">
-          <label htmlFor="server-location">Location</label>
-          <input
-            id="server-location"
-            className="input"
-            value={values.location}
-            onChange={(e) => set("location", e.target.value)}
-            placeholder="dc-west-rack4"
-          />
-        </div>
-      </div>
-      <div className="field-row">
-        <div className="field">
-          <label htmlFor="server-heartbeat">Heartbeat interval (seconds)</label>
-          <input
-            id="server-heartbeat"
-            className="input"
-            type="number"
-            min={5}
-            max={3600}
-            value={values.heartbeat_interval_seconds}
-            onChange={(e) => set("heartbeat_interval_seconds", e.target.value)}
-          />
-        </div>
-        <div className="field">
-          <label htmlFor="server-offline-after">Offline after (seconds, optional)</label>
-          <input
-            id="server-offline-after"
-            className="input"
-            type="number"
-            min={1}
-            value={values.offline_after_seconds}
-            onChange={(e) => set("offline_after_seconds", e.target.value)}
-          />
-        </div>
-        <div className="field">
-          <label htmlFor="server-tags">Tags (comma separated)</label>
-          <input
-            id="server-tags"
-            className="input"
-            value={values.tags}
-            onChange={(e) => set("tags", e.target.value)}
-            placeholder="edge, gpu"
-          />
-        </div>
-      </div>
-      <div className="field">
-        <label htmlFor="server-description">Description</label>
-        <textarea
-          id="server-description"
-          className="input"
-          rows={2}
-          value={values.description}
-          onChange={(e) => set("description", e.target.value)}
-        />
-      </div>
-      <div className="field">
-        <label htmlFor="server-simulated">
-          <input
-            id="server-simulated"
-            type="checkbox"
-            checked={values.simulated}
-            onChange={(e) => set("simulated", e.target.checked)}
-          />{" "}
-          Simulated server (demo data)
-        </label>
-      </div>
-    </>
-  );
 }
 
 function AddServerModal({
@@ -286,11 +45,11 @@ function AddServerModal({
 }) {
   const notify = useToast();
   const queryClient = useQueryClient();
-  const [values, setValues] = useState<ServerFormValues>(EMPTY_FORM);
-  const [formError, setFormError] = useState<string | null>(null);
+  const [values, setValues] = useState<ServerFormValues>(EMPTY_SERVER_FORM);
+  const [errors, setErrors] = useState<ServerFormErrors>({});
 
   const createMutation = useMutation({
-    mutationFn: (payload: ServerCreatePayload) => apiPost<ServerSummary>("/servers", payload),
+    mutationFn: (payload: ServerPayload) => apiPost<ServerSummary>("/servers", payload),
     onSuccess: (created) => {
       notify(`Server ${created.name} registered`, "success");
       void queryClient.invalidateQueries({ queryKey: ["servers"] });
@@ -301,13 +60,10 @@ function AddServerModal({
   });
 
   const submit = () => {
-    const payload = buildPayload(values);
-    if (typeof payload === "string") {
-      setFormError(payload);
-      return;
-    }
-    setFormError(null);
-    createMutation.mutate(payload);
+    const nextErrors = validateServerForm(values);
+    setErrors(nextErrors);
+    if (Object.keys(nextErrors).length > 0) return;
+    createMutation.mutate(buildServerPayload(values));
   };
 
   return (
@@ -318,12 +74,7 @@ function AddServerModal({
           submit();
         }}
       >
-        <ServerFormFields values={values} onChange={setValues} />
-        {formError ? (
-          <p className="form-error" role="alert">
-            {formError}
-          </p>
-        ) : null}
+        <ServerFormFields values={values} onChange={setValues} errors={errors} focusName />
         <div className="modal-actions">
           <button type="button" className="btn" onClick={onClose}>
             Cancel
@@ -413,13 +164,12 @@ export default function ServerListPage() {
 
       <div className="table-toolbar">
         <div className="filters">
-          <input
-            type="search"
-            className="input search-input"
+          <SearchInput
             placeholder="Search by name or hostname…"
             aria-label="Search servers"
             value={qDraft}
             onChange={(e) => setQDraft(e.target.value)}
+            onClear={() => setQDraft("")}
           />
           <select
             className="input"
@@ -447,7 +197,7 @@ export default function ServerListPage() {
       </div>
 
       {serversQuery.isError ? <ErrorBlock error={serversQuery.error} /> : null}
-      {serversQuery.isPending ? <LoadingBlock label="Loading servers…" /> : null}
+      {serversQuery.isPending ? <TableSkeleton label="Loading servers" rows={8} cols={8} /> : null}
 
       {serversQuery.data && servers.length === 0 ? (
         <EmptyState
@@ -458,12 +208,19 @@ export default function ServerListPage() {
               ? "No machine matches the current filters — try clearing them."
               : "Register your first server to start monitoring."
           }
+          action={
+            !hasFilters && hasPermission("server.create") ? (
+              <button type="button" className="btn primary" onClick={() => setAddOpen(true)}>
+                Register server
+              </button>
+            ) : null
+          }
         />
       ) : null}
 
       {serversQuery.data && servers.length > 0 ? (
         <div className="card">
-          <div className="table-wrap">
+          <div className="table-wrap sticky-first">
             <table className="data">
               <thead>
                 <tr>
@@ -479,7 +236,7 @@ export default function ServerListPage() {
               </thead>
               <tbody>
                 {servers.map((server) => (
-                  <tr key={server.id}>
+                  <tr key={server.id} className="clickable" onClick={() => navigate(`/servers/${server.id}`)}>
                     <td>
                       <Link to={`/servers/${server.id}`}>{server.name}</Link>
                       <div className="small faint mono">{server.hostname}</div>

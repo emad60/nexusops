@@ -132,10 +132,10 @@ describe("MonitorListPage", () => {
     renderPage();
     fireEvent.click(await screen.findByRole("button", { name: "+ New monitor" }));
 
-    fireEvent.change(await screen.findByLabelText("Name"), {
+    fireEvent.change(await screen.findByLabelText("Name *"), {
       target: { value: "Checkout API" },
     });
-    fireEvent.change(screen.getByLabelText("Target URL"), {
+    fireEvent.change(screen.getByLabelText("Target URL *"), {
       target: { value: "https://checkout.internal/health" },
     });
     fireEvent.click(screen.getByRole("button", { name: "Create monitor" }));
@@ -157,8 +157,8 @@ describe("MonitorListPage", () => {
 
     renderPage();
     fireEvent.click(await screen.findByRole("button", { name: "+ New monitor" }));
-    fireEvent.change(await screen.findByLabelText("Name"), { target: { value: "Evil" } });
-    fireEvent.change(screen.getByLabelText("Target URL"), {
+    fireEvent.change(await screen.findByLabelText("Name *"), { target: { value: "Evil" } });
+    fireEvent.change(screen.getByLabelText("Target URL *"), {
       target: { value: "http://169.254.169.254/latest" },
     });
     fireEvent.click(screen.getByRole("button", { name: "Create monitor" }));

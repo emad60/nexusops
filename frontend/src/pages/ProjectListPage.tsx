@@ -10,7 +10,8 @@ import { ApiError, apiGet, apiPost } from "../api/client";
 import type { EnvironmentOut, Page, ProjectOut } from "../api/types";
 import { useAuth } from "../auth/AuthContext";
 import { Pagination } from "../components/Pagination";
-import { EmptyState, ErrorBlock, LoadingBlock, Modal } from "../components/ui";
+import { EmptyState, ErrorBlock, Modal } from "../components/ui";
+import { SkeletonCardGrid } from "../components/Skeleton";
 import { useToast } from "../components/toast";
 import { formatRelative, truncate } from "../lib/format";
 
@@ -231,7 +232,7 @@ export default function ProjectListPage() {
       </div>
 
       {projectsQ.isPending ? (
-        <LoadingBlock label="Loading projects…" />
+        <SkeletonCardGrid label="Loading projects" />
       ) : projectsQ.isError ? (
         <ErrorBlock error={projectsQ.error} />
       ) : items.length === 0 ? (
@@ -242,6 +243,13 @@ export default function ProjectListPage() {
             canManage
               ? "Create your first project to start modelling applications and environments."
               : "Ask an administrator to create the first project."
+          }
+          action={
+            canManage ? (
+              <button type="button" className="btn primary" onClick={() => setCreateOpen(true)}>
+                New project
+              </button>
+            ) : null
           }
         />
       ) : (

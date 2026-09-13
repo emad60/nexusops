@@ -10,7 +10,8 @@ import { ApiError, apiGet, apiPost } from "../api/client";
 import type { DeploymentOut, EnvironmentOut, Page, ProjectOut } from "../api/types";
 import { useAuth } from "../auth/AuthContext";
 import { Pagination } from "../components/Pagination";
-import { EmptyState, ErrorBlock, LoadingBlock, Modal, StatusBadge } from "../components/ui";
+import { EmptyState, ErrorBlock, Modal, StatusBadge } from "../components/ui";
+import { TableSkeleton } from "../components/Skeleton";
 import { useToast } from "../components/toast";
 import { formatDurationMs, formatRelative, truncate } from "../lib/format";
 
@@ -308,7 +309,7 @@ export default function DeploymentListPage() {
       </div>
 
       {deploymentsQ.isPending ? (
-        <LoadingBlock label="Loading deployments…" />
+        <TableSkeleton label="Loading deployments" rows={8} cols={7} />
       ) : deploymentsQ.isError ? (
         <ErrorBlock error={deploymentsQ.error} />
       ) : items.length === 0 ? (

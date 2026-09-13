@@ -18,6 +18,7 @@ import { apiGet } from "../api/client";
 import type { DashboardSummary } from "../api/types";
 import { useAuth } from "../auth/AuthContext";
 import { useEventStream, type WsFrame } from "../hooks/useEventStream";
+import { InfoHint } from "../components/InfoHint";
 import { EmptyState, ErrorBlock, LoadingBlock, StatusBadge } from "../components/ui";
 
 /** Public instance metadata (subset of the backend MetaOut schema). */
@@ -221,9 +222,12 @@ export default function DashboardPage() {
               <span
                 className="badge no-dot"
                 style={{ background: "var(--warn-soft)", color: "var(--warn)" }}
-                title="Simulated infrastructure — no real hosts are contacted"
               >
                 SIMULATION MODE
+                <InfoHint label="About simulation mode" placement="right">
+                  Simulated infrastructure — no real hosts are contacted. Servers, metrics and
+                  deployments are generated demo data.
+                </InfoHint>
               </span>
             ) : null}
           </h1>

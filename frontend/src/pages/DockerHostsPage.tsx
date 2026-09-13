@@ -10,7 +10,10 @@ import { Link } from "react-router-dom";
 import { apiGet, apiPost, ApiError } from "../api/client";
 import type { DockerHostOut, Page, ServerSummary } from "../api/types";
 import { Pagination } from "../components/Pagination";
-import { EmptyState, ErrorBlock, LoadingBlock, StatusBadge } from "../components/ui";
+import { EmptyState, ErrorBlock, StatusBadge } from "../components/ui";
+import { TableSkeleton } from "../components/Skeleton";
+import { InfoHint } from "../components/InfoHint";
+import { SearchInput } from "../components/form";
 import { useToast } from "../components/toast";
 import type { ContainerRow } from "./ContainerListPage";
 
@@ -135,14 +138,16 @@ export default function DockerHostsPage() {
       <div className="card">
         <div className="table-toolbar">
           <div className="filters">
-            <input
-              type="search"
-              className="input search-input"
+            <SearchInput
               placeholder="Search hosts…"
               aria-label="Search docker hosts"
               value={search}
               onChange={(event) => {
                 setSearch(event.target.value);
+                setOffset(0);
+              }}
+              onClear={() => {
+                setSearch("");
                 setOffset(0);
               }}
             />
@@ -166,7 +171,7 @@ export default function DockerHostsPage() {
         </div>
 
         {hostsQuery.isPending ? (
-          <LoadingBlock label="Loading docker hosts…" />
+          <TableSkeleton label="Loading docker hosts" rows={8} cols={9} />
         ) : hostsQuery.isError ? (
           <ErrorBlock error={hostsQuery.error} />
         ) : hostItems.length === 0 ? (
@@ -186,7 +191,14 @@ export default function DockerHostsPage() {
                     <th>Server</th>
                     <th>Status</th>
                     <th className="num">Containers</th>
-                    <th>TLS</th>
+                    <th>
+                      TLS{" "}
+                      <InfoHint label="About TLS verification">
+                        Whether the agent verifies the docker daemon's TLS certificate.
+                        "verified" is the safe default; "off" usually means a local unix socket
+                        or an explicitly unsecured daemon.
+                      </InfoHint>
+                    </th>
                     <th>Last checked</th>
                     <th>Last error</th>
                     <th>

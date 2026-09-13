@@ -1,10 +1,12 @@
 import { useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiGet } from "../api/client";
 import type { IncidentOut, Page } from "../api/types";
 import { Pagination } from "../components/Pagination";
-import { EmptyState, ErrorBlock, LoadingBlock, StatusBadge } from "../components/ui";
+import { InfoHint } from "../components/InfoHint";
+import { EmptyState, ErrorBlock, StatusBadge } from "../components/ui";
+import { TableSkeleton } from "../components/Skeleton";
 import { useEventStream } from "../hooks/useEventStream";
 import { formatDateTime, formatRelative } from "../lib/format";
 
@@ -13,6 +15,7 @@ const STATUS_FILTERS = ["OPEN", "ACKNOWLEDGED", "RESOLVED"] as const;
 const SEVERITIES = ["CRITICAL", "MAJOR", "MINOR", "WARNING"] as const;
 
 export default function IncidentListPage() {
+  const navigate = useNavigate();
   const queryClient = useQueryClient();
   const [offset, setOffset] = useState(0);
   const [statusFilter, setStatusFilter] = useState("");
@@ -99,7 +102,7 @@ export default function IncidentListPage() {
       </div>
 
       {incidentsQuery.isLoading ? (
-        <LoadingBlock label="Loading incidents…" />
+        <TableSkeleton label="Loading incidents" rows={8} cols={7} />
       ) : incidentsQuery.isError ? (
         <ErrorBlock error={incidentsQuery.error} />
       ) : incidents.length === 0 ? (
@@ -117,12 +120,29 @@ export default function IncidentListPage() {
             <table className="data">
               <thead>
                 <tr>
-                  <th scope="col">Severity</th>
+                  <th scope="col">
+                    Severity{" "}
+                    <InfoHint label="About severity">
+                      How bad the outage is: CRITICAL, MAJOR, MINOR or WARNING. Incidents opened
+                      by monitor failures start at MAJOR after repeated failing checks.
+                    </InfoHint>
+                  </th>
                   <th scope="col">Title</th>
                   <th scope="col">Monitor</th>
-                  <th scope="col">Status</th>
+                  <th scope="col">
+                    Status{" "}
+                    <InfoHint label="About status">
+                      OPEN needs attention. ACKNOWLEDGED means someone has claimed it and
+                      notifications are silenced. RESOLVED means recovery was detected or it was
+                      closed manually.
+                    </InfoHint>
+                  </th>
                   <th scope="col" className="num">
-                    Failures
+                    Failures{" "}
+                    <InfoHint label="About failures">
+                      Consecutive failed checks recorded when the incident opened. The count is
+                      kept for the audit trail even after the monitor recovers.
+                    </InfoHint>
                   </th>
                   <th scope="col">Opened</th>
                   <th scope="col">Last update</th>
@@ -130,14 +150,14 @@ export default function IncidentListPage() {
               </thead>
               <tbody>
                 {incidents.map((incident) => (
-                  <tr key={incident.id}>
+                  <tr key={incident.id} className="clickable" onClick={() => navigate(`/incidents/${incident.id}`)}>
                     <td>
                       <StatusBadge value={incident.severity} />
                     </td>
                     <td>
                       <Link to={`/incidents/${incident.id}`}>{incident.title}</Link>
                     </td>
-                    <td>
+                    <td onClick={(event) => event.stopPropagation()}>
                       <Link to={`/monitors/${incident.monitor_id}`}>
                         {incident.monitor_name ?? incident.monitor_id.slice(0, 8)}
                       </Link>

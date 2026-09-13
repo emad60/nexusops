@@ -113,6 +113,22 @@ describe("ApiKeysPage", () => {
     expect(screen.getByLabelText(/container\.read/)).toBeEnabled();
   });
 
+  it("keeps the hint trigger out of the wildcard checkbox's accessible name", async () => {
+    renderPage();
+    await screen.findByText("CI key");
+
+    fireEvent.click(screen.getByRole("button", { name: "Create key" }));
+
+    // The InfoHint sits beside the label, not inside it (it used to leak
+    // "About the wildcard scope" into the checkbox's announcement and toggle
+    // it when clicked). The name is the label text alone — leading mono "*"
+    // included — with no hint suffix.
+    const wildcard = screen.getByLabelText(/Full access/);
+    expect(wildcard).toHaveAccessibleName(/Full access — every scope/);
+    expect(wildcard).not.toHaveAccessibleName(/About the wildcard scope/);
+    expect(screen.getByRole("button", { name: "About the wildcard scope" })).toBeInTheDocument();
+  });
+
   it("revokes a key after confirmation", async () => {
     renderPage();
     await screen.findByText("CI key");

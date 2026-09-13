@@ -15,6 +15,7 @@ import {
   Modal,
   StatusBadge,
 } from "../components/ui";
+import { CheckboxField, SelectField, TextField } from "../components/form";
 import { useToast } from "../components/toast";
 import { useAuth } from "../auth/AuthContext";
 import { formatDateTime, formatRelative, truncate } from "../lib/format";
@@ -109,92 +110,72 @@ function EditMonitorDialog({
           submit();
         }}
       >
-        <div className="field">
-          <label htmlFor="edit-monitor-name">Name</label>
-          <input
-            id="edit-monitor-name"
-            className="input"
-            value={name}
-            onChange={(event) => setName(event.target.value)}
+        <TextField
+          id="edit-monitor-name"
+          label="Name"
+          value={name}
+          onChange={(event) => setName(event.target.value)}
+        />
+        <TextField
+          id="edit-monitor-url"
+          label="Target URL"
+          value={url}
+          onChange={(event) => setUrl(event.target.value)}
+          hint="URL changes are re-validated by the SSRF guard."
+        />
+        <div className="field-row">
+          <SelectField
+            id="edit-monitor-method"
+            label="Method"
+            value={method}
+            onChange={(event) => setMethod(event.target.value)}
+          >
+            {METHODS.map((m) => (
+              <option key={m} value={m}>
+                {m}
+              </option>
+            ))}
+          </SelectField>
+          <TextField
+            id="edit-monitor-interval"
+            label="Interval (seconds)"
+            info="How often the monitor runs. 60s suits most sites; anything below 30s hammers the target and inflates your check history — raise it for slow or rate-limited endpoints."
+            type="number"
+            min={10}
+            max={86400}
+            value={intervalSeconds}
+            onChange={(event) => setIntervalSeconds(Number(event.target.value))}
           />
         </div>
-        <div className="field">
-          <label htmlFor="edit-monitor-url">Target URL</label>
-          <input
-            id="edit-monitor-url"
-            className="input"
-            value={url}
-            onChange={(event) => setUrl(event.target.value)}
+        <div className="field-row">
+          <TextField
+            id="edit-monitor-timeout"
+            label="Timeout (seconds)"
+            info="How long a single check may take before it is failed as TIMEOUT. Keep it well below the interval so overlapping checks cannot pile up."
+            type="number"
+            min={0.5}
+            max={60}
+            step={0.5}
+            value={timeoutSeconds}
+            onChange={(event) => setTimeoutSeconds(Number(event.target.value))}
           />
-          <span className="small faint">URL changes are re-validated by the SSRF guard.</span>
+          <TextField
+            id="edit-monitor-expected"
+            label="Expected status"
+            info="The HTTP status a check must return to count as UP — 200 for most health endpoints. Redirects (3xx) are not followed."
+            type="number"
+            min={100}
+            max={599}
+            value={expectedStatus}
+            onChange={(event) => setExpectedStatus(Number(event.target.value))}
+          />
         </div>
-        <div className="field-row">
-          <div className="field">
-            <label htmlFor="edit-monitor-method">Method</label>
-            <select
-              id="edit-monitor-method"
-              className="input"
-              value={method}
-              onChange={(event) => setMethod(event.target.value)}
-            >
-              {METHODS.map((m) => (
-                <option key={m} value={m}>
-                  {m}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div className="field">
-            <label htmlFor="edit-monitor-interval">Interval (seconds)</label>
-            <input
-              id="edit-monitor-interval"
-              className="input"
-              type="number"
-              min={10}
-              max={86400}
-              value={intervalSeconds}
-              onChange={(event) => setIntervalSeconds(Number(event.target.value))}
-            />
-          </div>
-        </div>
-        <div className="field-row">
-          <div className="field">
-            <label htmlFor="edit-monitor-timeout">Timeout (seconds)</label>
-            <input
-              id="edit-monitor-timeout"
-              className="input"
-              type="number"
-              min={0.5}
-              max={60}
-              step={0.5}
-              value={timeoutSeconds}
-              onChange={(event) => setTimeoutSeconds(Number(event.target.value))}
-            />
-          </div>
-          <div className="field">
-            <label htmlFor="edit-monitor-expected">Expected status</label>
-            <input
-              id="edit-monitor-expected"
-              className="input"
-              type="number"
-              min={100}
-              max={599}
-              value={expectedStatus}
-              onChange={(event) => setExpectedStatus(Number(event.target.value))}
-            />
-          </div>
-        </div>
-        <div className="field">
-          <label htmlFor="edit-monitor-enabled" className="flex gap-8">
-            <input
-              id="edit-monitor-enabled"
-              type="checkbox"
-              checked={enabled}
-              onChange={(event) => setEnabled(event.target.checked)}
-            />
-            <span>Enabled (resume scheduling)</span>
-          </label>
-        </div>
+        <CheckboxField
+          id="edit-monitor-enabled"
+          label="Enabled (resume scheduling)"
+          checked={enabled}
+          onChange={(event) => setEnabled(event.target.checked)}
+        />
         {formError ? <div className="form-error">{formError}</div> : null}
         <div className="modal-actions">
           <button type="button" className="btn" onClick={onClose}>

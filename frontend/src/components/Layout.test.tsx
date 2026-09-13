@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { act, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { AuthProvider } from "../auth/AuthContext";
@@ -73,6 +73,7 @@ async function renderLayout() {
           <Routes>
             <Route element={<Layout />}>
               <Route index element={<div>Page marker</div>} />
+              <Route path="events" element={<div>Events page marker</div>} />
             </Route>
           </Routes>
         </AuthProvider>
@@ -122,5 +123,99 @@ describe("Layout", () => {
     await renderLayout();
 
     expect(await screen.findByText("SIMULATION MODE")).toBeInTheDocument();
+  });
+
+  it("renders the burger wired to the sidebar, closed by default", async () => {
+    mockApi({ environment: "production", simulation_mode: false });
+    const { container } = await renderLayout();
+
+    const burger = screen.getByRole("button", { name: "Open navigation" });
+    expect(burger).toHaveAttribute("aria-expanded", "false");
+    expect(burger).toHaveAttribute("aria-controls", "app-sidebar");
+    expect(container.querySelector(".app-shell")).not.toHaveClass("drawer-open");
+    expect(document.querySelector(".sidebar-backdrop")).not.toBeInTheDocument();
+  });
+
+  it("opens the drawer from the burger and closes it via the backdrop", async () => {
+    mockApi({ environment: "production", simulation_mode: false });
+    const { container } = await renderLayout();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Open navigation" }));
+    });
+    expect(container.querySelector(".app-shell")).toHaveClass("drawer-open");
+    expect(screen.getByRole("button", { name: "Open navigation" })).toHaveAttribute(
+      "aria-expanded",
+      "true",
+    );
+    const backdrop = document.querySelector(".sidebar-backdrop");
+    expect(backdrop).not.toBeNull();
+    expect(document.body.style.overflow).toBe("hidden");
+    // Focus moves into the drawer (first focusable = first nav link), like the modal.
+    expect(screen.getByRole("link", { name: "Dashboard" })).toHaveFocus();
+
+    await act(async () => {
+      fireEvent.click(backdrop!);
+    });
+    expect(container.querySelector(".app-shell")).not.toHaveClass("drawer-open");
+    expect(document.body.style.overflow).toBe("");
+    // Focus returns to the control that opened the drawer.
+    expect(screen.getByRole("button", { name: "Open navigation" })).toHaveFocus();
+  });
+
+  it("closes the drawer on Escape and on navigation", async () => {
+    mockApi({ environment: "production", simulation_mode: false });
+    const { container } = await renderLayout();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Open navigation" }));
+    });
+    expect(container.querySelector(".app-shell")).toHaveClass("drawer-open");
+
+    await act(async () => {
+      fireEvent.keyDown(window, { key: "Escape" });
+    });
+    expect(container.querySelector(".app-shell")).not.toHaveClass("drawer-open");
+
+    // Re-open, then navigate: the pathname effect must close it too.
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Open navigation" }));
+    });
+    expect(container.querySelector(".app-shell")).toHaveClass("drawer-open");
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("link", { name: "Events" }));
+    });
+    expect(container.querySelector(".app-shell")).not.toHaveClass("drawer-open");
+  });
+
+  it("traps Tab inside the drawer, wrapping at both ends", async () => {
+    mockApi({ environment: "production", simulation_mode: false });
+    await renderLayout();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Open navigation" }));
+    });
+    const sidebar = document.getElementById("app-sidebar")!;
+    const focusables = Array.from(
+      sidebar.querySelectorAll<HTMLElement>("a[href], button:not([disabled])"),
+    );
+    const first = focusables[0]!;
+    const last = focusables[focusables.length - 1]!;
+    expect(first).toHaveFocus();
+
+    // Tab on the last focusable wraps to the first…
+    last.focus();
+    await act(async () => {
+      fireEvent.keyDown(window, { key: "Tab" });
+    });
+    expect(first).toHaveFocus();
+
+    // …and shift+Tab on the first wraps to the last.
+    first.focus();
+    await act(async () => {
+      fireEvent.keyDown(window, { key: "Tab", shiftKey: true });
+    });
+    expect(last).toHaveFocus();
   });
 });

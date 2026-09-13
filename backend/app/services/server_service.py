@@ -474,6 +474,31 @@ async def ensure_docker_host(db: AsyncSession, *, server: Server) -> DockerHost:
     return host
 
 
+def _apply_agent_entry(
+    row: Container, entry: AgentContainerIn, *, server: Server, now: datetime
+) -> None:
+    """Write one heartbeat entry onto a container row.
+
+    Kept complete at every call site: the fresh-row branch flushes through a
+    savepoint, and a savepoint INSERT with any field still unassigned trips
+    the NOT NULL constraint before the race handler can ever run.
+    """
+    row.name = entry.name
+    row.image_ref = entry.image_ref
+    row.status = entry.status
+    row.health = entry.health or ContainerHealth.NONE
+    row.restart_count = entry.restart_count
+    if entry.cpu_percent is not None:
+        row.cpu_percent = entry.cpu_percent
+    if entry.mem_used_mb is not None:
+        row.mem_used_mb = entry.mem_used_mb
+    if entry.mem_limit_mb is not None:
+        row.mem_limit_mb = entry.mem_limit_mb
+    row.observed_at = now
+    row.simulated = True
+    row.server_id = server.id
+
+
 async def upsert_containers(
     db: AsyncSession, *, server: Server, entries: Sequence[AgentContainerIn]
 ) -> None:
@@ -498,9 +523,12 @@ async def upsert_containers(
 
     for entry in entries:
         row = by_cid.get(entry.container_id)
-        prior_status = row.status if row is not None else None
-        prior_restarts = row.restart_count if row is not None else 0
-        if row is None:
+        if row is not None:
+            prior_status = row.status
+            prior_restarts = row.restart_count or 0
+            _apply_agent_entry(row, entry, server=server, now=now)
+        else:
+            prior_status, prior_restarts = None, 0
             row = Container(
                 docker_host_id=host.id,
                 server_id=server.id,
@@ -511,23 +539,40 @@ async def upsert_containers(
                 mounts=[],
                 observed_at=now,
             )
-            db.add(row)
+            _apply_agent_entry(row, entry, server=server, now=now)
+            try:
+                # The sweep and a heartbeat can both see a brand-new container
+                # in the same instant; whoever loses the unique insert adopts
+                # the winner's row instead of failing the whole heartbeat.
+                # add() goes INSIDE the savepoint: begin_nested() autoflushes
+                # anything already pending at its start, so an object added
+                # before it would INSERT outside the savepoint and poison the
+                # session on conflict instead of triggering the handler.
+                async with db.begin_nested():
+                    db.add(row)
+                    await db.flush()
+            except IntegrityError:
+                # The savepoint rollback expunges an object that was added
+                # within it; detach explicitly if it is still attached, so
+                # nothing re-runs the failed insert below.
+                if row in db:
+                    db.expunge(row)
+                existing = await db.scalar(
+                    select(Container).where(
+                        Container.docker_host_id == host.id,
+                        Container.container_id == entry.container_id,
+                    )
+                )
+                if existing is None:
+                    raise
+                # Diff against the adopted row's real pre-race status, not
+                # None — the container did not just start because two writers
+                # raced.
+                prior_status = existing.status
+                prior_restarts = existing.restart_count or 0
+                row = existing
+                _apply_agent_entry(row, entry, server=server, now=now)
             by_cid[entry.container_id] = row
-
-        row.name = entry.name
-        row.image_ref = entry.image_ref
-        row.status = entry.status
-        row.health = entry.health or ContainerHealth.NONE
-        row.restart_count = entry.restart_count
-        if entry.cpu_percent is not None:
-            row.cpu_percent = entry.cpu_percent
-        if entry.mem_used_mb is not None:
-            row.mem_used_mb = entry.mem_used_mb
-        if entry.mem_limit_mb is not None:
-            row.mem_limit_mb = entry.mem_limit_mb
-        row.observed_at = now
-        row.simulated = True
-        row.server_id = server.id
 
         cid = row.container_id
         if entry.status == ContainerStatus.RUNNING and prior_status != ContainerStatus.RUNNING:

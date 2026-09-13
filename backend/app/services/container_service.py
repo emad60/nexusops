@@ -15,6 +15,7 @@ from typing import Any, cast
 
 from fastapi import Request
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import AuthContext
@@ -336,18 +337,50 @@ async def sync_host_state(db: AsyncSession, host_id: uuid.UUID) -> dict[str, Any
                 observed_at=now,
                 simulated=simulated,
             )
-            db.add(row)
-            summary["added"] += 1
+            adopted = False
+            try:
+                # The sweep can overlap itself and the agent heartbeat can
+                # insert the same brand-new container concurrently; adopt the
+                # winner's row instead of failing this sync. add() goes INSIDE
+                # the savepoint: begin_nested() autoflushes anything already
+                # pending at its start, so an object added before it would
+                # INSERT outside the savepoint and poison the session on
+                # conflict instead of triggering the handler.
+                async with db.begin_nested():
+                    db.add(row)
+                    await db.flush()
+            except IntegrityError:
+                # The savepoint rollback expunges an object that was added
+                # within it; detach explicitly if it is still attached, so
+                # nothing re-runs the failed insert below.
+                if row in db:
+                    db.expunge(row)
+                existing = await db.scalar(
+                    select(Container).where(
+                        Container.docker_host_id == host.id,
+                        Container.container_id == info.id[:72],
+                    )
+                )
+                if existing is None:
+                    raise
+                row = existing
+                adopted = True
             by_cid[info.id] = row
-            await event_bus.publish(
-                db,
-                type="CONTAINER_STARTED",
-                message=f"container discovered: {row.name}",
-                resource_type="container",
-                resource_id=str(row.id),
-                data={"image_ref": row.image_ref, "docker_host_id": str(host.id)},
-                dedup_key=f"container_started:{info.id}:{now:%Y%m%d}",
-            )
+            if adopted:
+                # Someone else created it mid-flight; count it as updated
+                # rather than announcing a discovery we didn't perform.
+                summary["updated"] += 1
+            else:
+                summary["added"] += 1
+                await event_bus.publish(
+                    db,
+                    type="CONTAINER_STARTED",
+                    message=f"container discovered: {row.name}",
+                    resource_type="container",
+                    resource_id=str(row.id),
+                    data={"image_ref": row.image_ref, "docker_host_id": str(host.id)},
+                    dedup_key=f"container_started:{info.id}:{now:%Y%m%d}",
+                )
             if status is ContainerStatus.RUNNING:
                 stats_targets.append(row)
             continue

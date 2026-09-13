@@ -6,6 +6,7 @@ import asyncio
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from sqlalchemy import select
 
 pytestmark = pytest.mark.integration
 
@@ -88,3 +89,64 @@ async def test_sweep_syncs_real_hosts_without_loop_errors(db):
 
     assert totals["hosts"] >= 1
     assert totals["errors"] == 0
+
+
+async def test_heartbeat_adopts_container_inserted_concurrently(db, monkeypatch):
+    """The sweep and a heartbeat can both see a brand-new container in the same
+    instant; the loser of the unique insert must adopt the winner's row instead
+    of failing the whole heartbeat with a uq_containers_host_cid violation."""
+    from app.core.db import get_sessionmaker
+    from app.models import Container, Server
+    from app.schemas.agent import AgentContainerIn
+    from app.services.server_service import ensure_docker_host, upsert_containers
+
+    server = Server(name="srv-race", hostname="race.test")
+    db.add(server)
+    await db.commit()
+    host = await ensure_docker_host(db, server=server)
+    await db.commit()
+
+    # Injection point: the upsert's FIRST flush. By then it has already
+    # SELECTed the host's rows (and seen no such container), so committing the
+    # same (docker_host_id, container_id) from a concurrent session right here
+    # reproduces the production race: the winner's row is committed between the
+    # heartbeat's SELECT and its INSERT.
+    real_flush = db.flush
+    fired = False
+
+    async def racing_flush(*args, **kwargs):
+        nonlocal fired
+        if not fired:
+            fired = True
+            async with get_sessionmaker()() as other:
+                other.add(
+                    Container(
+                        docker_host_id=host.id,
+                        container_id="abc123def456",
+                        name="racer",
+                        status="RUNNING",
+                        observed_at=datetime.now(UTC),
+                    )
+                )
+                await other.commit()
+        return await real_flush(*args, **kwargs)
+
+    monkeypatch.setattr(db, "flush", racing_flush)
+
+    entry = AgentContainerIn(
+        container_id="abc123def456",
+        name="web",
+        status="RUNNING",
+        image_ref="nginx:1.27",
+        restart_count=0,
+    )
+    await upsert_containers(db, server=server, entries=[entry])
+    await db.commit()
+
+    rows = (
+        (await db.execute(select(Container).where(Container.container_id == "abc123def456")))
+        .scalars()
+        .all()
+    )
+    assert len(rows) == 1
+    assert rows[0].name == "web"

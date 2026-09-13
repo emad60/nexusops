@@ -14,13 +14,13 @@ from datetime import UTC, datetime
 from typing import Any, cast
 
 from fastapi import Request
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import AuthContext
 from app.core.errors import BadRequest, Conflict, NotFound
 from app.core.logging import get_logger
-from app.models import Container, DockerHost
+from app.models import Container, DockerHost, LogEntry
 from app.models.enums import (
     AuditResult,
     ContainerHealth,
@@ -490,5 +490,15 @@ async def collect_recent_logs(
                 error=str(exc),
             )
             continue
+
+        # The sweep re-reads the same tail every cycle; docker log lines carry
+        # real timestamps, so keeping only lines newer than the newest stored
+        # row makes re-collection incremental instead of duplicating the tail.
+        last_ts = await db.scalar(
+            select(func.max(LogEntry.ts)).where(LogEntry.container_id == row.id)
+        )
+        if last_ts is not None:
+            lines = [line for line in lines if line.ts > last_ts]
+
         total += await log_service.ingest_provider_lines(db, container_row=row, lines=lines)
     return total

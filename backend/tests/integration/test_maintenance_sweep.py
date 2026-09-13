@@ -3,10 +3,66 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
 pytestmark = pytest.mark.integration
+
+
+async def test_collect_recent_logs_is_incremental(db, monkeypatch):
+    """Re-collection stores only lines newer than the newest stored row.
+
+    The sweep re-reads the same docker tail every cycle; without the cutoff
+    each pass duplicates the tail into the database until the row cap trims it.
+    """
+    from app.models import Container, DockerHost, LogEntry
+    from app.providers.base import LogLine
+    from app.services import container_service
+    from sqlalchemy import func, select
+
+    host = DockerHost(name="sim-collect", endpoint_url="sim://collect-test")
+    db.add(host)
+    await db.flush()
+    row = Container(
+        docker_host_id=host.id,
+        container_id="abc123def456",
+        name="web",
+        status="RUNNING",
+        observed_at=datetime.now(UTC),
+    )
+    db.add(row)
+    await db.commit()
+
+    base = datetime.now(UTC).replace(microsecond=0) - timedelta(minutes=5)
+    lines = [
+        LogLine(ts=base, stream="stdout", message="line-1"),
+        LogLine(ts=base + timedelta(seconds=1), stream="stdout", message="line-2"),
+    ]
+
+    class FakeProvider:
+        def logs(self, cid: str, tail: int = 100, follow: bool = False):
+            return iter(lines)
+
+    monkeypatch.setattr(container_service, "provider_for", lambda _host: FakeProvider())
+    monkeypatch.setattr(container_service, "is_simulated", lambda _provider: False)
+
+    stored = await container_service.collect_recent_logs(db, host)
+    assert stored == 2
+
+    # Same tail again: nothing new, nothing duplicated.
+    stored = await container_service.collect_recent_logs(db, host)
+    assert stored == 0
+
+    total = await db.scalar(
+        select(func.count()).select_from(LogEntry).where(LogEntry.container_id == row.id)
+    )
+    assert total == 2
+
+    # A genuinely newer line is picked up on the next pass.
+    lines.append(LogLine(ts=base + timedelta(seconds=2), stream="stdout", message="line-3"))
+    stored = await container_service.collect_recent_logs(db, host)
+    assert stored == 1
 
 
 async def test_sweep_syncs_real_hosts_without_loop_errors(db):

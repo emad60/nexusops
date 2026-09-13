@@ -19,6 +19,10 @@ LOG_RETENTION = {
     "SERVER": timedelta(days=7),
 }
 CONTAINER_LOG_CAP = 5000
+#: Running containers pulled per sweep. Docker timestamps make re-collection
+#: incremental (only lines newer than the newest stored row are kept), so this
+#: can cover a whole host rather than the first handful alphabetically.
+LOG_COLLECT_MAX_CONTAINERS = 25
 
 
 @app.task(name="nx.aggregate_metrics", soft_time_limit=240, time_limit=280)
@@ -205,4 +209,4 @@ async def _collect_logs(host_id) -> None:
     async with task_session() as db:
         host = await db.get(DockerHost, host_id)
         if host is not None:
-            await collect_recent_logs(db, host)
+            await collect_recent_logs(db, host, max_containers=LOG_COLLECT_MAX_CONTAINERS)

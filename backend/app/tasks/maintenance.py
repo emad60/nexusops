@@ -159,7 +159,10 @@ def sync_docker_hosts() -> dict[str, int]:
         for host in hosts:
             totals["hosts"] += 1
             try:
-                summary = run_async(_sync_one(host.id))
+                # Awaited, not run_async: this whole loop already runs inside
+                # the _run() coroutine, and asyncio.run() inside a running
+                # loop raises immediately.
+                summary = await _sync_one(host.id)
                 containers_seen = summary.get("seen", 0) if isinstance(summary, dict) else 0
                 if summary and summary.get("error"):
                     totals["errors"] += 1
@@ -178,7 +181,7 @@ def sync_docker_hosts() -> dict[str, int]:
             # Log ingestion only makes sense against real docker endpoints.
             if host.endpoint_url.startswith(("unix://", "tcp://")):
                 try:
-                    run_async(_collect_logs(host.id))
+                    await _collect_logs(host.id)
                 except Exception as exc:
                     logger.warning(
                         "docker_log_collect_failed", host=str(host.id), error=str(exc)[:200]

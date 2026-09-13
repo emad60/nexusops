@@ -205,22 +205,12 @@ def collect_containers(max_inspect: int = 10) -> list[dict]:
             "container_id": str(item.get("Id", ""))[:64],
             "name": (item.get("Names") or ["unknown"])[0].lstrip("/")[:200],
             "status": _STATE_MAP.get(state, "CREATED"),
-            "health": health,
+            # "" is not a ContainerHealth — send null (unknown) instead, or the
+            # whole heartbeat is rejected as 422.
+            "health": health or None,
             "image_ref": str(item.get("Image", ""))[:300],
             "restart_count": 0,
         }
-        ports = []
-        for port in item.get("Ports") or []:
-            if port.get("PublicPort"):
-                ports.append(
-                    {
-                        "private": port.get("PrivatePort"),
-                        "public": port.get("PublicPort"),
-                        "type": port.get("Type", "tcp"),
-                    }
-                )
-        if ports:
-            entry["ports"] = ports[:16]
 
         # RestartCount/Health need inspect; cap it so a huge fleet stays cheap.
         if len(containers) < max_inspect and entry["container_id"]:

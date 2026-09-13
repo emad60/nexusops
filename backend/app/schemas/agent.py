@@ -14,6 +14,12 @@ _ALLOWED_CONTAINER_STATUSES = frozenset(
     {"RUNNING", "EXITED", "PAUSED", "CREATED", "RESTARTING", "DEAD"}
 )
 
+#: The agent reports at most this many containers per heartbeat (its list is
+#: capped before send). Absence is only trusted for reconciliation when the
+#: payload is below the cap — a truncated list says nothing about what it
+#: dropped, so containers must not be treated as removed.
+AGENT_CONTAINER_CAP = 50
+
 
 class AgentHelloIn(APIModel):
     """First contact from an agent after enrollment; fills static host facts."""

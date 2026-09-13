@@ -45,7 +45,13 @@ from app.models.enums import (
     MetricGranularity,
     ServerStatus,
 )
-from app.schemas.agent import AgentContainerIn, AgentHeartbeatIn, AgentHelloIn, AgentHelloOut
+from app.schemas.agent import (
+    AGENT_CONTAINER_CAP,
+    AgentContainerIn,
+    AgentHeartbeatIn,
+    AgentHelloIn,
+    AgentHelloOut,
+)
 from app.schemas.server import ServerCreate, ServerUpdate
 from app.services.event_bus import publish
 
@@ -548,6 +554,31 @@ async def upsert_containers(
             data={"container_id": cid, "server_id": str(server.id)},
             dedup_key=f"{key}:{row.id}:{today}",
         )
+
+    # Containers seen on this host before but absent from this heartbeat have
+    # been removed from the daemon (docker rm, compose recreate, prune) — the
+    # same reconciliation the real sync path applies. Only trust absence below
+    # the agent's cap: a truncated payload says nothing about what it dropped.
+    if len(entries) < AGENT_CONTAINER_CAP:
+        missing = await db.execute(
+            select(Container).where(
+                Container.docker_host_id == host.id,
+                Container.container_id.not_in(set(ids)),
+            )
+        )
+        for row in missing.scalars().all():
+            await publish(
+                db,
+                type="CONTAINER_REMOVED",
+                level=EventLevel.WARNING,
+                message=f"container disappeared: {row.name}",
+                actor_type=ActorType.AGENT,
+                resource_type="container",
+                resource_id=str(row.id),
+                data={"container_name": row.name, "server_id": str(server.id)},
+                dedup_key=f"container_removed:{row.container_id}:{today}",
+            )
+            await db.delete(row)
 
 
 # --- Reads used by detail views -------------------------------------------------

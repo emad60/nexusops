@@ -141,3 +141,98 @@ async def test_malformed_heartbeat_is_422_not_500(client, owner):
         f"{API}/agent/heartbeat", json=bad, headers={"X-Agent-Token": token}
     )
     assert response.status_code == 422
+
+
+async def test_heartbeat_removes_vanished_containers(client, owner, db):
+    """A container absent from a later heartbeat is gone from the daemon."""
+    _created, token = await _enrolled(client, owner, "srv-reap")
+    two = _heartbeat(
+        containers=[
+            {
+                "container_id": "aaaa1111",
+                "name": "stays",
+                "status": "RUNNING",
+                "health": "NONE",
+                "image_ref": "nginx:1.27",
+                "restart_count": 0,
+            },
+            {
+                "container_id": "bbbb2222",
+                "name": "goes",
+                "status": "RUNNING",
+                "health": "NONE",
+                "image_ref": "redis:7",
+                "restart_count": 0,
+            },
+        ]
+    )
+    assert (
+        await client.post(f"{API}/agent/heartbeat", json=two, headers={"X-Agent-Token": token})
+    ).status_code == 204
+
+    again = await client.post(
+        f"{API}/agent/heartbeat",
+        json=_heartbeat(
+            containers=[
+                {
+                    "container_id": "aaaa1111",
+                    "name": "stays",
+                    "status": "RUNNING",
+                    "health": "NONE",
+                    "image_ref": "nginx:1.27",
+                    "restart_count": 0,
+                }
+            ]
+        ),
+        headers={"X-Agent-Token": token},
+    )
+    assert again.status_code == 204
+
+    remaining = (await db.execute(select(Container.name))).scalars().all()
+    assert remaining == ["stays"]
+    removed = (
+        (await db.execute(select(SystemEvent.type).where(SystemEvent.type == "CONTAINER_REMOVED")))
+        .scalars()
+        .all()
+    )
+    assert removed == ["CONTAINER_REMOVED"]
+
+
+async def test_heartbeat_at_container_cap_skips_reconciliation(client, owner, db):
+    """A payload at the agent's cap may be truncated — absence proves nothing."""
+    _created, token = await _enrolled(client, owner, "srv-cap")
+    seeded = _heartbeat(
+        containers=[
+            {
+                "container_id": "cccc3333",
+                "name": "must-survive",
+                "status": "RUNNING",
+                "health": "NONE",
+                "image_ref": "busybox:1",
+                "restart_count": 0,
+            }
+        ]
+    )
+    assert (
+        await client.post(f"{API}/agent/heartbeat", json=seeded, headers={"X-Agent-Token": token})
+    ).status_code == 204
+
+    at_cap = _heartbeat(
+        containers=[
+            {
+                "container_id": f"dddd{i:04d}",
+                "name": f"bulk-{i}",
+                "status": "RUNNING",
+                "health": "NONE",
+                "image_ref": "busybox:1",
+                "restart_count": 0,
+            }
+            for i in range(50)  # == AGENT_CONTAINER_CAP: no reconciliation
+        ]
+    )
+    assert (
+        await client.post(f"{API}/agent/heartbeat", json=at_cap, headers={"X-Agent-Token": token})
+    ).status_code == 204
+
+    names = (await db.execute(select(Container.name))).scalars().all()
+    assert "must-survive" in names

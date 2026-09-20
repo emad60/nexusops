@@ -151,6 +151,17 @@ nexusops/
 - [docs/troubleshooting.md](docs/troubleshooting.md) — common failure modes and fixes.
 - [docs/engineering-report.md](docs/engineering-report.md) — build & verification
   report: what was delivered, how it was tested, audit results, known gaps.
+- [docs/platform-vision.md](docs/platform-vision.md) — **platform-evolution proposal
+  (for review, not yet approved)**: multi-tenant direction, target domain model,
+  tenancy enforcement, authorization, phased roadmap. Companion specs:
+  [domain-model.md](docs/domain-model.md), [multi-tenancy.md](docs/multi-tenancy.md),
+  [authorization.md](docs/authorization.md), [product-roadmap.md](docs/product-roadmap.md),
+  [node-agent-architecture.md](docs/node-agent-architecture.md),
+  [domain-routing.md](docs/domain-routing.md),
+  [certificate-management.md](docs/certificate-management.md),
+  [deployment-architecture.md](docs/deployment-architecture.md),
+  [secrets-architecture.md](docs/secrets-architecture.md),
+  [platform-security-model.md](docs/platform-security-model.md).
 
 ## Production notes
 
@@ -159,12 +170,14 @@ nexusops/
 - **Rotate the secrets**: `JWT_SECRET` (≥ 32 chars) and `ENCRYPTION_KEY` (Fernet). Both
   are placeholders in `.env.example`; generate real ones with
   `./scripts/generate_secrets.sh`. Losing `ENCRYPTION_KEY` means losing stored secrets.
-- **Run `ENVIRONMENT=production` behind TLS.** The refresh-token cookie sets its
-  `Secure` flag only when the environment is `production`
-  (`cookies_secure` in `backend/app/core/config.py`), and browsers reject `Secure`
-  cookies over plain HTTP — so terminate TLS in front of nginx (nginx itself listens
-  on plain HTTP :8080 and forwards `X-Forwarded-Proto`). Production also disables
-  docs exposure and verbose error detail.
+- **Run behind TLS.** The refresh-token cookie sets its `Secure` flag whenever the
+  request arrives over HTTPS — derived from `X-Forwarded-Proto` (set authoritatively
+  by the edge, not client-spoofable), falling back to the request scheme on direct
+  ASGI access (`_transport_is_https` in `backend/app/api/v1/auth.py`). It is
+  deliberately NOT tied to `ENVIRONMENT`: browsers refuse `Secure` cookies over
+  plain HTTP, so terminate TLS in front of nginx (nginx itself listens on plain
+  HTTP :8080 and forwards `X-Forwarded-Proto`). Production also disables docs
+  exposure and verbose error detail.
 - Redis runs with persistence disabled (`appendonly no`) — it is treated as a queue and
   pub/sub bus only; all durable state lives in PostgreSQL.
 - Review `ALLOW_PRIVATE_TARGETS=true` (fine for simulation; disable it in production to

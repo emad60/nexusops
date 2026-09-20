@@ -1,0 +1,1626 @@
+[
+ {
+  "subsystem": "SQLAlchemy data model + migration inventory (backend/app/models/*, core/db.py, core/pagination.py, alembic)",
+  "components": [
+   {
+    "name": "models/base.py (Base, mixins, column helpers)",
+    "maturity": "production",
+    "evidence": "backend/app/models/base.py:13-42,49-76 — NAMING_CONVENTION for alembic, uuid_pk(), big_serial_pk() Identity(always), TimestampMixin, json_column(), status_check()",
+    "notes": "Table names auto-pluralized from class name (base.py:25-30)"
+   },
+   {
+    "name": "models/enums.py (domain registries)",
+    "maturity": "production",
+    "evidence": "backend/app/models/enums.py:1-181 — ~25 StrEnum classes, member name==value so String storage never disagrees",
+    "notes": "No native PG enum types; all enum-ish columns are String + CHECK via status_check()"
+   },
+   {
+    "name": "identity.py — 7 tables (roles, permissions, role_permissions, users, sessions, refresh_tokens, api_keys)",
+    "maturity": "production",
+    "evidence": "backend/app/models/identity.py:25-150 — roles.name unique (L29), users.email unique (L62), refresh_tokens.token_hash unique (L124), api_keys.key_hash unique (L144), single role per user (L76)",
+    "notes": "RefreshToken.superseded_by_id is a plain Uuid, no FK (L126)"
+   },
+   {
+    "name": "infra.py — 7 tables (tags, servers, server_tags, server_credentials, docker_hosts, containers, container_images)",
+    "maturity": "production",
+    "evidence": "backend/app/models/infra.py:34-196 — servers.name unique (L51), uq_containers_host_cid (L146), uq_images_host_iid (L187), DockerHost.server_id nullable FK (L126-128)",
+    "notes": "Agent credential is servers.agent_token_hash (nullable, indexed, not unique, L70)"
+   },
+   {
+    "name": "delivery.py — 5 tables (projects, applications, deployment_environments, deployments, deployment_steps)",
+    "maturity": "production",
+    "evidence": "backend/app/models/delivery.py:25-164 — projects.name unique (L29), uq_applications_project_name (L44), uq_envs_application_name (L70), uq_deployments_app_number (L90), uq_steps_deployment_idx (L145)",
+    "notes": "Application.current_deployment_id uses use_alter FK (L56-58); application/env slugs not unique"
+   },
+   {
+    "name": "notify.py — 2 tables (notification_channels, notification_deliveries)",
+    "maturity": "production",
+    "evidence": "backend/app/models/notify.py:27-94 — Fernet config_ciphertext + masked display_target (L41-42), uq_deliveries_channel_event (L61)",
+    "notes": "No DB unique on channel name"
+   },
+   {
+    "name": "observability.py — 9 tables (monitors, monitor_checks, incidents, incident_events, metric_snapshots, log_entries, system_events, audit_logs, alerts)",
+    "maturity": "production",
+    "evidence": "backend/app/models/observability.py:50-298 — big_serial PKs (L100,176,202), uq_system_events_dedup_key (L224), audit_logs append-only per docstring (L250)",
+    "notes": "audit_logs.metadata_ maps to SQL column 'metadata' (L276-278); func.now() server defaults per production-bug comment (L228-233,259)"
+   },
+   {
+    "name": "secrets.py — 1 table (secrets)",
+    "maturity": "production",
+    "evidence": "backend/app/models/secrets.py:23-59 — uq_secrets_project_key (L34), partial unique index ux_secrets_global_key WHERE project_id IS NULL (L36-40), created_by_id/rotated_by_id (L54-59)",
+    "notes": "Global (NULL-project) secrets form a single platform-wide namespace"
+   },
+   {
+    "name": "core/db.py (async engine + session)",
+    "maturity": "production",
+    "evidence": "backend/app/core/db.py:18-68 — pool_size/max_overflow/pre_ping, hide_parameters=True, commit-on-success get_session dependency, sync_database_url() for alembic/celery",
+    "notes": "Module-global singleton engine/sessionmaker"
+   },
+   {
+    "name": "core/pagination.py (offset + keyset)",
+    "maturity": "production",
+    "evidence": "backend/app/core/pagination.py:42-91 — paginate() does count(*) over subquery; Cursor(ts,id) base64 cursor for high-volume streams; MAX_LIMIT=100",
+    "notes": "Cursor keyed on (ts, bigint id) — works with global Identity PKs"
+   },
+   {
+    "name": "alembic migrations (initial schema + 5 deltas)",
+    "maturity": "production",
+    "evidence": "backend/alembic/versions/ — 6 files, linear chain b5866787bde4(20260823 initial) → a1f4c2d9e7b3 → c7e8b4f2a6d1 → d9e4f7a1c3b5 → f2a9b4c6e8d1 → b3d7f9e2c6a4 (head, 20260913 fix event/audit created_at defaults)",
+    "notes": "Initial migration creates audit-mutation-blocking trigger nexusops_block_audit_mutation (initial_schema.py:23)"
+   },
+   {
+    "name": "retention/pruning (maintenance tasks + metrics rollup)",
+    "maturity": "partial",
+    "evidence": "backend/app/tasks/maintenance.py:16-21,42-88 — log trim (CONTAINER 3d, DEPLOYMENT 30d, SERVER 7d, 5000-row/container cap); metrics_service.py:264-300 — RAW 24h/HOURLY 30d/DAILY 365d rollup+prune",
+    "notes": "monitor_checks, system_events, notification_deliveries, container_images have NO pruning anywhere (grep: no delete() calls); audit_logs unpruned by design (append-only)"
+   }
+  ],
+  "tenancy_gaps": [
+   "No Organization/tenant table exists and no org_id column on any of the 31 tables (backend/app/models/__init__.py:43-76 has the full registry)",
+   "projects.name is globally unique — two orgs cannot share a project name (backend/app/models/delivery.py:29)",
+   "servers.name is globally unique (backend/app/models/infra.py:51)",
+   "tags.name is globally unique (backend/app/models/infra.py:38)",
+   "uq_system_events_dedup_key is a platform-global unique on dedup_key (backend/app/models/observability.py:224)",
+   "ux_secrets_global_key partial unique index puts NULL-project secrets in one platform-wide key namespace (backend/app/models/secrets.py:36-40)",
+   "18 of 31 tables have zero owner/creator/actor column: tags, server_tags, servers, docker_hosts, containers, container_images, applications, deployment_environments, deployment_steps, monitor_checks, metric_snapshots, log_entries, alerts, notification_deliveries, role_permissions, roles, permissions, users",
+   "Single global role registry: roles.name unique + users.role_id one-role-per-user — no per-org roles (backend/app/models/identity.py:29,76)",
+   "DockerHost↔Server: ORM declares uselist=False 1:1 but DB has no unique on docker_hosts.server_id — many hosts may claim one server (backend/app/models/infra.py:84 vs 126-128)",
+   "Monitors, notification channels, docker hosts have no DB unique on name; docker-host name uniqueness is service-level only (backend/app/services/docker_host_service.py:50,113) — race-prone and would need new per-org composites anyway",
+   "Sessions/refresh_tokens/api_keys carry user_id only — no org context on any credential (backend/app/models/identity.py:95-97,121-123,139-141)",
+   "audit_logs.actor_id only; no org attribution for per-org audit trails (backend/app/models/observability.py:263-266)"
+  ],
+  "docs_needs": [
+   "ER diagram of all 31 tables with FK/ondelete map (no schema doc exists beyond docstrings)",
+   "Document exact Server↔DockerHost cardinality: ORM 1:1 declared but DB permits many-to-one (infra.py:84,126)",
+   "Retention policy table: log windows per source, metric RAW/HOURLY/DAILY windows, which tables are never pruned",
+   "PK strategy rationale: uuid4 client-side defaults vs Identity(always) for high-volume tables (base.py:36-42)",
+   "status_check() pattern: String+CHECK instead of native PG enums, and the name==value StrEnum invariant",
+   "audit_logs append-only guarantee via nexusops_block_audit_mutation trigger (initial_schema.py:23)",
+   "Credential handling contract: SHA-256 hashes for tokens/keys, Fernet for secret/channel/SSH ciphertext",
+   "Alembic workflow: single linear chain, NAMING_CONVENTION-driven constraint names, sync_database_url() for offline ops",
+   "Cursor pagination contract for high-volume endpoints (Cursor ts|id encoding, MAX_LIMIT=100)",
+   "Deployment.number allocation per application guarded by uq_deployments_app_number"
+  ],
+  "key_contracts": [
+   "All 31 tables on one Base with NAMING_CONVENTION for stable alembic constraint names (backend/app/models/base.py:13-33)",
+   "PKs: UUIDv4 (Python-side default, base.py:36-37) everywhere except monitor_checks/metric_snapshots/log_entries which use BigInteger Identity(always=True) (base.py:40-42); composite PKs on role_permissions and server_tags",
+   "Enum-ish columns stored as String + CHECK constraint generated by status_check() (base.py:74-76) — no native PG enum types; ~25 StrEnum registries in enums.py with name==value",
+   "JSONB columns (12 total): api_keys.scopes, servers.extra, containers.ports/env_keys/labels/mounts, applications.build_config, deployment_environments.config, monitors.headers, incident_events.data, metric_snapshots.extra, system_events.data, audit_logs.\"metadata\", notification_channels.events",
+   "TimestampMixin: created_at (indexed) + updated_at with Python-side defaults so flush needs no refresh; server_default=func.now() fallback (base.py:49-67)",
+   "Secrets are Fernet ciphertext at rest: secrets.ciphertext, server_credentials.secret_ciphertext, notification_channels.config_ciphertext; credentials are SHA-256 hashes: refresh_tokens.token_hash, api_keys.key_hash, servers.agent_token_hash",
+   "audit_logs is append-only, enforced by DB trigger nexusops_block_audit_mutation (alembic initial schema)",
+   "Async engine hides bound parameters in errors and uses pool_pre_ping (core/db.py:26-39); sessions commit-on-success via get_session dependency (db.py:50-58)",
+   "Pagination: offset paginate() with count over subquery for lists; keyset CursorPage(ts,id) for monitor checks (core/pagination.py:42-91)",
+   "Cascade policy: children CASCADE (steps, containers, logs), user references SET NULL (owner/creator/actor columns), roles RESTRICT (identity.py:77)",
+   "FK quirks: RefreshToken.superseded_by_id has no FK (identity.py:126); Application.current_deployment_id uses use_alter circular FK (delivery.py:56-58)"
+  ],
+  "extension_points": [
+   "models/__init__.py is the single registration point — importing a new model there puts it on Base.metadata and into alembic autogenerate",
+   "NAMING_CONVENTION (base.py:13-19) keeps constraint names deterministic, so composite-unique swaps are clean op.drop/create pairs",
+   "status_check() helper generalizes to any new enum-like CHECK column",
+   "json_column()/existing `extra`/`data`/`config` JSONB columns absorb new attributes without migrations (servers.extra, system_events.data, environments.config)",
+   "big_serial_pk() reusable for any new high-volume table; CursorPage/encode_cursor reusable for new streams",
+   "TimestampMixin drop-in for new tables; created_at index already conventional",
+   "Alembic env wired to sync_database_url() (core/db.py:61-68) so worker/api/alembic share one URL source",
+   "Service layer (services/*) is the only place queries are built — single choke point for future org filtering",
+   "Base.__tablename__ auto-pluralization means new models get consistent names for free (base.py:25-30)"
+  ],
+  "risks": [
+   "Adding org_id is a 31-table change: every owner-less table (servers, docker_hosts, applications, containers, logs, metrics, checks, alerts, deliveries) needs a tenancy path derived through a parent FK, and none exists today",
+   "Global unique columns hard-block same-name resources across orgs: projects.name (delivery.py:29), servers.name (infra.py:51), tags.name (infra.py:38) — must become (org_id, name) composites",
+   "uq_system_events_dedup_key global unique will collide across orgs; dedup semantics need rework, not just an index swap (observability.py:224)",
+   "ux_secrets_global_key partial index makes NULL-project secrets a single global namespace; per-org global secrets require org_id in both predicate and index (secrets.py:36-40)",
+   "monitor_checks has no pruning — it grows unbounded and is the least-managed high-volume table (only monitor_checks/metric_snapshots/log_entries use bigserial; only metrics+logs are pruned)",
+   "Constraints already scoped below org (uq_applications_project_name, uq_envs_application_name, uq_deployments_app_number, uq_steps_deployment_idx, uq_containers_host_cid, uq_images_host_iid, uq_deliveries_channel_event) inherit org scoping via parents — no composite change needed, but their parent rows must themselves be org-scoped first",
+   "users.email global unique is fine only if users stay platform-level identities; per-org user accounts require a membership table and would break the single users.role_id model (identity.py:62,76)",
+   "Server↔DockerHost DB permits many hosts per server while ORM assumes 1:1 — existing data may violate the declared relationship before any org migration (infra.py:84,126)",
+   "Docker-host name uniqueness enforced only in service code — two concurrent creates can both succeed; needs a real DB constraint regardless of tenancy (docker_host_service.py:50)",
+   "Identity(always) bigint sequences are global across orgs — harmless for correctness but keyset cursors (pagination.py:60-67) leak global row ordering/velocity to any tenant that can observe ids",
+   "audit_logs is append-only with no org column — retrofitting per-org audit requires schema change plus careful handling of the mutation-blocking trigger (observability.py:250, initial_schema.py:23)"
+  ]
+ },
+ {
+  "subsystem": "React SPA (frontend/src: Vite + React 18 + react-router-dom 7 + TanStack Query 5 + lucide-react; no other runtime deps — frontend/package.json:14-20)",
+  "components": [
+   {
+    "name": "Router + route guards (App.tsx)",
+    "maturity": "production",
+    "evidence": "frontend/src/App.tsx:9-31 lazy-loads all 23 pages; :33-39 RequireAuth (auth-only, no permission guard); :41-46 LoginRoute bounces authed users to /; :54-84 route map; :85 wildcard -> /.",
+    "notes": "Routes: /login; authed layout routes: /, /servers, /servers/:serverId, /containers, /containers/:containerId, /docker-hosts, /monitors, /monitors/:monitorId, /incidents, /incidents/:incidentId, /alerts, /deployments, /deployments/:deploymentId, /projects, /projects/:projectId, /events, /audit-logs, /secrets, /settings/users, /settings/roles, /settings/api-keys, /settings/sessions, * -> /"
+   },
+   {
+    "name": "HTTP client (api/client.ts)",
+    "maturity": "production",
+    "evidence": "frontend/src/api/client.ts:9-11 API_BASE=/api/v1, access token in module memory only; :70-102 single-flight refreshToken() via HttpOnly cookie POST /auth/refresh; :127-132 one transparent refresh+retry on 401 (_retried flag); :14-26 ApiError{status,code,details}; :56-67 parses backend {error:{code,message,details}} envelope; :122 maps fetch failure to status-0 NETWORK_ERROR.",
+    "notes": "Relative /api/v1 — same-origin only, assumes nginx edge proxy; no tenant/org header anywhere."
+   },
+   {
+    "name": "AuthContext",
+    "maturity": "production",
+    "evidence": "frontend/src/auth/AuthContext.tsx:66-71 boot probe GET /auth/me; :73-83 login -> setAccessToken + fetchProfile; :85-95 logout clears state; :34-38 + :97-100 hasPermission = superadmin || wildcard match (p === '*' or 'group.*' prefix); :13-18 MeResponse {user, role, permissions, superadmin}.",
+    "notes": "Permissions held as flat string[]; single global profile, no tenant/role-context selection."
+   },
+   {
+    "name": "WS client hook (useEventStream)",
+    "maturity": "production",
+    "evidence": "frontend/src/hooks/useEventStream.ts:12-17 channels: global, server-metrics, container-logs, deployment-logs, incidents; :33 wss same-origin /api/v1/ws; :93-99 sends {action:'auth', token} then immediately subscribes (hub never acks auth); :116-121 reconnect backoff 1s*2^n capped 15s; :101-105 falls back to refreshToken() when no token at connect; :70-81 client-side channel+params frame filter.",
+    "notes": "One WebSocket PER hook consumer (Layout + page = 2 sockets per page); effect deps [signature] only (:135) so mid-session token rotation does not re-auth a live socket — stale comment at :133-134 claims otherwise; no recovery if hub rejects the auth frame."
+   },
+   {
+    "name": "App shell (Layout sidebar, CommandPalette, ui/toast/form kit)",
+    "maturity": "production",
+    "evidence": "frontend/src/components/Layout.tsx:174-207 sidebar groups: Overview(Dashboard, Events), Infrastructure(Servers server.read, Containers container.read, Docker hosts container.read, Projects project.read), Observability(Monitors monitor.read, Incidents monitor.read, Alerts ungated + unread badge, Deployments deployment.read, Audit log audit.read, Secrets secret.read), Settings(Users & roles user.read; API keys + Sessions ungated); :81-93 unread-alerts poll 60s + shared ['meta'] cache; :94-96 incidents-channel tick; :209-220 SIMULATION MODE badge from GET /meta; CommandPalette.tsx:12-27 static nav commands + server search.",
+    "notes": "Mobile off-canvas drawer with full focus trap (Layout.tsx:117-161); Ctrl-K palette."
+   },
+   {
+    "name": "Shared types (api/types.ts)",
+    "maturity": "partial",
+    "evidence": "frontend/src/api/types.ts:1 header 'Shared API payload types (snake_case, mirroring the backend schemas)'; 409 lines hand-written interfaces (Page<T>:3, CursorPage<T>:10, User:16, ServerSummary:66, ContainerOut:98, ProjectOut:235, DeploymentOut:294...).",
+    "notes": "No codegen: package.json:6-13 build = 'tsc --noEmit && vite build', no openapi-typescript; sync with backend/app/schemas is manual drift risk."
+   },
+   {
+    "name": "E2E journey suite (Playwright)",
+    "maturity": "production",
+    "evidence": "frontend/playwright.config.ts:5-10 requires composed stack, SIMULATION_MODE=true, seeded DB; frontend/e2e/journey.spec.ts:72 register+login, :131 logout/login as seeded admin, :145 add server + enroll agent + heartbeat ONLINE with containers, :196 monitor fails -> incident -> mailpit email, :222 notification delivery, :241 recovery auto-resolves, :266/:285 deployment success and broken-version failure, :302 audit trail captured mutations, :316 live WS updates without reload.",
+    "notes": "workers:1, sequential 10-test journey; validates simulated infra only, never real hosts."
+   },
+   {
+    "name": "LoginPage",
+    "maturity": "production",
+    "evidence": "frontend/src/pages/LoginPage.tsx:1-3 split-screen sign-in + registration; auth transport delegated to AuthContext.login; e2e-covered (journey.spec.ts:72,131).",
+    "notes": "No SSO/MFA UI; lands on fleet-wide Dashboard."
+   },
+   {
+    "name": "DashboardPage",
+    "maturity": "production",
+    "evidence": "frontend/src/pages/DashboardPage.tsx:1-3 fleet overview from GET /dashboard/summary + GET /meta; :113 global WS channel invalidates ['dashboard','summary']; :152-200 stat tiles gated per-permission; :277 recent events gated event.read; e2e :316.",
+    "notes": "Counters are instance-wide (types.ts:375-391); avg CPU/mem optional."
+   },
+   {
+    "name": "ServerListPage + ServerDetailPage",
+    "maturity": "production",
+    "evidence": "ServerListPage: server CRUD, filters (q/status/environment/offset key at ServerListPage.tsx), create gated server.create (:157); ServerDetailPage:209 server-metrics WS channel param server_id, :148-149 invalidates ['server',id]+['servers'], :364-365 update/delete gated; LineChart sparklines; e2e journey.spec.ts:145.",
+    "notes": "Agent enrollment flow works end-to-end in simulation."
+   },
+   {
+    "name": "ContainerListPage + ContainerDetailPage",
+    "maturity": "production",
+    "evidence": "ContainerListPage: list projection comment (list omits command/mounts, detail includes them); ContainerDetailPage:138-140 container-logs WS channel param container_id, :238-239 lifecycle gated container.lifecycle / remove container.remove.",
+    "notes": "No dedicated e2e; exercised indirectly via server journey; incremental log collection backend-side."
+   },
+   {
+    "name": "DockerHostsPage",
+    "maturity": "partial",
+    "evidence": "frontend/src/pages/DockerHostsPage.tsx:19-26 ping result + per-host container counts types; uses keepPreviousData, edit modal (name/endpoint/tls_verify), status filter; DockerHostsPage.tsx:34-39 absolute-UTC formatting.",
+    "notes": "Code-complete with unit tests but zero e2e coverage; not exercised in journey."
+   },
+   {
+    "name": "MonitorList/Detail + IncidentList/Detail pages",
+    "maturity": "production",
+    "evidence": "MonitorList: create/pause, canManage = monitor.manage (MonitorListPage.tsx:155); MonitorDetail: checks + uptime keys ['monitor-checks'/​'monitor-uptime'] and 3-key invalidation (MonitorDetailPage.tsx:289-291); IncidentList:26 incidents WS invalidates ['incidents']; IncidentDetail:73-109 incidents WS + incident.action gate; e2e journey.spec.ts:196,222,241 (fail->incident->email, delivery, auto-resolve).",
+    "notes": "Full observability loop proven in simulation."
+   },
+   {
+    "name": "AlertsPage",
+    "maturity": "partial",
+    "evidence": "frontend/src/pages/AlertsPage.tsx:289-290 canReadChannels=channel.read / canManageChannels=channel.manage; keys ['alerts'],['notification-channels'],['deliveries'] with paired invalidation (:314-350); unread badge feed in Layout.tsx:81-86.",
+    "notes": "e2e only asserts notification delivery landed (journey.spec.ts:222), not the channel/delivery management UI itself."
+   },
+   {
+    "name": "DeploymentListPage + DeploymentDetailPage",
+    "maturity": "production",
+    "evidence": "List: trigger dialog POST /deployments/applications/{id}/deployments gated deployment.create (DeploymentListPage.tsx:265,393); Detail:148 deployment-logs WS channel param deployment_id, step statuses poll while active, :182-183 invalidates detail+list, :286-296 cancel (deployment.cancel) and rollback (deployment.rollback) gates; e2e journey.spec.ts:266,285.",
+    "notes": "Success and broken-version failure flows both e2e-proven."
+   },
+   {
+    "name": "ProjectListPage + ProjectDetailPage",
+    "maturity": "partial",
+    "evidence": "List: card grid + create dialog, canManage=project.manage (ProjectListPage.tsx:205), trigger-options query scope ['projects',{scope:'trigger-options'}]; Detail:642 per-application environments tables + create/edit/delete dialogs for project/application/environment (header comment ProjectDetailPage.tsx:1-3).",
+    "notes": "No e2e coverage; largest page in the SPA (Detail 640+ lines) and the closest thing to a tenancy boundary, yet carries none."
+   },
+   {
+    "name": "EventsPage + AuditLogPage",
+    "maturity": "production",
+    "evidence": "EventsPage:1-3 cursor-paginated feed GET /events + /events/types, :125 global WS channel live append; AuditLogPage:1-3 immutable trail GET /audit-logs offset-paginated; e2e journey.spec.ts:302,316.",
+    "notes": "Both are instance-wide feeds; audit rows carry actor_email/ip (types.ts:339-349)."
+   },
+   {
+    "name": "Settings pages (Secrets, Users, Roles, ApiKeys, Sessions)",
+    "maturity": "partial",
+    "evidence": "SecretsPage:1-3 metadata-only reads (API never returns values), project_id optional scope (types.ts:357), secret.write gate (SecretsPage.tsx:262); UsersPage:1-4 user.read to view, user.manage to invite/manage (UsersPage.tsx:76); RolesPage:1-4 permission matrix, role.manage, system roles immutable; ApiKeysPage:1-2 self-service caller's OWN keys, raw key shown once; SessionsPage:1-2 own sessions, revoke.",
+    "notes": "Users/Roles have unit tests only; Secrets/ApiKeys/Sessions have zero e2e; all operate on the single global user/role domain."
+   }
+  ],
+  "tenancy_gaps": [
+   "No tenant/org/workspace concept anywhere: zero grep hits for tenant|organization|workspace|team in frontend/src (only 'teammate' copy in UsersPage.tsx:258)",
+   "Roles are global platform roles: one permission matrix (RolesPage), one role_id per user (types.ts:22) — no per-tenant role assignment or role scoping",
+   "Every list/query is instance-wide: query keys carry no tenant or org dimension (['servers'], ['monitors'], ['incidents'], ['audit-logs'] across pages)",
+   "Dashboard summary is fleet-wide counters with no scope parameter (types.ts:375-391)",
+   "'global' and 'incidents' WS channels broadcast to every authed user with no scoping param (useEventStream.ts:12-17,66)",
+   "hasPermission gates features, never data scope; no route-level permission guard either — direct URL renders any page and relies on API 403s (App.tsx:53-84, Layout.tsx:179-207)",
+   "Projects are the only scoping primitive but are delivery-scoping only: ProjectOut has no owner/tenant field (types.ts:235-243); only secrets optionally carry project_id (types.ts:357)",
+   "Search endpoint returns mixed instance-wide hits incl. users (types.ts:393-401, CommandPalette.tsx:34)",
+   "Auth flow assumes one profile: /auth/me returns a single user+role, login lands straight on the fleet dashboard with no tenant picker (AuthContext.tsx:13-18, App.tsx:44)",
+   "Audit log is a single global trail with actor_email only — no tenant attribution column in the UI type (types.ts:339-349)",
+   "API keys/sessions pages are strictly per-user self-service with global scope strings (ApiKeysPage.tsx:1-2, types.ts:49-58)"
+  ],
+  "docs_needs": [
+   "Query-key and invalidation convention doc (currently implicit per-page; no central key factory file)",
+   "WS channel/param/frame contract doc (exists only as comments in useEventStream.ts and hub.py references)",
+   "Permission-codename registry mapped to UI gates (dotted codenames + wildcard semantics, AuthContext.tsx:34-38)",
+   "Frontend README: vite dev proxy, make up e2e prerequisite (SIMULATION_MODE=true + seeded DB per playwright.config.ts:5-10), test/lint commands",
+   "types.ts <-> backend schema sync policy (hand-written mirror, no codegen — document the drift-check procedure)",
+   "Per-page e2e coverage matrix (which flows are journey-proven vs code-complete-only)"
+  ],
+  "key_contracts": [
+   "HTTP: same-origin relative /api/v1 behind nginx edge; snake_case JSON; Page<T>{items,total,limit,offset} and CursorPage<T>{items,next_cursor,has_more} envelopes (types.ts:3-14)",
+   "Auth: Bearer access token in module memory only + HttpOnly refresh cookie; POST /auth/refresh -> {access_token}; 401 triggers exactly one coalesced refresh+retry (client.ts:70-132)",
+   "Error envelope: {error:{code,message,details}} parsed into ApiError{status,code,details}; network failure -> ApiError(0,'NETWORK_ERROR') (client.ts:56-67,120-123)",
+   "Profile: GET /auth/me -> {user, role, permissions[], superadmin}; permissions are dotted codenames matching '*' or 'group.*' wildcards (AuthContext.tsx:13-18,34-38)",
+   "WS: wss same-host /api/v1/ws; client sends {action:'auth',token} then {action:'subscribe',channel,params} immediately; server frames {type:'event'|'error'|'notify', channel, params, data}; hub never acks auth (useEventStream.ts:57-99)",
+   "WS channels: global, server-metrics(server_id), container-logs(container_id), deployment-logs(deployment_id), incidents (useEventStream.ts:12-17; page call sites ServerDetailPage.tsx:210, ContainerDetailPage.tsx:140, DeploymentDetailPage.tsx:149)",
+   "TanStack Query: staleTime 10s, retry 1, refetchOnWindowFocus (main.tsx:8-18); keys entity ['server',id] / list ['servers',{filters}] / scoped ['servers',{scope:'env-targets'}]; invalidation by key prefix (e.g. ['secrets'] clears all)",
+   "Simulation mode: GET /meta.simulation_mode drives the global badge (Layout.tsx:89-93,209-220) and per-row simulated flags on servers/containers (types.ts:83,125)"
+  ],
+  "extension_points": [
+   "api/client.ts is the single fetch wrapper — the only place to add tenant headers/context or change token transport",
+   "hasPermission + permissionMatches (AuthContext.tsx:34-38) — central chokepoint for adding tenant-scoped permission semantics",
+   "WsChannel union + useEventStream subscriptions array (useEventStream.ts:12-17,35-38) — new channels/params plug in without touching the socket logic",
+   "types.ts single module mirrors backend schemas — the seam to swap for OpenAPI codegen or add tenant fields",
+   "CommandPalette STATIC_COMMANDS + /search payload (CommandPalette.tsx:12-27, types.ts:393-409) — add entity kinds or tenant filtering",
+   "Route table in App.tsx with a single RequireAuth wrapper — the place to add per-route permission/tenant guards",
+   "Query keys are free-form per page — a central key factory (e.g. with tenant prefix) can be introduced without touching API code"
+  ],
+  "risks": [
+   "types.ts is a hand-written mirror of backend schemas with no codegen (frontend/package.json:6-13) — silent drift risk on every backend schema change",
+   "One WebSocket per useEventStream consumer: Layout plus page means 2 concurrent sockets per page (Layout.tsx:94, DashboardPage.tsx:113, etc.) — duplicate auth, scaling cost",
+   "useEventStream effect deps are [signature] only (useEventStream.ts:135): mid-session access-token rotation never re-auths a live socket, and the comment at :133-134 claiming otherwise is stale; no handling if the hub rejects the auth frame",
+   "No route-level permission guard: any authed user can render any page by URL and learn UI structure; relies entirely on API 403s (App.tsx:53-84)",
+   "Instance-wide 'global'/'incidents' WS channels mean every user's socket receives all incidents/events today — directly incompatible with tenant filtering without channel redesign (useEventStream.ts:12-17)",
+   "Alerts, API keys and Sessions nav items are ungated in the sidebar (Layout.tsx:199,206-207); AlertsPage partially self-gates via channel.read (AlertsPage.tsx:289)",
+   "WS reconnect never terminates: on an expired/absent refresh cookie the socket retries forever at 15s cap (useEventStream.ts:116-121,101-105)",
+   "E2E proves the app only against SIMULATION_MODE demo data (playwright.config.ts:5-10) — real-host flows are untested end-to-end; simulated rows mix into the same lists as real ones (types.ts:83,125)",
+   "Six page groups (Docker hosts, Projects, Alerts UI, Secrets, API keys, Sessions) have zero e2e coverage despite working unit-level",
+   "refetchOnWindowFocus with staleTime 10s plus per-page polling/WS invalidation gives no single source of truth for freshness — refetch storms plausible on tab focus after long idle",
+   "Longest page (ProjectDetailPage, 640+ lines) concentrates project/application/environment CRUD in one component with no e2e — highest-regret refactor surface for multi-tenancy"
+  ]
+ },
+ {
+  "subsystem": "compose topology, nginx edge, entrypoints, deploy flow",
+  "components": [
+   {
+    "name": "docker-compose.yml (prod profile)",
+    "maturity": "production",
+    "evidence": "docker-compose.yml:1-139 — 8 services, loopback-only host ports, healthcheck-gated depends_on; deployed live (.env:10 ENVIRONMENT=production), recent commits fix real runtime bugs",
+    "notes": "project name nexusops, single pgdata volume"
+   },
+   {
+    "name": "nginx edge (nginx/Dockerfile + default.conf.template)",
+    "maturity": "production",
+    "evidence": "nginx/default.conf.template:28-75 — single plain-HTTP :8080 listener, WS upgrade map, request-time DNS resolver 127.0.0.11 valid=10s; published 127.0.0.1:${NEXUSOPS_HTTP_PORT:-8080} (docker-compose.yml:126)",
+    "notes": "TLS block exists but commented out, no certs mounted, no 443/8443 published (template:79-108)"
+   },
+   {
+    "name": "backend image + docker-entrypoint.sh",
+    "maturity": "production",
+    "evidence": "backend/Dockerfile:16-33 — one image for api/worker/scheduler, non-root uid 10001, uv --frozen; entrypoint runs alembic upgrade head unless RUN_MIGRATIONS_ON_START=false (backend/docker-entrypoint.sh:9-14)",
+    "notes": "no cross-container migration lock; api must stay singleton"
+   },
+   {
+    "name": "api service",
+    "maturity": "production",
+    "evidence": "docker-compose.yml:44-64 — uvicorn --workers ${API_WORKERS:-2} --proxy-headers, /health HTTP healthcheck with start_period 15s",
+    "notes": "scale via API_WORKERS not replicas (docs/deployment.md:515-526)"
+   },
+   {
+    "name": "celery worker service",
+    "maturity": "production",
+    "evidence": "docker-compose.yml:66-91 — --concurrency=4 --max-tasks-per-child=200, CMD-SHELL inspect-ping healthcheck (30s interval, start_period 20s)",
+    "notes": "safe to --scale; tasks claim via FOR UPDATE SKIP LOCKED"
+   },
+   {
+    "name": "celery beat scheduler service",
+    "maturity": "partial",
+    "evidence": "docker-compose.yml:93-110 — plain `celery beat`, depends on api healthy; NO healthcheck (beat has no ping) — silent singleton failure mode acknowledged in docs/deployment.md:63",
+    "notes": "no HA story; must stay single instance"
+   },
+   {
+    "name": "frontend image (build→runtime stages)",
+    "maturity": "production",
+    "evidence": "frontend/Dockerfile:1-17 — node:22 build, nginx:1.27-alpine serving dist on :8080 with built-in wget HEALTHCHECK; compose targets `runtime` (docker-compose.yml:115)",
+    "notes": "no `develop` stage — dev override references one that doesn't exist"
+   },
+   {
+    "name": "docker-compose.dev.yml (dev overrides)",
+    "maturity": "partial",
+    "evidence": "docker-compose.dev.yml:1-44 — backend hot reload works (bind mounts, --reload, watchfiles celery); frontend overrides broken: `target: develop` absent from frontend/Dockerfile (dev.yml:27-29 vs Dockerfile:2,12)",
+    "notes": "dev.yml:41-44 fixed to mount the real template (dev.conf removed); Vite :5173 published on ALL interfaces (dev.yml:35)"
+   },
+   {
+    "name": "docker-compose.docker-sock.yml (host socket override)",
+    "maturity": "production",
+    "evidence": "docker-compose.docker-sock.yml:16-27 — opt-in via COMPOSE_FILE chain; mounts /var/run/docker.sock into api+worker, group_add ${DOCKER_GID:?} required",
+    "notes": "root-equivalent exposure, documented warning; NOT enabled in current .env (no COMPOSE_FILE/DOCKER_GID keys)"
+   },
+   {
+    "name": "postgres/redis/mailpit infra",
+    "maturity": "production",
+    "evidence": "docker-compose.yml:8-42 — postgres:17-alpine (127.0.0.1:5433, pgdata vol, pg_isready HC), redis:7-alpine (127.0.0.1:6390, ephemeral `--appendonly no --save \"\"` by design), mailpit v1.24 (127.0.0.1:8025, no HC)",
+    "notes": "compose `environment:` forces DATABASE_URL/REDIS_URL/SMTP_HOST=mailpit over .env in api/worker/scheduler"
+   },
+   {
+    "name": "seed flow (make seed + backend/scripts/seed.py)",
+    "maturity": "production",
+    "evidence": "backend/scripts/seed.py:533-543 — refuses when is_production, requires NEXUSOPS_ALLOW_SEED=1 outside test; advisory-lock idempotent early-exit; compose never seeds (Makefile:26-31 chains it)",
+    "notes": "first-user bootstrap instead: anonymous first /auth/register becomes superadmin"
+   },
+   {
+    "name": "Makefile deploy flow",
+    "maturity": "production",
+    "evidence": "Makefile:26-40 — up = compose up -d --build + wait-ready (polls /api/v1/ready and / through edge, 60x2s) + seed; migrate/makemigrations/clean/build targets",
+    "notes": "host-run tooling targets published loopback ports"
+   },
+   {
+    "name": "scripts/generate_secrets.sh",
+    "maturity": "production",
+    "evidence": "scripts/generate_secrets.sh:7-52 — refuses rotating real JWT_SECRET/ENCRYPTION_KEY without --force, prints blast radius (ENCRYPTION_KEY rotation destroys stored secrets)",
+    "notes": ""
+   },
+   {
+    "name": "CI/CD pipelines",
+    "maturity": "stub",
+    "evidence": "no .github/ directory, no registry publishing, no image push anywhere in repo — deploys are local `docker compose build` per host (Makefile:89-90)",
+    "notes": "lint/test/typecheck exist as Make targets but run locally only"
+   },
+   {
+    "name": "host nginx + Cloudflare outer chain",
+    "maturity": "partial",
+    "evidence": "documented pattern only: docs/deployment.md:371-425 — CF → host nginx :443 (real_ip from CF ranges, XFF overwrite) → edge; cloudflare-ips.conf is an out-of-band host artifact generated by a one-liner, not versioned",
+    "notes": "doc sample proxies to 127.0.0.1:8090 while actual NEXUSOPS_HTTP_PORT=8080"
+   },
+   {
+    "name": "docs/deployment.md",
+    "maturity": "production",
+    "evidence": "docs/deployment.md — verified accurate against compose on topology, healthchecks, first-boot, ports, client-IP chain; honestly documents own limitations (no TLS wired, no rollback, no /metrics)",
+    "notes": "8090-vs-8080 sample mismatch; SMTP relay advice understates compose precedence"
+   },
+   {
+    "name": "docs/development.md",
+    "maturity": "partial",
+    "evidence": "docs/development.md:1-50 — setup guide accurate; still presents `make dev` as a working flow while its frontend override cannot build",
+    "notes": ""
+   },
+   {
+    "name": ".env.example / config surface",
+    "maturity": "production",
+    "evidence": ".env.example + backend/app/core/config.py:32,67,100-105 — ENVIRONMENT dev|prod|test validated, fail-on-bad-config exits 2 at import (JWT_SECRET/ENCRYPTION_KEY required)",
+    "notes": "ALLOW_PRIVATE_TARGETS defaults true in example; true in deployed production .env:68"
+   }
+  ],
+  "tenancy_gaps": [
+   "Single shared Postgres database + single pgdata volume; no per-tenant DB/schema separation anywhere in infra (docker-compose.yml:9-23,137-138)",
+   "One Redis instance shared for broker, result backend, rate limits, and WS pub/sub across all tenants (docker-compose.yml:25-35)",
+   "Single Celery queue 'nx' with fixed concurrency 4 — no per-tenant task isolation or throughput shaping (backend/app/tasks/celery_app.py:30; docker-compose.yml:75)",
+   "Beat scheduler is an unguarded silent singleton — no HA, no sharding per tenant (docker-compose.yml:93-110)",
+   "No CI or image registry: each host builds locally from source, so no reproducible multi-instance rollout path exists",
+   "TLS termination lives outside the repo (host nginx + Cloudflare); in-repo 8443 block commented, no cert volume, no 443 published (nginx/default.conf.template:79-108; docker-compose.yml:120-135)",
+   "compose `environment:` hardcodes SMTP_HOST=mailpit for api/worker/scheduler in every profile, overriding any .env production relay (docker-compose.yml:51,73,100)",
+   "Docker-sock override puts control plane on a machine it manages with root-equivalent socket access (docker-compose.docker-sock.yml:16-27)",
+   "Worker dials customer docker daemons directly (tcp:// endpoints, SSRF-guarded) from the control plane — inbound-direction data-plane coupling (backend/app/services/docker_host_service.py:85-103)",
+   "ALLOW_PRIVATE_TARGETS=true in the deployed production .env:68 — SSRF guard for monitors/webhooks is bypassed live",
+   "api replicas >1 race alembic migrations (entrypoint has no cross-container lock); capacity lever is API_WORKERS only (docs/deployment.md:515-526)",
+   "TRUSTED_PROXY_CIDRS default trusts all RFC1918 — any same-network peer could spoof X-Forwarded-For (backend/app/core/config.py:67)"
+  ],
+  "docs_needs": [
+   "deployment.md:409 sample host-vhost proxies to 127.0.0.1:8090 while default and deployed NEXUSOPS_HTTP_PORT is 8080 — reconcile",
+   "deployment.md:214 says 'set a real relay for production' for SMTP, but compose environment: forces SMTP_HOST=mailpit over .env — doc overstates what .env can change without a compose override",
+   "development.md presents `make dev` as working while its frontend build target `develop` does not exist in frontend/Dockerfile; deployment.md:667-671 admits it, development.md does not",
+   "cloudflare-ips.conf is a host-side artifact generated by a documented one-liner but not versioned or provisioned anywhere in-repo (docs/deployment.md:404-425)",
+   "NEXUSOPS_MAILPIT_SMTP_PORT=1025 exists in .env.example:89 but compose never publishes that port (only 8025) — dead knob",
+   "No CI documentation because no CI exists; nothing describes build/publish/deploy beyond local compose",
+   "Beat cadence list in deployment.md:550-557 matches celery_app.py but the doc nowhere flags that adding a queue requires touching compose commands too"
+  ],
+  "key_contracts": [
+   "Edge contract: single loopback listener 127.0.0.1:${NEXUSOPS_HTTP_PORT:-8080}:8080; API_UPSTREAM/WEB_UPSTREAM envsubst-injected (docker-compose.yml:120-135; nginx/default.conf.template:43-75)",
+   "Migration-before-serve: entrypoint runs alembic upgrade head unless RUN_MIGRATIONS_ON_START=false; worker/scheduler set false and gate on api: service_healthy (backend/docker-entrypoint.sh:9-14; docker-compose.yml:74,81-82,101,108-109)",
+   "Seed gating: NEXUSOPS_ALLOW_SEED=1 required outside test, refuses production entirely, idempotent via pg advisory lock (backend/scripts/seed.py:533-543)",
+   "Celery runtime: default queue 'nx', acks_late=False, prefetch 1, soft/hard limits 540/600s, results expire 3600s; due-row tasks claim with FOR UPDATE SKIP LOCKED (backend/app/tasks/celery_app.py:29-44)",
+   "Beat: 9 fixed cadences — sweep_servers 15s, run_due_monitors env-driven, sync_docker_hosts 30s, sweep_deployments 120s, retry_notifications 60s, expire_sessions 600s, aggregate_metrics env-driven, trim_logs */15m, simulation_tick 20s self-disabling (celery_app.py:47-93)",
+   "Docker endpoint contract: unix:// | tcp:// | agent-inherited; tcp:// endpoints pass assert_safe_tcp_endpoint SSRF guard (docker_host_service.py:85-103)",
+   "DOCKER_GID is required (:? guard) for the docker-sock override; socket mounted into api+worker only (docker-compose.docker-sock.yml:18-27)",
+   "Client-IP trust: XFF walked right-to-left against TRUSTED_PROXY_CIDRS (default loopback+RFC1918, config.py:67); outer proxy must OVERWRITE XFF; edge bound to loopback enforces it",
+   "Cookie Secure flag follows X-Forwarded-Proto via the $nx_fwd_proto passthrough map, not the ENVIRONMENT label (nginx/default.conf.template:17-20)",
+   "compose precedence: `environment:` beats `env_file: .env` — DATABASE_URL/REDIS_URL/SMTP_HOST are forced in containers (docker-compose.yml:48-51)",
+   "First-boot bootstrap: anonymous first POST /auth/register becomes superadmin, then invite-only; registration serialized by advisory lock (docs/deployment.md:172-178)",
+   "WS contract: /api/v1/ws with channels global|server-metrics|container-logs|deployment-logs|incidents; edge sets Upgrade/Connection, proxy_read_timeout 3600s, buffering off (nginx/default.conf.template:53-57)"
+  ],
+  "extension_points": [
+   "COMPOSE_FILE override-chain pattern (docker-sock override demonstrates it: docker-compose.docker-sock.yml:1-5)",
+   "nginx template envsubst variables API_UPSTREAM/WEB_UPSTREAM — reroute edge without editing the template (nginx/Dockerfile:3-4)",
+   "ENVIRONMENT modes plus SIMULATION_MODE/ALLOW_PRIVATE_TARGETS behavior flags (backend/app/core/config.py:32,100-105)",
+   "beat_schedule dict + include task-module list — add cadences/tasks without infra changes (backend/app/tasks/celery_app.py:20-26,47-93)",
+   "Frontend Dockerfile build targets selected per profile via compose `target:` (docker-compose.yml:115; docker-compose.dev.yml:29)",
+   "Makefile targets as the deploy/orchestration entry (wait-ready composes into e2e, up)",
+   "TRUSTED_PROXY_CIDRS / CORS_ORIGINS / NEXUSOPS_*_PORT env knobs as the deployment-tuning surface",
+   "NEXUSOPS_ALLOW_SEED-style explicit opt-in gates as the pattern for any future privileged operation"
+  ],
+  "risks": [
+   "SMTP notifications silently swallowed in production: compose environment: pins SMTP_HOST=mailpit for api/worker/scheduler in every profile (docker-compose.yml:51,73,100)",
+   "ALLOW_PRIVATE_TARGETS=true live in the deployed production .env:68 — SSRF guard bypassed for monitors/webhooks/docker tcp endpoints",
+   "api --scale >1 runs concurrent alembic upgrades with no lock — schema corruption risk (docker-compose.yml:52; docs/deployment.md:515-526)",
+   "Docker socket mount is root-equivalent on the host; mounting into api+worker makes platform container.manage permission = host root (docker-compose.docker-sock.yml:19-27)",
+   "No in-repo TLS: if the edge :8080 is ever exposed directly, refresh cookies ride plain HTTP; TLS depends on out-of-repo host nginx + Cloudflare being configured correctly",
+   "No CI/registry: images built untested on each deploy host; no provenance, no rollback artifact",
+   "scheduler and nginx have no healthchecks — beat can die silently and everything still looks green (docker-compose.yml:93-110,120-135)",
+   "No /metrics for the platform itself; prometheus-client declared but unused — blind spot for a multi-tenant SaaS (docs/deployment.md:575-578)",
+   "TRUSTED_PROXY_CIDRS default trusts all RFC1918 — direct container-network access lets a peer spoof client IPs for sessions/audit/rate-limits (backend/app/core/config.py:67)",
+   "Vite dev port published on all interfaces, unlike every other port (docker-compose.dev.yml:35)",
+   "Single ephemeral Redis is a common failure domain: broker queue, rate limits, and WS fan-out all collapse together (docker-compose.yml:25-35)"
+  ]
+ },
+ {
+  "subsystem": "authentication, sessions, RBAC, permissions, API keys (NexusOps backend)",
+  "components": [
+   {
+    "name": "Auth resolution dependency (resolve_auth)",
+    "maturity": "production",
+    "evidence": "/home/emad/projects/nexusops/backend/app/api/deps.py:79-133 — accepts Bearer JWT or X-API-Key; verifies session not revoked/expired, touches last_seen_at; sets request.state.client_ip (deps.py:138)",
+    "notes": "Also get_optional_user for anonymous-capable routes (deps.py:145-154)"
+   },
+   {
+    "name": "JWT access tokens",
+    "maturity": "production",
+    "evidence": "/home/emad/projects/nexusops/backend/app/core/security.py:49-85 — HS256 (config.py:52), claims {sub, sid, email, jti, typ=access, iat, exp, iss=nexusops}, require exp/sub/sid/typ; TTL 15min (config.py:53)",
+    "notes": "No tenant/org claim exists; no jti denylist — revocation is enforced via session row lookup (deps.py:120-127)"
+   },
+   {
+    "name": "Session + refresh-token rotation with reuse detection",
+    "maturity": "production",
+    "evidence": "/home/emad/projects/nexusops/backend/app/services/auth_service.py:392-498 — opaque token_urlsafe(48) refresh, SHA-256 stored (identity.py:124), FOR UPDATE serializes concurrent rotation (auth_service.py:403-409), old row gets superseded_by_id+revoked_at; replay → revoke_session(reason=token_reuse_detected) killing the whole family + TOKEN_REUSE 401",
+    "notes": "One-shot 30s grace rescue for lost rotation response (_grace_successor auth_service.py:356-389, grace_used flag identity.py:128); grace collapses orphaned successor into new chain (auth_service.py:481-486). Covered by tests/integration/test_auth_journey.py"
+   },
+   {
+    "name": "Login with lockout",
+    "maturity": "production",
+    "evidence": "/home/emad/projects/nexusops/backend/app/services/auth_service.py:249-297 — argon2id (security.py:20), 5 failed attempts → status LOCKED + locked_until now+900s (config.py:68-69); identical generic INVALID_CREDENTIALS envelope for unknown/inactive/locked/bad-password; failure audit commits before raise (auth_service.py:246)",
+    "notes": "Session created with ip/user_agent, expires_at = session_idle_timeout_days=30 (auth_service.py:300-311)"
+   },
+   {
+    "name": "Bootstrap registration / invite gate",
+    "maturity": "production",
+    "evidence": "/home/emad/projects/nexusops/backend/app/services/auth_service.py:130-209 — count_users()==0 makes first registrant is_superadmin + system Owner role, serialized by pg_advisory_xact_lock(hashtext('nexusops-bootstrap')) (auth_service.py:154); afterwards INVITATION_REQUIRED unless caller has user.manage",
+    "notes": "Single-tenant semantics baked in: exactly one global bootstrap superadmin"
+   },
+   {
+    "name": "Permission registry",
+    "maturity": "production",
+    "evidence": "/home/emad/projects/nexusops/backend/app/core/permissions.py:25-70 — 30 verbatim codenames: user.read, user.manage, role.read, role.manage, audit.read, server.read, server.create, server.update, server.delete, credential.write, container.read, container.logs, container.lifecycle, container.remove, project.read, project.manage, deployment.read, deployment.create, deployment.cancel, deployment.rollback, monitor.read, monitor.manage, incident.action, channel.read, channel.manage, metric.read, log.read, event.read, secret.read, secret.write",
+    "notes": "Registry is code-defined data, seeded into permissions/roles/role_permissions tables by /home/emad/projects/nexusops/backend/scripts/seed.py:217-226; role_service validates custom roles against it (role_service.py:51-82)"
+   },
+   {
+    "name": "Role matrix (seed roles)",
+    "maturity": "production",
+    "evidence": "/home/emad/projects/nexusops/backend/app/core/permissions.py:80-171 — 5 system roles: Owner=*, Admin=29 perms (all except role.manage), Operator=26, Developer=15, Viewer=10; is_system roles immutable (role_service.py:154, 219)",
+    "notes": "Custom roles creatable via role.manage; ROLE_IN_USE guard on delete (role_service.py:220-226)"
+   },
+   {
+    "name": "require_permission() gate",
+    "maturity": "production",
+    "evidence": "/home/emad/projects/nexusops/backend/app/api/deps.py:157-165 — factory returning dependency that raises Forbidden 403 PERMISSION_DENIED; resolution: superadmin→True, else wildcard/prefix/exact match against role permission set (deps.py:49-64, permissions.py:174-184)",
+    "notes": "Permissions are GLOBAL flat codenames checked at route level only — no per-resource/per-object ACL anywhere; all roles operate on all resources"
+   },
+   {
+    "name": "API keys",
+    "maturity": "production",
+    "evidence": "/home/emad/projects/nexusops/backend/app/services/api_key_service.py:50-96 — raw key nxo_<token_urlsafe(30)> (security.py:97-100), prefix raw[:12] stored, SHA-256 key_hash unique (identity.py:144); raw shown exactly once in create response (apikeys.py:34); scopes JSONB validated against registry, exact/prefix-wildcard/global * (api_key_service.py:24-47)",
+    "notes": "Authorization = scope ∩ owner's role: key scope checked FIRST so even superadmin-owned keys cannot exceed grant (deps.py:49-64); expiry + revocation + last_used_at throttle 60s (deps.py:92-103); self-service only — keys always owned by caller (apikeys.py:28)"
+   },
+   {
+    "name": "Agent enrollment tokens",
+    "maturity": "production",
+    "evidence": "/home/emad/projects/nexusops/backend/app/api/v1/agent.py:36-44 — per-server nxa_ token (security.py:103-105), SHA-256 in Server.agent_token_hash, X-Agent-Token header lookup by hash",
+    "notes": "Global namespace: token hash looked up across all servers, resolves to server not tenant"
+   },
+   {
+    "name": "Rate limiting",
+    "maturity": "production",
+    "evidence": "/home/emad/projects/nexusops/backend/app/core/rate_limit.py:59-97 — Redis fixed-window INCR+EXPIRE keyed nx:rl:{name}:{ip}; prebuilt limiters auth 10/min, register 5/5min, refresh 30/min (fail_closed=True), expensive 20/min (fail-open)",
+    "notes": "Fail-closed limiters degrade to in-process per-worker fixed-window counters (rate_limit.py:41-56, 10k-key cap); keyed by IP only — no per-user/tenant dimension"
+   },
+   {
+    "name": "Client IP resolution",
+    "maturity": "production",
+    "evidence": "/home/emad/projects/nexusops/backend/app/core/client_ip.py:59-67 — walks X-Forwarded-For right-to-left (max 10 entries), skips trusted_proxy_cidrs (default all RFC1918+loopback, config.py:67), falls back to TCP peer",
+    "notes": "Unit-tested in tests/unit/test_client_ip.py; trust model documented in module docstring client_ip.py:1-18"
+   },
+   {
+    "name": "Refresh cookie handling",
+    "maturity": "production",
+    "evidence": "/home/emad/projects/nexusops/backend/app/api/v1/auth.py:46-66 — cookie nxo_rt, path=/api/v1/auth (auth_service.py:39-40), httponly, samesite=strict, secure derived from X-Forwarded-Proto with explicit plain-http fallback (auth.py:27-43)",
+    "notes": "Cookie preferred over body on /auth/refresh (auth.py:131-133)"
+   },
+   {
+    "name": "Session lifecycle service",
+    "maturity": "production",
+    "evidence": "/home/emad/projects/nexusops/backend/app/services/user_service.py:317-360 — revoke_session kills session + all its refresh tokens; revoke_all_user_sessions with exclude_session_id used on password change (auth_service.py:551-553); list_sessions for UI; LAST_SUPERADMIN_PROTECTED guard (user_service.py:280-297)",
+    "notes": ""
+   },
+   {
+    "name": "WS auth",
+    "maturity": "production",
+    "evidence": "/home/emad/projects/nexusops/backend/app/ws/hub.py:127-150 — mirrors resolve_auth: decode_access_token + session revocation check, AuthContext reuse",
+    "notes": "Same global session lookup; no tenant dimension"
+   },
+   {
+    "name": "Audit trail + access logging",
+    "maturity": "production",
+    "evidence": "/home/emad/projects/nexusops/backend/app/models/observability.py:249-278 — append-only AuditLog (UPDATE/DELETE blocked by DB trigger), actor_id FK users.id SET NULL, actor_email, ip, user_agent, result, metadata JSONB; AccessLogMiddleware logs ip/user_id per request (core/middleware.py:56-100)",
+    "notes": "Global table, no tenant column"
+   },
+   {
+    "name": "Ownership metadata columns",
+    "maturity": "partial",
+    "evidence": "created_by_id/owner_id exist but are informational only, never used in any authorization query: Project.owner_id /home/emad/projects/nexusops/backend/app/models/delivery.py:33 (set from payload or ctx, project_service.py:125-127), ServerCredential.created_by_id infra.py:117, Monitor.created_by_id observability.py:88, NotificationChannel.created_by_id notify.py:46, Secret.created_by_id/rotated_by_id secrets.py:57-62",
+    "notes": "All nullable FK users.id ON DELETE SET NULL — ownership evaporates on user deletion"
+   },
+   {
+    "name": "RBAC/auth test coverage",
+    "maturity": "production",
+    "evidence": "/home/emad/projects/nexusops/backend/tests/integration/test_rbac.py (viewer/operator denial, scoped API key cannot exceed grant), test_auth_journey.py (rotation, reuse, grace rescue), unit/test_permissions.py, test_security.py, test_rate_limit.py, test_client_ip.py",
+    "notes": "Integration suite seeds the registry via conftest._seed_rbac_registry (conftest.py:77)"
+   }
+  ],
+  "tenancy_gaps": [
+   "No Organization/Tenant model exists anywhere; grep for tenant|organization|org_id|workspace across backend hits only a git-clone log string (backend/app/providers/deployment_runner.py:138)",
+   "Every resource table is in one global namespace: any user with a .read permission sees ALL rows — list queries carry no owner/tenant filter (e.g. list_projects at backend/app/services/project_service.py:116-119; same pattern in server/monitor/channel/secret services)",
+   "User.email globally unique (backend/app/models/identity.py:62) — same person cannot exist in two tenants, and emails leak existence across tenants via EMAIL_TAKEN",
+   "Role.name globally unique (identity.py:29); roles and the permission registry are platform-global, so per-tenant role customization is impossible; custom roles created by one admin are visible to all (role_service.list_roles backend/app/services/role_service.py:38-40)",
+   "Permission codenames are flat and global (core/permissions.py:25-70); require_permission has no resource or tenant argument, so per-object ACL cannot be expressed (deps.py:157-165)",
+   "Bootstrap superadmin logic assumes exactly one namespace: count_users()==0 → superadmin (auth_service.py:162-178); a second tenant can never mint its own owner, and any user.manage holder can invite users into the single shared space (auth_service.py:163-167)",
+   "JWT claims carry no tenant id (security.py:56-65) and AuthContext has no tenant field (deps.py:31-39); session lookup by sid is global (deps.py:120-127)",
+   "AuditLog and SystemEvent have no tenant column — cross-tenant audit separation impossible (models/observability.py:249-278, 219+)",
+   "Unique names are globally reserved: Project.name unique (delivery.py:29), Server.name unique (infra.py:51), Tag.name unique (infra.py:38), global secrets key unique partial index (models/secrets.py:31-38) — one tenant blocks another's names",
+   "API keys are owned by a user with no tenant scope; key_hash lookup is global (deps.py:85-104); agent tokens resolve to a server in one global fleet (api/v1/agent.py:44)",
+   "Rate limiting is keyed by IP only (rate_limit.py:69) — no per-tenant quota; all tenants share one encryption key for secrets (security.py:121-128, global ENCRYPTION_KEY)",
+   "Secrets/deployments/monitors created by one tenant's admin are readable by every other tenant's Viewer role — role permissions grant capability, never row visibility"
+  ],
+  "docs_needs": [
+   "docs/api.md auth section documents single-tenant bootstrap + invite flow — needs tenant lifecycle (create tenant, tenant owner bootstrap, cross-tenant identity) rewrite",
+   "docs/architecture.md 'RBAC registry (PERMISSIONS + ROLE_MATRIX + scope_matches)' section assumes platform-global roles — needs per-tenant role scoping model documented",
+   "New doc required: tenant boundary contract — which queries must filter by tenant_id, and the global-namespace unique constraints that must become composite",
+   "docs/agent.md enrollment model (per-server token in one global fleet) needs tenant-scoped server grouping documented",
+   "Cookie/domain strategy doc needed: nxo_rt path=/api/v1/auth with samesite=strict (auth_service.py:39-40, auth.py:46-56) does not address multi-tenant domains/subdomains",
+   "Rate-limit docs need per-tenant budget semantics (currently per-IP only, rate_limit.py:59-67)",
+   "OpenAPI/schema regeneration needed once tenant-scoped resources and tenant headers/claims are introduced"
+  ],
+  "key_contracts": [
+   "Access token: JWT HS256 iss=nexusops, claims {sub, sid, email, jti, typ=access, iat, exp}, TTL 15min (security.py:49-85, config.py:53); revocation enforced by live session-row check, not denylist (deps.py:120-127)",
+   "Refresh token: opaque secrets.token_urlsafe(48), only SHA-256 hex stored unique (identity.py:124); delivered via HttpOnly cookie nxo_rt scoped to path /api/v1/auth, samesite=strict, secure per X-Forwarded-Proto (auth.py:46-56)",
+   "Rotation invariant: one live successor per token (superseded_by_id), FOR UPDATE serializes concurrent refresh (auth_service.py:398-409); presenting superseded/revoked token = theft → whole session family revoked, 401 TOKEN_REUSE (auth_service.py:416-442)",
+   "Grace rescue: one replay within refresh_grace_seconds=30 of a rotation-consumed token re-rotates once (grace_used one-shot), folds orphaned successor into the new chain (auth_service.py:356-389, 481-486)",
+   "Login: generic INVALID_CREDENTIALS envelope for all failure modes; 5 failures → LOCKED status + 900s lockout; audit committed before raise (auth_service.py:264-292, 246)",
+   "Bootstrap: first-ever registration = anonymous superadmin + Owner role, serialized by pg_advisory_xact_lock; later registration requires user.manage else 403 INVITATION_REQUIRED (auth_service.py:154-167)",
+   "Authorization call: require_permission('<codename>') route dependency → 403 code=PERMISSION_DENIED; has_permission = superadmin OR wildcard/prefix/exact role-permission match; API key additionally requires scope_matches(key.scopes, codename) checked FIRST (deps.py:49-64, 157-165)",
+   "API key: format nxo_<token_urlsafe(30)>, 12-char prefix stored, SHA-256 at rest, raw returned exactly once at creation; scopes validated against registry (exact, 'server.*'-style prefix, '*'); expiry + explicit revocation (api_key_service.py:24-96, security.py:97-100)",
+   "Agent auth: X-Agent-Token nxa_ per-server token, SHA-256 == Server.agent_token_hash (api/v1/agent.py:36-44)",
+   "Rate limits (per IP per window): auth 10/60s, register 5/300s, refresh 30/60s fail-closed with in-process fallback; expensive 20/60s fail-open; 429 RateLimited with Retry-After (rate_limit.py:94-97, 82-87)",
+   "Client IP: right-to-left XFF walk max 10 entries skipping trusted_proxy_cidrs, else TCP peer (client_ip.py:59-67)",
+   "Audit contract: every auth action writes append-only audit_logs row (actor_id, actor_email, action, resource_type/id, ip, user_agent, result, metadata) + system_events publish; UPDATE/DELETE blocked by DB trigger (observability.py:249-257)"
+  ],
+  "extension_points": [
+   "AuthContext dataclass (deps.py:31-64) — single resolution point every request/WS connection passes through; natural carrier for a tenant_id claim/field",
+   "JWT payload builder (security.py:49-67) — add tenant claim alongside sub/sid; decode already requires explicit claim list",
+   "PERMISSIONS/ROLE_MATRIX data-driven registry (permissions.py:25-70) — already seeded to DB rows, so per-tenant permission/role rows extend without changing check logic shape",
+   "scope_matches wildcard engine (permissions.py:174-184) — reusable for tenant-prefixed codenames or API-key scope fencing",
+   "require_permission factory pattern (deps.py:157-165) — can be wrapped into a tenant-aware guard that also binds row filters",
+   "Base/TimestampMixin model base (models/base.py:22,49) — a TenantMixin would propagate tenant_id to all resource tables uniformly",
+   "audit_service.record / event_bus.publish take ctx first (auth_service.py:45-92) — tenant attribution slots in without call-site churn",
+   "Redis rate-limit key format nx:rl:{name}:{ip} (rate_limit.py:69) — extendable to per-tenant buckets",
+   "seed.py _seed_rbac (scripts/seed.py:217-226) — seeding flow already data-driven for per-tenant role replication",
+   "Ownership columns already present (Project.owner_id, created_by_id on Monitor/Channel/Secret/ServerCredential) — can be repurposed/promoted to tenant-scoped FKs"
+  ],
+  "risks": [
+   "All authorization is route-level capability only; zero object-level checks — the first tenant added on top of current queries would see every other tenant's servers/secrets/deployments (deps.py:157-165 + unfiltered list services)",
+   "is_superadmin is an absolute global bypass implying every permission (deps.py:58-59, identity.py:66-67); in a multi-tenant redesign any leak of this flag is platform-wide compromise, and LAST_SUPERADMIN_PROTECTED logic (user_service.py:280-297) is global",
+   "resolve_auth commits the request transaction mid-flight to throttle ApiKey.last_used_at writes (deps.py:100-102) — an early commit persists any pending changes accumulated before the dependency and commits outside caller control",
+   "Global encryption key: all tenants' secrets encrypted under one Fernet ENCRYPTION_KEY (security.py:121-128); no per-tenant key derivation or envelope encryption exists",
+   "Audit trail cannot answer 'what did tenant X do' — no tenant column on audit_logs/system_events, actor_id is SET NULL on user deletion (observability.py:255-258), so attribution also decays",
+   "Email-existence oracle: EMAIL_TAKEN conflict on register (auth_service.py:159-160) reveals global registration status — becomes cross-tenant user enumeration in multi-tenant mode",
+   "trusted_proxy_cidrs default trusts ALL RFC1918 ranges (config.py:67) — any docker-network/host-network peer can forge XFF and poison the per-IP rate-limit/audit identity once the deployment topology changes",
+   "Session idle timeout is 30 fixed days with no sliding expiry logic beyond last_seen_at bookkeeping (auth_service.py:307, deps.py:128) and access-token revocation depends entirely on the sessions row existing",
+   "Rate limiting per-IP means one tenant behind a NAT or a shared CI egress exhausts the 10/min auth budget for everyone (rate_limit.py:94), while per-tenant attackers rotate IPs freely",
+   "API-key ownership is self-service only (apikeys.py:28) with no admin-side key management or tenant-level key policy; revoke_all_for_user exists but nothing scopes keys to a tenant boundary",
+   "Registration/invite flow has no email verification, no invitation tokens — user.manage holders create accounts with chosen passwords directly (users.py POST, auth_service.register), which multiplies across tenants without a verification gate"
+  ]
+ },
+ {
+  "subsystem": "Agent + enrollment (agent/ dir: nexusops_agent.py, install.sh, systemd unit; backend ingest API api/v1/agent.py, schemas/agent.py, server_service.py heartbeat/container/staleness parts, token lifecycle, contract+integration tests)",
+  "components": [
+   {
+    "name": "Agent core loop & transport",
+    "maturity": "production",
+    "evidence": "agent/nexusops_agent.py:302-494",
+    "notes": "stdlib http.client only; hello once at startup then heartbeats; exponential backoff min(interval*2^min(failures,4),300)s; 401 on heartbeat -> exit(1); --once flag"
+   },
+   {
+    "name": "Host metrics collectors",
+    "maturity": "production",
+    "evidence": "agent/nexusops_agent.py:50-127",
+    "notes": "/proc/stat delta CPU, /proc/meminfo, /proc/uptime, statvfs on / only, os.getloadavg; no net I/O, no per-disk, no swap"
+   },
+   {
+    "name": "Docker socket observer",
+    "maturity": "production",
+    "evidence": "agent/nexusops_agent.py:133-296",
+    "notes": "Unix HTTP GET /containers/json?all=1 (first 50) + capped inspect (10) + one-shot stats (12 running); container CPU % diffed across cycles, cgroup v1/v2 mem cache subtraction"
+   },
+   {
+    "name": "Network metrics",
+    "maturity": "simulated",
+    "evidence": "agent/nexusops_agent.py:398-399",
+    "notes": "net_rx_kb_s/net_tx_kb_s hardcoded 0.0 in every beat; schema accepts them as real"
+   },
+   {
+    "name": "Installer",
+    "maturity": "production",
+    "evidence": "agent/install.sh:29-41",
+    "notes": "copies agent to /usr/local/lib/nexusops-agent; /etc/default/nexusops-agent created 0600 BEFORE token written (no 0644 window); re-run updates in place; non-systemd prints manual command"
+   },
+   {
+    "name": "systemd unit",
+    "maturity": "production",
+    "evidence": "agent/nexusops-agent.service:7-22",
+    "notes": "EnvironmentFile, Restart=always RestartSec=10, NoNewPrivileges, ProtectSystem=strict, ReadOnlyPaths=/proc /sys, PrivateTmp, SupplementaryGroups=docker"
+   },
+   {
+    "name": "Agent ingest API",
+    "maturity": "production",
+    "evidence": "backend/app/api/v1/agent.py:31-81",
+    "notes": "require_server: X-Agent-Token must start nxa_, resolved by SHA-256 hash DB lookup, else 401; rate limits hello 30/min, heartbeat 600/min"
+   },
+   {
+    "name": "Agent payload schemas",
+    "maturity": "production",
+    "evidence": "backend/app/schemas/agent.py:13-85",
+    "notes": "bounds on every field, container_id pattern ^[A-Za-z0-9][A-Za-z0-9_.-]*$, status subset excludes REMOVED, extra=forbid via APIModel (schemas/base.py:16) so unknown keys 422 the whole beat"
+   },
+   {
+    "name": "Hello persistence & cadence negotiation",
+    "maturity": "production",
+    "evidence": "backend/app/services/server_service.py:267-294",
+    "notes": "sets agent_enrolled_at=now, overwrites os_name/os_version/arch/hostname/cpu_cores/memory_total_mb/disk_total_gb unvalidated; returns name+interval+offline_after; does NOT persist agent_version or ip"
+   },
+   {
+    "name": "Heartbeat processing",
+    "maturity": "production",
+    "evidence": "backend/app/services/server_service.py:300-358",
+    "notes": "one RAW MetricSnapshot per beat, Redis live frame (Redis-down safe :375-376), status->ONLINE with once-per-day dedup event; optional os_name/arch/cpu_cores etc read from payload but agent never sends them (dead code :318-325)"
+   },
+   {
+    "name": "Container upsert & reconciliation",
+    "maturity": "production",
+    "evidence": "backend/app/services/server_service.py:502-626",
+    "notes": "savepoint race adoption for concurrent inserts, STARTED/STOPPED/RESTARTED events from status/restart diffs, REMOVED (row deleted) only when payload < cap; sets row.simulated=True on agent data (:498)"
+   },
+   {
+    "name": "Staleness sweeper",
+    "maturity": "production",
+    "evidence": "backend/app/services/server_service.py:379-453",
+    "notes": "status-guarded bulk UPDATE...RETURNING vs DB now(); CRITICAL Alert per OFFLINE transition; per-server offline_after_seconds or platform default"
+   },
+   {
+    "name": "Token issuance/rotation",
+    "maturity": "production",
+    "evidence": "backend/app/api/v1/servers.py:170-192 + services/server_service.py:255-264 + core/security.py:103-110",
+    "notes": "POST /servers/{id}/agent-token, audited; nxa_+token_urlsafe(30) shown once, only hash stored; rotation kills old token immediately and resets agent_enrolled_at; no revoke-only, no grace/dual-token"
+   },
+   {
+    "name": "server.agent_version tracking",
+    "maturity": "stub",
+    "evidence": "backend/app/models/infra.py:69 (column exists) but register_agent_hello (server_service.py:267-294) never persists it and the heartbeat route (api/v1/agent.py:80) omits the agent_version kwarg process_heartbeat accepts (server_service.py:305)",
+    "notes": "server.agent_version stays empty forever; User-Agent header carrying version is also ignored"
+   },
+   {
+    "name": "Agent contract tests",
+    "maturity": "production",
+    "evidence": "backend/tests/test_agent_contract.py:48-191",
+    "notes": "imports the real agent module and validates its payloads against the real schemas; catches wire drift (health \"\" and undocumented ports key regressions cited in docstring)"
+   },
+   {
+    "name": "Agent integration tests",
+    "maturity": "production",
+    "evidence": "backend/tests/integration/test_agent_ingestion.py:65-238",
+    "notes": "unknown-token 401, fact persistence + interval negotiation, 422-not-500 on malformed, vanished-container removal, cap-boundary reconciliation skip"
+   },
+   {
+    "name": "Reporting coverage",
+    "maturity": "partial",
+    "evidence": "agent/nexusops_agent.py:384-457; server_service.py:536-539",
+    "notes": "reports CPU/mem/disk(/)/load/uptime + containers (status/health/restarts/cpu/mem); does NOT report: own IP, net I/O (zeros), per-disk breakdown, services/systemd units, nginx, processes, GPU/swap/disk-IO, container ports/env/labels/mounts (upsert writes empty arrays), no capabilities/versions block beyond hello's 8 static fields"
+   }
+  ],
+  "tenancy_gaps": [
+   "No tenant/organization model exists anywhere in backend/app/models; Server rows are platform-global (models/infra.py:42-87)",
+   "Server.name is unique platform-wide (models/infra.py:51) — cross-tenant name collisions under multi-tenancy",
+   "require_server resolves token hash -> server with zero tenant dimension or scoping (api/v1/agent.py:35-49)",
+   "agent:// DockerHost auto-created per server with no ownership beyond the server link (server_service.py:459-474)",
+   "Agent rate limits keyed by client IP only (core/rate_limit.py:69) — NAT'd agent fleets share one 600/min bucket; no per-server/per-tenant fairness",
+   "Agent-originated events use ActorType.AGENT with no user/tenant actor identity (server_service.py:334,596)",
+   "ServerCredential rows (Fernet SSH secrets) hang off Server with no tenant boundary either (models/infra.py:101-116)",
+   "Audit trail for enrollment actions records the calling user but agent-side writes carry no tenant attribution to partition on"
+  ],
+  "docs_needs": [
+   "Token rotation runbook: rotation kills running agents instantly (401 -> exit); docs/agent.md:35 states invalidation but no reinstall/grace guidance",
+   "install_hint tells users to set NEXUSOPS_URL, which neither the agent (NEXUSOPS_SERVER, agent:420-423) nor install.sh (flags only, install.sh:12-24) reads (servers.py:185-188) — following the hint enrolls nothing",
+   "Container cap semantics undocumented: list 50 / inspect 10 / stats 12 / schema 200 / absence trusted only <50 (schemas/agent.py:21, server_service.py:607)",
+   "hello is sent once at startup only — server-side heartbeat_interval changes require agent restart (agent:458-469)",
+   "agent_version never recorded server-side; no fleet version visibility or drift story",
+   "docs/agent.md:75 claims 401-exit prevents hot-looping, but Restart=always/RestartSec=10 restarts the rejected agent every 10s",
+   "No self-update/upgrade mechanism documented or implemented",
+   "Wire fields net_rx_kb_s/net_tx_kb_s are always 0.0; docs never mention them — should be labeled placeholder",
+   "offline_after default (~90s claim, docs/agent.md:71) not tied to settings.server_offline_after_seconds in docs"
+  ],
+  "key_contracts": [
+   "Auth on every call: X-Agent-Token header, must start nxa_, matched by SHA-256 hex hash DB lookup else 401 (api/v1/agent.py:37-48; core/security.py:108-109)",
+   "Token format: nxa_ + secrets.token_urlsafe(30); raw shown exactly once, only hash stored (core/security.py:103-105; api/v1/servers.py:176-178)",
+   "POST /agent/hello: AgentHelloIn (8 static fields, hostname required) -> AgentHelloOut{server_id, name, heartbeat_interval_seconds, offline_after_seconds} (api/v1/agent.py:52-68; schemas/agent.py:24-43)",
+   "POST /agent/heartbeat -> 204; AgentHeartbeatIn with extra=forbid — any unknown key 422s the entire beat (schemas/base.py:16)",
+   "Wire container statuses are the subset {RUNNING,EXITED,PAUSED,CREATED,RESTARTING,DEAD}; REMOVED never arrives over the wire (schemas/agent.py:13-15)",
+   "health must be null, not \"\" — empty string would 422 the whole heartbeat (agent:212-214; test_agent_contract.py:6-9)",
+   "Caps: agent list 50 (agent:197), inspect 10, stats 12 (agent:147); schema max 200 containers (schemas/agent.py:85); absence-based REMOVED trusted only when payload < 50 (schemas/agent.py:21; server_service.py:607)",
+   "Cadence negotiated at hello: server default 30s with DB CHECK >=5 (models/infra.py:46); agent clamps >=5 (agent:434,467) and never re-hellos to learn changes",
+   "observed_at/last_heartbeat_at are server receive times (datetime.now(UTC), server_service.py:312-315,521); agent sends no timestamps, so no clock-skew surface; staleness compared against DB func.now() (server_service.py:395)",
+   "One token = one server's data-plane writes only: no GET endpoints on the agent router, no cross-server reach, no command channel by design (docs/agent.md:23-29)",
+   "Rotation: single agent_token_hash column; old token dead immediately; agent_enrolled_at reset to None (server_service.py:255-264)",
+   "Rate limits: hello 30/min, heartbeat 600/min, keyed per client IP (api/v1/agent.py:31-32; core/rate_limit.py:69)"
+  ],
+  "extension_points": [
+   "Agent collector functions + AgentHeartbeatIn fields are the extension seam; contract tests pin wire agreement so drift fails CI (test_agent_contract.py:1-10)",
+   "User-Agent nexusops-agent/{version} is sent on every call but ignored server-side — ready slot for version telemetry (agent:366)",
+   "Server.extra JSON column exists for additional host facts (models/infra.py:82)",
+   "AgentHelloOut is the negotiation channel — new server-pushed settings ride the hello response (schemas/agent.py:37-43)",
+   "ensure_docker_host pattern plugs agent telemetry into the docker_hosts subsystem as an agent-backed provider (server_service.py:459-474)",
+   "AGENT_CONTAINER_CAP / MAX_CONTAINER_STATS / max_inspect constants tune fleet-scale cost (schemas/agent.py:21; agent:147,185)",
+   "ServerStatus/ContainerStatus enum + dedup_key event conventions absorb new transition types with once-per-day suppression (server_service.py:586-601)"
+  ],
+  "risks": [
+   "Stolen nxa_ token is a permanent, non-expiring write credential to one server: overwrite static host facts unvalidated, forge metrics into MetricSnapshot history, upsert fake containers, fire CONTAINER_*/SERVER_ONLINE events, force ONLINE defeating offline alerting (api/v1/agent.py:52-81; server_service.py:300-358,267-294)",
+   "No revocation-only path: revoke = rotate = running agent 401-exits at next beat and needs manual reinstall; no dual-token grace window (server_service.py:255-264; agent:481-482)",
+   "Plain HTTP transport permitted with only a stderr warning via --allow-insecure-transport — token sniffable on the path (agent:328-353)",
+   "docker group membership makes the agent context root-equivalent via the daemon; agent issues only GETs today, but any RCE in that context owns the host (nexusops-agent.service:19; agent:161-182)",
+   "401 -> exit(1) combined with Restart=always/RestartSec=10 hot-loops a revoked agent every 10s forever, contradicting docs/agent.md:75",
+   "No self-update or version management; server cannot even see agent versions (agent_version stub)",
+   "install_hint env var NEXUSOPS_URL is wrong, so enrollment guided from the API response fails (servers.py:185-188)",
+   "net_rx_kb_s/net_tx_kb_s hardcoded 0.0 — dashboards/charts render fabricated network zeros as if real (agent:398-399)",
+   "Agent-reported containers flagged simulated=True in the DB — data-lineage flag is wrong for real agent data (server_service.py:498)",
+   "Rate limiting per client IP: all agents behind one NAT share one 600/min heartbeat bucket; large fleets start 422/429-ing collectively (core/rate_limit.py:69)",
+   "Hello overwrites hostname/os/arch/capacity facts with no validation or confirmation — a compromised token can misattribute a host's identity (server_service.py:271-286)"
+  ]
+ },
+ {
+  "subsystem": "secrets, audit, events, event bus, WebSockets, config, errors",
+  "components": [
+   {
+    "name": "Secret model + secret_service + /secrets routes",
+    "maturity": "production",
+    "evidence": "/home/emad/projects/nexusops/backend/app/models/secrets.py:23-59; /home/emad/projects/nexusops/backend/app/services/secret_service.py:123-259; /home/emad/projects/nexusops/backend/app/api/v1/secrets.py:27-96",
+    "notes": "Fernet at rest, metadata-only reads, version-bump rotation; unique (project_id,key) + partial unique global key. No value history (only current ciphertext kept)."
+   },
+   {
+    "name": "Secret resolution (${secret:KEY} -> deployment env)",
+    "maturity": "partial",
+    "evidence": "/home/emad/projects/nexusops/backend/app/services/secret_service.py:265-325; /home/emad/projects/nexusops/backend/app/services/deployment_engine.py:328,374-388",
+    "notes": "Resolver works and is tested (tests/integration/test_secrets.py) but docker_real.py has zero references to ctx.secrets — only the simulated runner consumes them (providers/deployment_runner.py:70,210); real deployments silently get no secrets."
+   },
+   {
+    "name": "AuditLog + audit_service + immutability trigger",
+    "maturity": "production",
+    "evidence": "/home/emad/projects/nexusops/backend/app/models/observability.py:249-278; /home/emad/projects/nexusops/backend/app/services/audit_service.py:20-65; /home/emad/projects/nexusops/backend/alembic/versions/20260823_2225-b5866787bde4_initial_schema.py:23,622",
+    "notes": "Append-only via DB trigger audit_logs_no_update BEFORE UPDATE OR DELETE; API read-only (api/v1/audit.py); metadata redacted; writes ride the caller's transaction; no request_id column."
+   },
+   {
+    "name": "SystemEvent + /events API",
+    "maturity": "production",
+    "evidence": "/home/emad/projects/nexusops/backend/app/models/observability.py:219-246; /home/emad/projects/nexusops/backend/app/api/v1/events.py:47-104",
+    "notes": "Levels DEBUG/INFO/WARNING/ERROR/CRITICAL (models/enums.py:162-167); dedup_key unique; keyset cursor pagination; no project/tenant column."
+   },
+   {
+    "name": "Event bus (persist + Redis fan-out)",
+    "maturity": "production",
+    "evidence": "/home/emad/projects/nexusops/backend/app/services/event_bus.py:40-142",
+    "notes": "Frame stashed on session.info, published to nx:events only after_commit, dropped on rollback; best-effort publish (Redis down logged, never raised)."
+   },
+   {
+    "name": "WS hub + /api/v1/ws",
+    "maturity": "production",
+    "evidence": "/home/emad/projects/nexusops/backend/app/ws/hub.py:211-361,423-489; /home/emad/projects/nexusops/backend/app/ws/router.py:12-15",
+    "notes": "Origin check, first-frame auth (JWT+session or API key), per-subscribe permission re-check + entity existence, 5 channels, drop-oldest queue, idle/watchdog; global channel has no DB backfill (event_frame_from_row at event_bus.py:145 has no callers)."
+   },
+   {
+    "name": "core/config Settings",
+    "maturity": "production",
+    "evidence": "/home/emad/projects/nexusops/backend/app/core/config.py:21-190",
+    "notes": "Fail-fast validation (jwt >=32 chars, Fernet key check, exit 2); jwt_secret and encryption_key required with no defaults."
+   },
+   {
+    "name": "core/errors envelope + hierarchy",
+    "maturity": "production",
+    "evidence": "/home/emad/projects/nexusops/backend/app/core/errors.py:26-174",
+    "notes": "AppError -> BadRequest/Unauthorized/Forbidden/NotFound/Conflict/UnprocessableEntity/RateLimited; 500 handler logs exception class only (hide_parameters=True engine per comment at errors.py:151-166)."
+   },
+   {
+    "name": "core/logging (structlog)",
+    "maturity": "production",
+    "evidence": "/home/emad/projects/nexusops/backend/app/core/logging.py:19-129",
+    "notes": "JSON in prod/test, console in dev; redact_mapping keyed on sensitive substrings, recurses dicts only (lists not traversed)."
+   },
+   {
+    "name": "core/redis_client",
+    "maturity": "production",
+    "evidence": "/home/emad/projects/nexusops/backend/app/core/redis_client.py:10-36",
+    "notes": "Lazy shared async client, decode_responses, 5s timeouts, health_check_interval=30."
+   },
+   {
+    "name": "Crypto helpers (encrypt_str/decrypt_str/digest_of)",
+    "maturity": "production",
+    "evidence": "/home/emad/projects/nexusops/backend/app/core/security.py:118-158",
+    "notes": "Fernet cached per key; digest is first 12 hex of HMAC-SHA256 keyed by sha256(ENCRYPTION_KEY) — display/change-detection only; no key-rotation path (decrypt failure tells you to restore the original key)."
+   }
+  ],
+  "tenancy_gaps": [
+   "SystemEvent has no project/tenant column — the entire event stream is instance-global (backend/app/models/observability.py:219-246)",
+   "AuditLog has no project/tenant column — audit trail visible instance-wide to any audit.read holder (backend/app/models/observability.py:249-278; backend/app/api/v1/audit.py:42-56)",
+   "WS 'global' and 'incidents' channels fan EVERY event to any event.read/monitor.read holder — tenant B sees tenant A events today (backend/app/ws/hub.py:462-475)",
+   "WS entity subscriptions (server-metrics/container-logs/deployment-logs) check permission + entity existence only, never project membership of the subscriber (backend/app/ws/hub.py:331-336,347-361)",
+   "Global secrets (project_id NULL) resolve into every project's deployments; resolution is project-scoped only by preference, not isolation (backend/app/services/secret_service.py:296-311)",
+   "secret.read/secret.write are flat instance-wide permissions; any holder can list/read metadata of every project's secrets (backend/app/api/v1/secrets.py:27-52)",
+   "Redis pub/sub frames carry no tenant claim; hub routing trusts permission sets only (backend/app/services/event_bus.py:114-125; backend/app/ws/hub.py:462-489)",
+   "Permission model is flat codenames + wildcard prefixes on AuthContext — no per-project role binding exists anywhere (backend/app/api/deps.py:49-76)",
+   "AuthContext has no project scope concept; require_permission cannot express resource-scoped access (backend/app/api/deps.py:155-165)",
+   "Alerts and notification targets are likewise unscoped (Alert model backend/app/models/observability.py:281-298)"
+  ],
+  "docs_needs": [
+   "TRUSTED_PROXY_CIDRS is configurable (backend/app/core/config.py:63-67) but absent from .env.example",
+   "REFRESH_GRACE_SECONDS and SESSION_IDLE_TIMEOUT_DAYS absent from .env.example (backend/app/core/config.py:60,70)",
+   "WS protocol (auth/auth_apikey/subscribe frames, close codes 4401/4403/4408/1001/1012) documented only in ws/hub.py docstring and constants",
+   "${secret:KEY} reference syntax and project-over-global precedence documented only in secret_service.py:277-286 docstring",
+   "Event type catalogue and INCIDENT_CHANNEL_PREFIXES routing rule ('INCIDENT_'/'MONITOR_' -> incidents channel) live only in event_registry.py:49-59",
+   "ENCRYPTION_KEY write-once property and no-rotation story only discoverable via decrypt_str's error message (core/security.py:135-142)",
+   "Simulation contract (sim:// URLs, SIMULATION_MODE, beat tick self-disable) spread across code comments in docker_factory.py:26-44 and tasks/simulation.py:72"
+  ],
+  "key_contracts": [
+   "Error envelope {\"error\":{code,message,request_id,details?}} with stable machine codes (backend/app/core/errors.py:95-102)",
+   "WS frame protocol: {action: auth|auth_apikey|subscribe|unsubscribe|ping}; server replies subscribed/unsubscribed/event/error/pong (backend/app/ws/hub.py:273-295,388-399)",
+   "Redis channels: nx:events (all domain events), nx:logs:{container_id}, nx:deploy:{deployment_id}, nx:metrics:{server_id} (backend/app/core/channels.py:5-17)",
+   "WS channels: global, incidents, server-metrics, container-logs, deployment-logs; channel->(perms,param,model) matrix in _requirement_for (backend/app/ws/hub.py:347-361)",
+   "Event frame shape: id/type/level/message/actor_id/actor_type/resource_type/resource_id/data/created_at (backend/app/services/event_bus.py:114-125,145-160)",
+   "Secret refs ${secret:KEY} resolved server-side only; project-scoped key beats global fallback; unresolved/undecryptable -> \"\" with warning (backend/app/services/secret_service.py:277-325)",
+   "Secret values accepted only on create/rotate; all reads metadata-only incl. no value-bearing field in _detail (backend/app/services/secret_service.py:49-62; backend/app/api/v1/secrets.py:1-5)",
+   "Audit immutability: DB trigger audit_logs_no_update BEFORE UPDATE OR DELETE ON audit_logs; API strictly read-only (backend/alembic/versions/20260823_2225-b5866787bde4_initial_schema.py:23,622; backend/app/api/v1/audit.py:1)",
+   "Events deduplicated by unique dedup_key, publish returns None on dup (backend/app/models/observability.py:224; backend/app/services/event_bus.py:93-98)",
+   "Frames published only after transaction commit; dropped on rollback (backend/app/services/event_bus.py:40-76,126-133)",
+   "Sensitive keys redacted before persistence/log sinks — substring match password/secret/token/authorization/api_key/private_key/credential/cookie/session (backend/app/core/logging.py:19-60; applied in audit_service.py:54)",
+   "digest = HMAC-SHA256(key=sha256(ENCRYPTION_KEY), value)[:12] — server-verifiable, not an offline oracle (backend/app/core/security.py:145-158)"
+  ],
+  "extension_points": [
+   "Hub._requirement_for: single table mapping WS channel -> (required codenames, param name, model) — where new channels plug in (backend/app/ws/hub.py:347-361)",
+   "core/channels.py: canonical Redis channel name helpers; new emitters add a helper + hub REDIS_PATTERNS entry (backend/app/core/channels.py:5-17; hub.py:67)",
+   "event_registry.EVENT_TYPES catalogue drives /events/types and incidents-channel routing (backend/app/services/event_registry.py:49-59)",
+   "event_bus.publish() is the single emitter entry; commit=True variant for out-of-request (Celery) publishers (backend/app/services/event_bus.py:78-135)",
+   "resolve_secrets_for_environment: swap-in point for alternative secret backends behind the ${secret:KEY} contract (backend/app/services/secret_service.py:277)",
+   "redact_mapping + _SENSITIVE_KEY_PARTS tuple: extend redaction vocabulary once, applies to audit metadata, error payloads, logs (backend/app/core/logging.py:19-60)",
+   "AppError subclasses: new codes automatically shaped into the envelope by the registered handlers (backend/app/core/errors.py:26-92,105-112)",
+   "audit_service.record: any service appends an immutable row with ctx + request; IP resolution via client_ip trusted-proxy chain (backend/app/services/audit_service.py:20-57; backend/app/core/client_ip.py:56)"
+  ],
+  "risks": [
+   "Cross-tenant read of events, audit trail and live logs/metrics is possible today by design — flat permissions, no tenant claim anywhere in the path (backend/app/ws/hub.py:462-475; backend/app/api/deps.py:49-76)",
+   "Real Docker deployments never receive resolved secrets: docker_real.py has no ctx.secrets reference; only SimulatedDeploymentRunner consumes them (backend/app/providers/deployment_runner.py:70,210)",
+   "Missing/undecryptable secret refs silently resolve to \"\" so deploys proceed without credentials, only a log warning (backend/app/services/secret_service.py:314-324)",
+   "ENCRYPTION_KEY is effectively write-once: no rotation/re-encryption path; loss makes all ciphertexts permanently undecryptable (backend/app/core/security.py:135-142)",
+   "Audit rows are written inside the caller's transaction — a rollback erases the audit record of the attempted action together with its effect (backend/app/services/audit_service.py:31-57)",
+   "No request_id persisted on AuditLog or SystemEvent; correlation exists only in error envelope/log lines (backend/app/models/observability.py:249-278 vs backend/app/core/middleware.py:23-26)",
+   "Redis outage silently drops all live event fan-out; only the REST polling feed survives (backend/app/services/event_bus.py:138-142)",
+   "WS global channel has no replay/backfill; event_frame_from_row is dead code (backend/app/services/event_bus.py:145)",
+   "redact_mapping recurses dicts only — sensitive values nested inside lists pass through to audit metadata/logs (backend/app/core/logging.py:46-60)",
+   "allow_private_targets defaults to True in code and .env.example — a prod deploy without explicit override disables the SSRF guard (backend/app/core/config.py:91; .env.example:72)",
+   ".env.example ships CHANGE_ME placeholders that pass validation (JWT placeholder is >=32 chars), so a careless deploy can run on placeholder secrets (.env.example:30,42; backend/app/core/config.py:127-134)"
+  ]
+ },
+ {
+  "subsystem": "Docker providers, container inventory, logs, stats, sweeps (backend/app/providers, services/container_service.py, services/server_service.py, tasks/maintenance.py, services/log_service.py, api/v1/containers.py, api/v1/agent.py)",
+  "components": [
+   {
+    "name": "DockerProvider protocol",
+    "maturity": "production",
+    "evidence": "backend/app/providers/base.py:90-148 — Protocol with ping, list_containers, inspect, start/stop/restart/pause/unpause/remove, stats, images, volumes, networks, logs(tail, follow, since) -> Iterator[LogLine]; sync calls offloaded via asyncio.to_thread (base.py:1-8, container_service.py:163)",
+    "notes": "ContainerInfo/ContainerStats/LogLine dataclasses at base.py:52-87; DockerProviderError + sanitize_error strip response bodies/endpoints (base.py:26-49)"
+   },
+   {
+    "name": "RealDockerProvider",
+    "maturity": "production",
+    "evidence": "backend/app/providers/docker_real.py:71-105 — docker.DockerClient(base_url=endpoint_url, pinned API version so no eager I/O), TLSConfig(verify=False) when host.tls_verify false; tenacity 1 retry for APIError/RequestException; all failures -> DockerProviderError('Docker daemon unreachable') (docker_real.py:115-118)",
+    "notes": "stats() = two samples 0.3s apart for cpu/net deltas (docker_real.py:203-213); logs() streams with timestamps=True, parses RFC3339 (docker_real.py:33-68, 248-285)"
+   },
+   {
+    "name": "SSRF/endpoint guards",
+    "maturity": "production",
+    "evidence": "backend/app/core/ssrf.py:141-177 assert_safe_tcp_endpoint (tcp:// only; unix:// and agent:// exempt); applied at create/update in backend/app/services/docker_host_service.py:91-103,115-116,167-168; fails closed, generic 'URL is not allowed' to client",
+    "notes": "Known DNS-rebinding TOCTOU documented at ssrf.py:12-17; allow_private_targets bypasses resolution checks (ssrf.py:169-170); empty/agent:// endpoints rejected as UNSUPPORTED_ENDPOINT in docker_factory.py:28-36"
+   },
+   {
+    "name": "SimulatedDockerProvider",
+    "maturity": "simulated",
+    "evidence": "backend/app/providers/docker_sim.py:39-100 — stateless over DB rows via register_container/register_containers; deterministic SHA-256-seeded images/volumes/networks; logs() replays registered LogEntry rows (docker_sim.py:217-243); selected for sim:// or global settings.simulation_mode (docker_factory.py:29-32)",
+    "notes": "register_log_rows has zero callers — simulated containers get no synthesized logs"
+   },
+   {
+    "name": "Container lifecycle actions",
+    "maturity": "production",
+    "evidence": "POST /containers/{id}/{start,stop,restart,pause,unpause} generated in backend/app/api/v1/containers.py:235-257; container_service.trigger_action (container_service.py:141-207) dispatches to real provider or sim, sets expected status, restart_count++, audit + CONTAINER_* event",
+    "notes": "DELETE /containers/{id} requires exact-name confirm= query (containers.py:260-279; remove_container container_service.py:210-280, provider.remove(force=False) hardcodes non-force); provider failure -> Conflict(DOCKER_UNAVAILABLE) + host marked UNAVAILABLE"
+   },
+   {
+    "name": "Full-host sweep (sync_docker_hosts)",
+    "maturity": "production",
+    "evidence": "backend/app/tasks/maintenance.py:152-213, celery beat schedule 30s (celery_app.py:58-62); per host: sync_host_state then, for unix://|tcp:// endpoints only, _collect_logs (maintenance.py:186-192)",
+    "notes": "One dead host never kills the sweep (maintenance.py:180-183); regression test for the asyncio.run-in-loop bug at tests/integration/test_maintenance_sweep.py:69-91"
+   },
+   {
+    "name": "sync_host_state reconciliation",
+    "maturity": "production",
+    "evidence": "backend/app/services/container_service.py:283-459 — list_containers(all) -> add/update/delete rows, CONTAINER_STARTED/STOPPED/RESTARTED/REMOVED transition events with daily dedup keys, host set AVAILABLE/UNAVAILABLE; stats sampled for first 25 running containers (container_service.py:46,443-453)",
+    "notes": "Disappeared rows are deleted with CONTAINER_REMOVED events (container_service.py:424-439); stats loop breaks after first provider error (container_service.py:446-448)"
+   },
+   {
+    "name": "Concurrent-insert savepoint pattern",
+    "maturity": "production",
+    "evidence": "identical begin_nested() add()+flush inside savepoint, IntegrityError -> expunge + re-SELECT + adopt winner's row, in sweep (container_service.py:341-374) and heartbeat upsert (server_service.py:543-575); tests: tests/integration/test_maintenance_sweep.py:94-153",
+    "notes": "add() must be INSIDE the savepoint because begin_nested autoflushes pending objects (comments at container_service.py:345-350, server_service.py:548-551)"
+   },
+   {
+    "name": "Agent heartbeat upsert",
+    "maturity": "partial",
+    "evidence": "POST /agent/heartbeat (X-Agent-Token nxa_ -> SHA-256 hash lookup, backend/app/api/v1/agent.py:35-81, rate limit 600/min) -> process_heartbeat (server_service.py:300-358): upserts RAW MetricSnapshot, publishes live Redis frame, upsert_containers; absence-below-cap reconciliation deletes missing containers (server_service.py:607-626)",
+    "notes": "ensure_docker_host creates one agent:// host per server keyed only by server_id lookup with no unique constraint (server_service.py:459-474, models/infra.py:122-137); _apply_agent_entry hardcodes row.simulated=True even for real agents (server_service.py:498)"
+   },
+   {
+    "name": "Incremental log collection (watermark)",
+    "maturity": "production",
+    "evidence": "container_service.collect_recent_logs (container_service.py:478-537) — running containers ordered by name, limit max_containers=25 (maintenance.py:25), tail=100/line; filters lines to ts > max(LogEntry.ts) for that container (container_service.py:530-534) making 30s sweeps incremental; verified by test_maintenance_sweep.py:14-66",
+    "notes": "Watermark is per-container max ts (collisions within same-second lines can drop or duplicate on identical ts); simulated hosts skipped to avoid duplication (container_service.py:490-492)"
+   },
+   {
+    "name": "Log storage & retention",
+    "maturity": "production",
+    "evidence": "log_service.append_lines chunked bulk insert 500 rows (log_service.py:100-126); level detection by regex (log_service.py:33-72); retention nx.trim_logs every 15min (celery_app.py:83-87): CONTAINER 3d, DEPLOYMENT 30d, SERVER 7d + 5000-row per-container cap (maintenance.py:16-25,63-84)",
+    "notes": "ingest_provider_lines persists + publishes per line to Redis (log_service.py:176-200); trim_container_logs/trim_deployment_logs per-entity variants exist (log_service.py:129-158)"
+   },
+   {
+    "name": "Log streaming (Redis + WS hub)",
+    "maturity": "partial",
+    "evidence": "Producer publishes JSON {ts,stream,message} to nx:logs:<container_id> (channels.py:8-9, log_service.py:161-174, best-effort); WS hub psubscribes nx:logs:* (hub.py:67,428) and fans out to 'container-logs' subscribers with per-frame permission re-check (hub.py:297-345, header hub.py:1-9)",
+    "notes": "poll-fallback generator stream_container_logs with 2s poll + LogEntry id watermark (api/v1/containers.py:340-427) is NOT wired to any route or the hub — dead code"
+   },
+   {
+    "name": "Metrics pipeline",
+    "maturity": "production",
+    "evidence": "agent/sim heartbeat -> one RAW MetricSnapshot row per beat (server_service.py:340-355); nx.aggregate_metrics (maintenance.py:28-39) -> _rollup set-based INSERT..SELECT RAW->HOURLY(>90min)->DAILY(>48h) (metrics_service.py:202-306); retention prunes RAW/ hourly/DAILY (settings-driven, DAILY 365d)",
+    "notes": "Timeseries reads bucket RAW via to_timestamp(floor(epoch/N)) for <=6h, date_trunc rollups beyond (metrics_service.py:60-76,91-94); only server-level metrics — container cpu/mem are last-value columns on the Container row, never timeseries"
+   },
+   {
+    "name": "Container API reads",
+    "maturity": "production",
+    "evidence": "backend/app/api/v1/containers.py:144-337 — paginated list with status/health/host/server/q filters + whitelisted sort, detail view (command+mounts), keyset-paginated logs by (ts,id) cursor with level/q filters; env VALUES never serialized, keys only (containers.py:113-124)",
+    "notes": "Permissions: container.read/logs/lifecycle/remove (containers.py:57-60)"
+   },
+   {
+    "name": "Agent container observation",
+    "maturity": "production",
+    "evidence": "agent/nexusops_agent.py:130-260 — HTTP over /var/run/docker.sock, /containers/json?all=1, per-container inspect capped (max_inspect 10), one-shot stats per heartbeat with CPU diffed across cycles",
+    "notes": "Best-effort: empty list when no socket; malformed status strings rejected server-side as 422 (agent comment at nexusops_agent.py:213)"
+   }
+  ],
+  "tenancy_gaps": [
+   "No tenant/org/project column anywhere in the inventory chain: Server, DockerHost, Container, LogEntry, MetricSnapshot have no owner key (models/infra.py:42-183, models/observability.py:195-217); Project exists only in the deployments domain (models/delivery.py:25-35) with zero linkage to servers/containers",
+   "Every RBAC check is global, not row-scoped: container.read grants visibility of the entire container table (api/v1/containers.py:144-203) and container.logs reads any container's history (containers.py:287-337)",
+   "WS hub subscription check is permission+existence only — any user with container.logs can subscribe to any container_id, and nx:logs:<id> Redis channels are a single global namespace (hub.py:297-345, channels.py:8-9)",
+   "Docker host names are unique across the whole platform via a service-level global count check (docker_host_service.py:44-52); no per-tenant namespace and no DB unique constraint backing it",
+   "Provider selection treats SIMULATION_MODE as a global switch for all hosts (docker_factory.py:31-32); nx.simulation_tick fabricates heartbeats for every simulated-flagged server fleet-wide (tasks/simulation.py:88-124)",
+   "All sweeps operate on the global table: sync_docker_hosts iterates every DockerHost (maintenance.py:160-192), trim_logs deletes by source across all tenants (maintenance.py:54-59), aggregate_rollups rollups/prunes unscoped (metrics_service.py:264-306)",
+   "Agent identity is per-server token only (agent.py:35-49); there is no tenant entity a server/agent belongs to, so heartbeat ingest cannot be tenanted without schema change",
+   "Agent-reported containers are force-marked simulated=True regardless of reality (server_service.py:498) — conflates provenance flag with simulation mode",
+   "Audit/event bus entries carry resource ids but no tenant discriminator (event_bus.publish calls in container_service.py:375-383, server_service.py:588-601)"
+  ],
+  "docs_needs": [
+   "docs/architecture.md describes the provider factory and cadences in passing but there is no dedicated doc for the docker provider contract, endpoint scheme mapping (unix/tcp/sim/agent), or the UNSUPPORTED_ENDPOINT policy (docker_factory.py:26-37)",
+   "Log retention/cap constants (CONTAINER 3d, 5000-row cap, 25-container collection limit) are undocumented outside code comments (maintenance.py:16-25)",
+   "Incremental log watermark semantics (per-container max-ts cutoff, same-second edge behavior) undocumented (container_service.py:527-534)",
+   "The poll-fallback generator in api/v1/containers.py:340-427 is dead code — docs and API references should not describe streaming via it; actual path is WS hub Redis fanout",
+   "Agent heartbeat contract (containers cap, absence-below-cap reconciliation, simulated=True side effect) is only discoverable in server_service.py:477-626",
+   "SSRF guard scope for docker tcp:// endpoints and its documented DNS-rebinding limitation not surfaced in docs/security.md consumer guidance (ssrf.py:12-17,141-177)"
+  ],
+  "key_contracts": [
+   "DockerProvider is a synchronous Protocol; all calls offloaded with asyncio.to_thread; failures surface only as DockerProviderError with sanitized status/reason text (providers/base.py:1-49,90-148)",
+   "provider_for() mapping: unix://|tcp:// -> real, sim://|settings.simulation_mode -> simulated, anything else (incl. agent://) -> BadRequest UNSUPPORTED_ENDPOINT (docker_factory.py:26-37)",
+   "Container identity = (docker_host_id, container_id) unique, container_id truncated to 72 chars (models/infra.py:145-147, container_service.py:325)",
+   "New-container insert races between sweep and heartbeat are absorbed by begin_nested savepoint + adopt-winner pattern; add() must sit inside the savepoint (container_service.py:341-367, server_service.py:543-575)",
+   "Container status transitions emit CONTAINER_STARTED/STOPPED/RESTARTED/REMOVED events with daily dedup keys (container_service.py:88-129, server_service.py:578-601)",
+   "Log ingest contract: LogLine -> append_lines (500-row chunks, 8000-char messages, heuristic level) -> ingest_provider_lines also publishes one Redis frame per line to nx:logs:<container_uuid> (log_service.py:100-200)",
+   "Retention contract: trim_logs deletes by source age (CONTAINER 3d/SERVER 7d/DEPLOYMENT 30d) plus keeps newest 5000 rows per container; aggregate_rollups builds HOURLY/DAILY and prunes per settings (maintenance.py:16-25, metrics_service.py:264-306)",
+   "Sweep isolation contract: one failing host/container is logged and swallowed so the 30s beat never dies (maintenance.py:163-192, container_service.py:300-301,446-448)",
+   "Agent ingest contract: data-only payloads, X-Agent-Token nxa_ prefix hashed SHA-256, heartbeat rate-limited 600/min, never executes agent-sent content (agent.py:1-49)",
+   "WS contract: subscribe frames re-checked for permission on every frame, entity existence validated in DB, max 50 subscriptions per socket (hub.py:1-9,297-345)"
+  ],
+  "extension_points": [
+   "DockerProvider Protocol (base.py:90-148) — any new backend (podman, k8s, remote agent) just implements it and registers in provider_for(); services never touch SDKs (container_service.py:1-7)",
+   "docker_factory.provider_for endpoint-scheme dispatch (docker_factory.py:26-37) — the single choke point to add provider kinds or tenant-aware routing",
+   "Redis channel registry channels.py:1-24 — canonical names for events/logs/metrics; new channels plug in here and to hub REDIS_PATTERNS (hub.py:67)",
+   "Celery beat schedule dict (celery_app.py:47-93) — cadence changes and new sweeps are pure config entries",
+   "Agent heartbeat payload AgentHeartbeatIn/AgentContainerIn (api/v1/agent.py:71-81, schemas/agent.py) — the ingest seam where richer metrics or per-tenant identity would enter",
+   "Log ingestion funnel log_service.append_lines/ingest_provider_lines (log_service.py:100,176) — the single point where storage backend or fan-out could be swapped",
+   "METRIC_COLUMNS whitelist + RANGE_MAP (metrics_service.py:40-58) — new metrics/ranges only need registry entries"
+  ],
+  "risks": [
+   "Single global tenant namespace end to end: adding multi-tenancy touches Server/DockerHost/Container/LogEntry/MetricSnapshot schemas, every query in container_service/log_service/metrics_service, RBAC checks, and Redis channel keys — currently no owner scoping exists anywhere in this subsystem",
+   "DockerHost.name uniqueness and one-agent-host-per-server are enforced only in code paths, not by DB constraints (docker_host_service.py:44-52; ensure_docker_host server_id lookup server_service.py:459-474) — races can create duplicate agent hosts and duplicate container identities",
+   "ensure_docker_host's select-then-insert can create two agent:// hosts for one server under concurrent heartbeats (no unique(DockerHost.server_id), infra.py:122-137); downstream upserts then key off the wrong host",
+   "collect_recent_logs ts watermark has same-second granularity: two lines sharing a timestamp straddle the cutoff (> last_ts strictly), so identical-ts lines can be re-stored or skipped across sweeps (container_service.py:530-534)",
+   "Sweep stats sampling is sequential: up to 25 containers x 2 SDK calls + 0.3s sleep each on every 30s beat per host, inside a 300s soft limit (docker_real.py:203-213, container_service.py:443-453) — scales poorly beyond small hosts",
+   "Log stream live path has no backpressure/delivery guarantee: publish is best-effort and Redis-down drops live lines silently (log_service.py:171-174); poll fallback exists but is dead code, so DB-only viewers get no catch-up",
+   "Per-container 5000-row cap plus 3-day retention caps container log history regardless of tenant needs; trim deletes by ts across the entire table unscoped (maintenance.py:16-25,54-59)",
+   "remove() always calls provider.remove(force=False): a running container removal fails as DOCKER_UNAVAILABLE-style conflict and the DB row persists (container_service.py:235)",
+   "Global simulation_mode flips every host's provider to simulated, and sim tick writes into the same tables/queues as production heartbeats — contamination risk if left on (docker_factory.py:31-32, tasks/simulation.py:88-124)",
+   "Agent container payload trust: container stats/health/status come verbatim from the agent; only lengths/enums are validated server-side, so bad data lands directly on Container rows (server_service.py:477-499, schemas/agent.py)",
+   "stream_container_logs/__all__ exports dead code in the API layer (api/v1/containers.py:390-429) — future readers may assume an HTTP streaming endpoint exists"
+  ]
+ },
+ {
+  "subsystem": "Uptime monitors, checks, incidents, alerts, notifications",
+  "components": [
+   {
+    "name": "Monitor model + CRUD",
+    "maturity": "production",
+    "evidence": "backend/app/models/observability.py:50-90 (url/method/interval>=10/timeout<=60/expected_status/expected_body/headers/failure+success_thresholds); backend/app/services/monitor_service.py:136-287; backend/app/api/v1/monitors.py:47-126 (permission-gated, audit+events on every mutation)",
+    "notes": "Single-tenant: project_id nullable grouping, no tenant scoping anywhere"
+   },
+   {
+    "name": "Check scheduler (claim_due_monitors + beat)",
+    "maturity": "production",
+    "evidence": "backend/app/services/monitor_service.py:293-313 single-statement FOR UPDATE SKIP LOCKED claim+reschedule with commit; backend/app/tasks/monitoring.py:13-45 batch 50, fresh tx per check; backend/app/tasks/celery_app.py:53-57 beat every monitor_dispatch_interval_seconds (default 10s, backend/app/core/config.py:77)",
+    "notes": "Throughput ceiling ~50 checks per tick; overlapping runners partition batches"
+   },
+   {
+    "name": "HTTP monitor transport",
+    "maturity": "production",
+    "evidence": "backend/app/providers/monitor_transport.py:81-197 httpx probe, manual redirect chain (max 5 hops) with SSRF re-check per hop (108-132), 256KB body cap, expected_status + expected_body substring checks, query string stripped pre-send (68-78); SSRF re-validated at execution time monitor_service.py:348-356",
+    "notes": "body_snippet on failures exists in CheckOutcome but is not persisted to monitor_checks (error text only, observability.py:108)"
+   },
+   {
+    "name": "sim:// simulated transport",
+    "maturity": "simulated",
+    "evidence": "backend/app/providers/monitor_transport.py:204-242 deterministic sha256(monitor.id + interval bucket); 'always-down' always fails, 'flaky' fails ~30%/bucket, 'slow' reports fabricated 1.5-2.5s latency; gated to SIMULATION_MODE=true at creation (monitor_service.py:108-115, config.py:73)",
+    "notes": "No network, no sleep; outcome values are fabricated but stable across restarts"
+   },
+   {
+    "name": "MonitorCheck history + uptime aggregates",
+    "maturity": "production",
+    "evidence": "backend/app/models/observability.py:93-108; keyset-paged checks monitor_service.py:553-566; 24h/p95/avg aggregates with percentile_cont monitor_service.py:483-550",
+    "notes": "No retention/pruning job for monitor_checks found (only LogEntry trim, maintenance.py:46)"
+   },
+   {
+    "name": "Incident lifecycle service",
+    "maturity": "production",
+    "evidence": "backend/app/services/incident_service.py:104-246 open (auto, by engine)/acknowledge/resolve with Conflict on illegal transitions, timeline IncidentEvent per transition, audit on operator actions; severity hardcoded MAJOR (116)",
+    "notes": "Auto-resolve from engine passes auto=True (monitor_service.py:377-383); enums NOTIFIED/RECOVERY_DETECTED/ACTION defined (enums.py:111-119) but never written"
+   },
+   {
+    "name": "Incident routes + notes",
+    "maturity": "production",
+    "evidence": "backend/app/api/v1/incidents.py:48-126 list/detail/ack/resolve/notes under monitor.read and incident.action permissions; still-failing note every 5th failure monitor_service.py:434-442",
+    "notes": "All incidents globally visible; no project/tenant filter despite monitor_id FK"
+   },
+   {
+    "name": "Alert inbox",
+    "maturity": "partial",
+    "evidence": "backend/app/models/observability.py:281-298 insert-only Alert; created by engine on MONITOR_DOWN/MONITOR_RECOVERED (monitor_service.py:392-401,422-431) and NOTIFICATION_FAILED (notification_service.py:369-378); routes api/v1/alerts.py:22-56 explicitly a 'shared operator feed'",
+    "notes": "No per-user/project scoping; mark-all-read mutates everyone's feed; no alert rule engine"
+   },
+   {
+    "name": "Notification channels (EMAIL/WEBHOOK)",
+    "maturity": "production",
+    "evidence": "backend/app/models/notify.py:27-48 Fernet-encrypted whole config (notification_service.py:93-100), write-only via API (schemas/channel.py:78-87 no config field), masked display_target (notification_service.py:103-120); webhook secret_header validated schemas/channel.py:22-37 and merged at send notification_sender.py:105-109",
+    "notes": "Only EMAIL and WEBHOOK types exist (enums.py:122-124); webhook URL SSRF-checked at create/update only (notification_service.py:133), not re-checked at send unlike monitor checks"
+   },
+   {
+    "name": "Delivery pipeline + retries",
+    "maturity": "production",
+    "evidence": "backend/app/models/notify.py:51-94 delivery rows with unique(channel_id,event_id) idempotency (61) + ON CONFLICT insert (notification_service.py:461-482); attempts<=5 exponential backoff 2^n*30s cap 3600s (44-46,354-357); dispatcher_loop lifespan task subscribes nx:events (607-648); beat nx.retry_notifications 60s (celery_app.py:68-72, maintenance.py:91-102)",
+    "notes": "Terminal failure raises NOTIFICATION_FAILED event + WARNING alert; every API worker runs dispatcher, unique constraint arbitrates"
+   },
+   {
+    "name": "Notification senders (SMTP/webhook)",
+    "maturity": "production",
+    "evidence": "backend/app/providers/notification_sender.py:37-86 SMTP in worker thread with STARTTLS option; 92-119 webhook POST JSON, 2xx=success, no redirects, response bodies discarded to avoid leaks",
+    "notes": "Errors sanitized to exception-class-only strings (29-31)"
+   },
+   {
+    "name": "Celery beat schedule",
+    "maturity": "production",
+    "evidence": "backend/app/tasks/celery_app.py:47-93: run-due-monitors (config interval), retry-notifications 60s, plus unrelated server/deployment/session/metrics tasks; simulation-tick present but self-disables unless SIMULATION_MODE (tasks/simulation.py:67-75)",
+    "notes": "Fixed cadences + atomic claims by design (module docstring lines 1-5)"
+   },
+   {
+    "name": "Tests (backend)",
+    "maturity": "partial",
+    "evidence": "backend/tests/integration/test_monitors_incidents.py:32-133 SSRF block, down/recover lifecycle, notification queueing, check-now, header masking; test_notifications.py:49-79 deliveries listing + cross-worker idempotency; unit/test_monitor_transport.py:68-345 sim determinism, redirect SSRF, no-auto-redirect client",
+    "notes": "No integration test for retry backoff, dispatcher loop, or uptime aggregates; no frontend coverage of channels UI beyond page tests existing (MonitorListPage etc.)"
+   },
+   {
+    "name": "Seed/demo data",
+    "maturity": "simulated",
+    "evidence": "backend/scripts/seed.py:110-113,309-338 sim:// monitors + mailpit email channel; 480-525 fabricated historical incident + alert for legacy monitor; _seed_history at 390",
+    "notes": "Demo-only; seeds are all owned by admin with no tenancy boundary"
+   }
+  ],
+  "tenancy_gaps": [
+   "Monitor.project_id is nullable with ondelete SET NULL (observability.py:61-63) — loose grouping, not tenancy; Project has only owner_id (delivery.py:25-37), no org/workspace entity anywhere",
+   "require_monitor() fetches by bare id (monitor_service.py:99-105); any user with monitor.read/manage can read, update, delete, pause any monitor globally (api/v1/monitors.py:85-126)",
+   "list_monitors has no tenant scoping — project_id is an optional client-supplied filter, not an access boundary (monitor_service.py:453-480)",
+   "Incidents, incident events, alerts, notification channels, and deliveries have no project/tenant columns at all (observability.py:111-166,281-298; notify.py:27-94)",
+   "Alerts are a single global feed; POST /alerts/read-all mutates every user's feed (api/v1/alerts.py:1,52-56); unread-count is global",
+   "Notification channels are global; event-type subscription lists (channel.events, notify.py:44) are platform-wide strings with no per-tenant event namespace",
+   "Monitor.created_by_id / channel.created_by_id are informational SET NULL FKs; no ownership enforcement (observability.py:88-90; notify.py:46-48)",
+   "Engine, beat task, and dispatcher run with no tenant context: MONITOR_DOWN/INCIDENT_* frames carry monitor/incident ids only (event_bus.publish calls monitor_service.py:384-431; incident_service.py:141-245)",
+   "require_permission() is role/permission based only (api/deps.py AuthContext) — no per-project authorization predicate exists in the monitor path",
+   "Check rows, incident rows, and delivery rows cannot be partitioned or sharded per tenant as modeled (bigserial/uuid PKs, no tenant key on indexes observability.py:96,116-117; notify.py:55)"
+  ],
+  "docs_needs": [
+   "sim:// semantics: scheme dispatch, SIMULATION_MODE gating, determinism contract (monitor_transport.py:204-242, monitor_service.py:108-115)",
+   "Scheduling contract: claim/reschedule double-write, SKIP LOCKED batching, 10s default cadence and throughput ceiling (monitor_service.py:293-313,444-445; config.py:77)",
+   "SSRF guard scope: creation-time validation, per-redirect-hop re-check, execution-time re-validation, and the webhook-send asymmetry (monitor_transport.py:108-132; monitor_service.py:348-356; notification_service.py:133,278-289)",
+   "Channel secret handling: Fernet-encrypted config, write-only API, masked display_target, secret_header rules (notify.py:30-33; schemas/channel.py:22-37; notification_service.py:103-120)",
+   "Delivery retry/idempotency contract: unique(channel_id,event_id), backoff schedule, terminal NOTIFICATION_FAILED (notify.py:61; notification_service.py:44-46,354-378)",
+   "Incident transition matrix: which IncidentEventKind values are actually written vs defined (enums.py:111-119 vs incident_service.py usage) and that severity is always MAJOR",
+   "Alert inbox semantics: global shared feed, severity mapping sources, no rules engine (alert_service.py:17-29; api/v1/alerts.py:1)",
+   "Monitor header credential policy: plaintext-at-rest with output-only masking (observability.py:70; schemas/monitor.py:21-45)",
+   "Retention: none documented for monitor_checks vs trim_logs for LogEntry (maintenance.py:46)"
+  ],
+  "key_contracts": [
+   "Transports never raise for outcome-level failures (timeout/bad status/connection); they classify into CheckOutcome (monitor_transport.py:1-7,133-148)",
+   "Transport selection is purely URL-scheme dispatch: sim:// → SimulatedTransport, else HTTP (monitor_transport.py:249-253)",
+   "claim_due_monitors atomically claims AND reschedules next_check_at = now()+interval in one UPDATE ... RETURNING, then commits (monitor_service.py:293-313)",
+   "run_check takes a NOWAIT row lock, re-validates SSRF at execution time, writes check+state+incident deltas, reschedules, and commits once per check (monitor_service.py:326-447)",
+   "Incidents change status only via incident_service.open_incident/acknowledge/resolve, each appending timeline events and raising Conflict on illegal transitions (incident_service.py:104-246)",
+   "Engine auto-opens incidents at failures == failure_threshold and auto-resolves at successes >= success_threshold (monitor_service.py:376-383,409-431)",
+   "Channel config is accepted once, SSRF-validated, encrypted whole, and never returned by any endpoint (notification_service.py:123-142; schemas/channel.py:78-87)",
+   "Delivery fan-out is idempotent per (channel_id,event_id) via unique constraint + ON CONFLICT DO NOTHING because every API worker consumes the pubsub (notify.py:61; notification_service.py:452-482)",
+   "send_delivery never raises: failures land on the delivery row with backoff; terminal failure pages via NOTIFICATION_FAILED event + alert (notification_service.py:312-382)",
+   "Alert creation is insert-only flush; the caller owns the transaction (alert_service.py:32-55)"
+  ],
+  "extension_points": [
+   "MonitorTransport protocol (runtime_checkable) — new check backends implement check(monitor)->CheckOutcome (monitor_transport.py:49-54)",
+   "get_transport() scheme dispatch — the single place to add polymorphic target routing (monitor_transport.py:249-253)",
+   "ChannelType enum + validated_config + _invoke_sender if/elif — add Slack/Discord/Telegram/etc. (enums.py:122-124; notification_service.py:123-142,267-309)",
+   "_SUBJECTS dict of per-event subject templates for notification rendering (notification_service.py:52-60)",
+   "alert_service.severity_for_event mapping and CRITICAL/WARNING event-type frozensets (alert_service.py:17-29)",
+   "IncidentEventKind enum values NOTIFIED/RECOVERY_DETECTED/ACTION are reserved but unwritten (enums.py:111-119)",
+   "channel.events JSONB subscription list (empty = all event types) already generalizes event targeting (notify.py:43-44; notification_service.py:436-448)"
+  ],
+  "risks": [
+   "Monitors can only point at a URL string (observability.py:64); no polymorphic targets — server/container/application/port checks would need a target-type discriminator, per-type transports behind MonitorTransport, and a target-ref column replacing/alongside url",
+   "Monitor probe headers (Authorization/API keys) are stored PLAINTEXT in monitors.headers JSONB (observability.py:70) — masking is output-only (schemas/monitor.py:40-45), unlike channel config which is Fernet-encrypted; a PATCH that round-trips masked '******' values would send the literal mask on the next probe",
+   "Webhook channel URLs are SSRF-validated at create/update only, never re-validated at send time (notification_service.py:133 vs 278-289) — asymmetric with the monitor engine's execution-time re-check (monitor_service.py:348-356)",
+   "monitor_checks grows unbounded: no retention/pruning job exists (only LogEntry trim, maintenance.py:42-46); aggregates already scan raw rows (monitor_service.py:493-541)",
+   "Throughput ceiling: beat dispatches every 10s (config.py:77) with CLAIM_BATCH=50 (tasks/monitoring.py:13) — at scale, due monitors queue and next_check_at drifts; also every check runs inline inside one worker loop (tasks/monitoring.py:33-39)",
+   "check-now and claim+run are not mutually exclusionary across the API/worker boundary beyond the NOWAIT lock; a locked monitor returns NotFound to the user (api/v1/monitors.py:129-136)",
+   "Incident severity is hardcoded MAJOR (incident_service.py:116) and incident titles are always '<monitor> is down' — no severity derivation from monitor config",
+   "Alerts/read-all and alerts listing are global — in a multi-tenant redesign mark-all-read becomes cross-tenant mutation (api/v1/alerts.py:52-56)",
+   "Delivery body/subject persisted in plaintext including resource names and error text (notify.py:76-77); body is returned by /notification-channels/deliveries API (schemas/channel.py:96)",
+   "SKIPPED DeliveryStatus and three IncidentEventKind values are dead enum surface (enums.py:131,111-119) — schema churn risk in redesign",
+   "Redis pubsub frame loss = lost notification: fan-out relies on at-most-once pubsub plus a 30-60s retry sweep that only covers already-queued rows (event_bus.py:140; notification_service.py:628-634) — an event published when no dispatcher is up is never queued"
+  ]
+ },
+ {
+  "subsystem": "Delivery pipeline: projects, applications, environments, deployments end-to-end (models/delivery.py, project_service, deployment_engine, simulated runner, Celery tasks, projects/deployments APIs, WS hub, frontend Project*/Deployment* pages)",
+  "components": [
+   {
+    "name": "Project/Application/DeploymentEnvironment CRUD (models+service+API)",
+    "maturity": "production",
+    "evidence": "backend/app/models/delivery.py:25-85; services/project_service.py:102-562; api/v1/projects.py:52-292; nested-scope authz via get_scoped_application/environment",
+    "notes": "Fully wired to frontend ProjectDetailPage.tsx; slugs, dup-name conflicts, server existence checks all real"
+   },
+   {
+    "name": "Deployment engine state machine (queue/claim/execute/finalize)",
+    "maturity": "production",
+    "evidence": "services/deployment_engine.py:150-260 (queue, race-safe number via FOR UPDATE), 266-364 (claim QUEUED with FOR UPDATE, RUNNING), 580-713 (terminal transitions + last-resort fail)",
+    "notes": "Real, battle-tested transitions incl. after-commit enqueue (129-144) and exception failover (691-713) — but it orchestrates a simulated runner"
+   },
+   {
+    "name": "Deployment runner (SimulatedDeploymentRunner)",
+    "maturity": "simulated",
+    "evidence": "providers/deployment_runner.py:1-13 docstring admits real adapter 'deliberately NOT implemented in v1'; 107-261 fabricate git/docker output with asyncio.sleep pacing; health check only fails when version endswith '-broken' (223)",
+    "notes": "Hardcoded 7-step plan; only real I/O is sleeps and random digest generation"
+   },
+   {
+    "name": "Sweeper backstop (nx.sweep_deployments)",
+    "maturity": "production",
+    "evidence": "tasks/deployments.py:37-106 (requeue QUEUED>5min, fail RUNNING>30min); beat 120s in tasks/celery_app.py:63-66",
+    "notes": "Publishes DEPLOYMENT_FAILED events for lost workers"
+   },
+   {
+    "name": "Celery run task (nx.run_deployment)",
+    "maturity": "production",
+    "evidence": "tasks/deployments.py:21-34; soft_time_limit=560s; engine re-claims under row lock so re-delivery is safe",
+    "notes": "Str-id accepted via driver coercion"
+   },
+   {
+    "name": "Cancel & rollback semantics",
+    "maturity": "production",
+    "evidence": "deployment_engine.py:719-785 (QUEUED=immediate CANCELLED, RUNNING=cooperative flag polled between steps, terminal=409); 788-850 (rollback = new ROLLBACK deployment of last SUCCESS in same app+env)",
+    "notes": "Rollback is full redeploy through simulated steps, not container swap; no ROLLBACK deployment.status ever set (enums.py:65 unused)"
+   },
+   {
+    "name": "Environment config + secret refs",
+    "maturity": "production",
+    "evidence": "schemas/environment.py:14,37-39 rejects raw values, only ^\\$\\{secret:([A-Za-z0-9_]+)\\}$; resolution in services/secret_service.py:265-325 (project-scoped Secret beats global, decrypt, unresolved->'')",
+    "notes": "Called from engine._resolve_secrets (deployment_engine.py:374-387); failures degrade silently to {}"
+   },
+   {
+    "name": "Deployment log persistence + live streaming",
+    "maturity": "production",
+    "evidence": "engine.py:397-498: LogEntry rows (source=DEPLOYMENT) via log_service with direct-insert fallback, step.output capped 60KB (66), Redis frames on nx:deploy:{id} every 20 lines; WS 'deployment-logs' channel in ws/hub.py:359-360",
+    "notes": "Frame publish is best-effort (497-498); deployment log retention 30 days (tasks/maintenance.py:18)"
+   },
+   {
+    "name": "Lifecycle events + alerting",
+    "maturity": "production",
+    "evidence": "engine.py:226-236 (DEPLOYMENT_QUEUED), 310-317 (STARTED), 592-611 (SUCCEEDED + INFO alert), 643-663 (FAILED + CRITICAL alert), 678-686 (CANCELLED)",
+    "notes": "Terminal events use actor_type=SYSTEM; alert path has direct-insert fallback (532-577)"
+   },
+   {
+    "name": "Deployments API (list/trigger/cancel/rollback/logs)",
+    "maturity": "production",
+    "evidence": "api/v1/deployments.py:48-51 permissions, 185-220 trigger (202), 275-302 keyset-paginated logs with step attribution",
+    "notes": "expensive_op_limiter 20/min/IP fail-open on trigger only (189; core/rate_limit.py:102-103); no idempotency key"
+   },
+   {
+    "name": "WS hub + frontend Deployment*/Project* pages",
+    "maturity": "production",
+    "evidence": "ws/hub.py:297-361 per-subscribe permission recheck + entity existence; DeploymentDetailPage.tsx:149 subscribes deployment-logs; DeploymentListPage.tsx:99 triggers via /deployments/applications/{id}/deployments; permission-gated buttons (DeploymentDetailPage.tsx:286,296)",
+    "notes": "Pages carry their own tests (DeploymentDetailPage.test.tsx etc.)"
+   },
+   {
+    "name": "Auto-deploy / AUTO trigger",
+    "maturity": "stub",
+    "evidence": "models/delivery.py:82 auto_deploy column and enums.py:81 DeploymentTrigger.AUTO exist; grep shows zero consumers outside model round-trip (project_service.py:459 only persists it)",
+    "notes": "Flag stored and displayed in UI but nothing ever creates an AUTO deployment"
+   },
+   {
+    "name": "DeploymentStatus.ROLLBACK enum value",
+    "maturity": "stub",
+    "evidence": "models/enums.py:65 defined and allowed by DB status_check; rollback deployments are created with status QUEUED/SUCCESS and is_rollback=True (engine.py:824-836) — status never set to ROLLBACK",
+    "notes": "Dead enum member"
+   },
+   {
+    "name": "Integration tests (engine over simulated runner)",
+    "maturity": "production",
+    "evidence": "tests/integration/test_deployments_simulated.py:78-273 — HTTP trigger regression, success steps/logs, -broken health failure, rollback flow, enqueue-after-commit and rollback-drop regressions",
+    "notes": "Covers real engine behavior; nothing covers a real deploy target because none exists"
+   }
+  ],
+  "tenancy_gaps": [
+   "No tenant/org/workspace entity anywhere; ownership ceiling is nullable Project.owner_id FK (models/delivery.py:33-35), set-but-unenforced (project_service.py:121-127)",
+   "All list endpoints are global: list_projects (project_service.py:109-111), applications, environments, and _list_deployments (api/v1/deployments.py:105-122) filter only by query params, never by owner/tenant",
+   "Secrets resolve by environment's project chain, not caller identity — any user who can trigger a deploy can resolve any project's secrets via engine path (secret_service.py:277-325 has no per-user authorization)",
+   "WS 'deployment-logs' subscription requires only deployment.read + row existence — any user can watch any tenant's deploy logs (ws/hub.py:359-360)",
+   "WS 'global' channel pushes every event bus message to any event.read holder — cross-tenant event exposure by design (ws/hub.py:351-352, 467-474)",
+   "Object-level authz is parent-chain scoping only (project->app->env, project_service.py:257-263, 408-414): blocks orphan traversal, not tenant boundaries",
+   "Rate limiting keyed per-IP only (core/rate_limit.py:63-97) — no per-tenant or per-user quota on trigger/cancel",
+   "auto_deploy + AUTO trigger stored per environment but never consumed — no automated cross-env promotion path exists to even scope",
+   "API-key auth maps trigger->API but inherits the API key owner's global permissions; no per-project API-key scoping (api/v1/deployments.py:203)",
+   "Audit rows record actor/resource globally (services/audit_service.py:26-45); no tenant dimension to filter audit by"
+  ],
+  "docs_needs": [
+   "Deployment state machine doc: statuses, legal transitions, sweeper windows (5min QUEUED / 30min RUNNING), unused ROLLBACK status, _fail_from_exception path",
+   "Runner port contract: DeploymentRunner Protocol, RunContext fields, StepLine/StepFailure semantics, plan-at-queue-time vs execute-at-run-time split",
+   "Secret reference grammar and precedence: two different regexes (schemas/environment.py:14 strict full-value vs schemas/secret.py:25 findall), project-over-global resolution, degrade-to-empty policy",
+   "WS channel-permission matrix incl. per-subscribe recheck, auth frames, close codes (ws/hub.py:60-67, 347-361)",
+   "Permission codename -> role matrix for project.* and deployment.* (core/permissions.py:52-55 + role grants)",
+   "Event catalog: DEPLOYMENT_* types, payload shapes, alert severities, actor conventions (SYSTEM at terminal)",
+   "Concurrency protocol doc: after-commit Celery enqueue, FOR UPDATE claim + recheck, why enqueue-before-commit raced (engine.py:110-144, 278-297)",
+   "Environment config limits and redaction guarantees (50 keys / 512 chars; audit metadata field-names only)",
+   "Log lifecycle: DEPLOYMENT source 30-day retention vs cursor-paginated /deployments/{id}/logs endpoint",
+   "Celery time budgets: soft_time_limit 560s vs simulated pacing vs real-runner expectations"
+  ],
+  "key_contracts": [
+   "DeploymentRunner Protocol (runtime_checkable): plan_steps(ctx)->list[str], execute_step(step_name, ctx)->AsyncIterator[StepLine], StepFailure exception (providers/deployment_runner.py:81-96)",
+   "RunContext dataclass: project_name, application_name, environment_name, version, git_commit, server_name, secrets dict (deployment_runner.py:59-70) — only inputs a runner receives",
+   "Canonical step names + order: PULL_REPO, CHECKOUT, BUILD_IMAGE, STOP_OLD_CONTAINER, START_NEW_CONTAINER, HEALTH_CHECK, FINALIZE (deployment_runner.py:35-56); persisted as DeploymentStep rows at queue time (engine.py:212-213)",
+   "Status/trigger/step enums enforced in DB via status_check (models/enums.py:59-81, models/delivery.py:91,146)",
+   "Event contract: DEPLOYMENT_QUEUED/STARTED/SUCCEEDED/FAILED/CANCELLED via event_bus.publish on CHANNEL_EVENTS; terminal events carry actor_type=SYSTEM (engine.py:226,310,592,643,678)",
+   "Live log frame shape {deployment_id, step_idx, step, line, level, ts} on Redis nx:deploy:{deployment_id} (engine.py:434-445; core/channels.py:12-13)",
+   "WS subscribe frame {action:'subscribe', channel:'deployment-logs', params:{deployment_id}} gated by deployment.read with per-frame recheck and entity-existence check (ws/hub.py:297-345, 359-360)",
+   "Secret ref grammar: env config values must be exactly ${secret:KEY} (schemas/environment.py:14); resolution scan uses SECRET_REF_PATTERN ${secret:([A-Z][A-Z0-9_.-]{0,158}[A-Z0-9])} (schemas/secret.py:25)",
+   "API surface: POST /deployments/applications/{id}/deployments -> 202 DeploymentDetail; POST /deployments/{id}/cancel|rollback; GET /deployments/{id}/logs keyset cursor page (api/v1/deployments.py:185-302)",
+   "Permission codenames: project.read/manage, deployment.read/create/cancel/rollback (core/permissions.py:52-55; api/v1/projects.py:33-34, api/v1/deployments.py:48-51)",
+   "Queue/claim protocol: enqueue deferred to after_commit, worker claims QUEUED row with SELECT..FOR UPDATE and re-checks status, cancel_requested polled between steps (engine.py:129-144, 278-297, 347)",
+   "Celery task names nx.run_deployment (soft 560s/hard 590s) and nx.sweep_deployments on 120s beat (tasks/deployments.py:21,37; tasks/celery_app.py:63-66)"
+  ],
+  "risks": [
+   "Deployments are 100% simulated: SUCCESS marks application.current_version/current_deployment_id (engine.py:590-591) for code that was never built or shipped — platform data fabricates delivery reality",
+   "Runner hard-instantiated at two sites with no DI/registry (engine.py:194, 345) — swapping in a real runner requires engine edits, not just a new adapter",
+   "RunContext cannot support a real runner: no repository_url, default_branch, build_config, or server address (only display server_name); Application.repository_url/build_config and Project.default_branch exist on models but never reach the runner",
+   "Secret resolution failures degrade silently to {} so deploys proceed without required secrets (engine.py:381-387); unresolved refs also resolve to '' (secret_service.py:316-318)",
+   "No audit event at secret-resolution time — usage of secrets in deploys is invisible to the audit trail (secret_service.py:277-325)",
+   "Cancel is cooperative between steps only: an in-flight step cannot be interrupted and there is no per-step timeout (engine.py:346-357 polls only at loop top)",
+   "Live log frames are best-effort — Redis publish failure drops frames with only a log warning (engine.py:497-498) while persistence has a fallback, so WS viewers can silently miss lines",
+   "Trigger rate limiter is fail-open on Redis outage and per-IP only (core/rate_limit.py:79-83); cancel/rollback have no limiter; trigger has no idempotency key so double-submit creates duplicate deployments",
+   "Deployment logs are pruned after 30 days by the global trim job (tasks/maintenance.py:18) while /deployments/{id}/logs has no awareness of retention — old deployments show empty logs",
+   "Sweeper requeue bumps queued_at but does not deduplicate against a Celery redelivery racing the sweep; safety rests entirely on the FOR UPDATE claim recheck (tasks/deployments.py:66-74; engine.py:278-297)",
+   "front/backend agree on the trigger alias path (/deployments/applications/{id}/deployments) only because the deployments router nests the applications router (api/v1/deployments.py:46) — a fragile mount-order contract documented only in comments"
+  ]
+ },
+ {
+  "subsystem": "test suites and coverage shape",
+  "components": [
+   {
+    "name": "backend pytest unit suite",
+    "maturity": "production",
+    "evidence": "backend/tests/unit/ 18 files ~205 tests (schemas, security/SSRF, permissions, docker_sim, monitor_transport, pagination, rate_limit); run via `make test-backend-unit` = `pytest -m \"not integration\"` (Makefile:53-54)",
+    "notes": "No external services; asyncio_mode=auto, --strict-markers, only marker is `integration` (backend/pyproject.toml:73-80)"
+   },
+   {
+    "name": "backend pytest integration suite",
+    "maturity": "production",
+    "evidence": "backend/tests/integration/ 12 files ~59 tests (auth_journey 12, servers_and_audit 7, agent_ingestion 6, deployments_simulated 6, secrets 5, monitors_incidents 5, rbac 3, event_bus 3, maintenance_sweep 3, notifications 3, created_at_defaults 1); all `pytestmark = pytest.mark.integration`",
+    "notes": "Real Postgres+Redis; deployments run through the simulated runner (test_deployments_simulated.py:1)"
+   },
+   {
+    "name": "integration fixture pattern (DB provisioning + clean slate)",
+    "maturity": "production",
+    "evidence": "backend/tests/integration/conftest.py:35-57 session _ensure_database (psycopg admin conn CREATE DATABASE nexusops_test) + _run_migrations (alembic upgrade head); autouse _clean_slate :101-122 (TRUNCATE all RESTART IDENTITY CASCADE, _seed_rbac_registry :77-98 mirroring scripts/seed.py, Redis flushdb on dedicated index 1, dispose engine/redis post-test for loop-bound pools)",
+    "notes": "Root conftest pins env before first app import because get_settings is lru_cache-d (backend/tests/conftest.py:1-87; ports from repo .env NEXUSOPS_POSTGRES_PORT/REDIS_PORT)"
+   },
+   {
+    "name": "API client + owner fixtures",
+    "maturity": "production",
+    "evidence": "conftest.py:125-151: httpx ASGITransport client with fixed client addr (\"127.0.0.1\", 54321), db session fixture, `owner` fixture = register_and_login (first user becomes Owner on fresh DB); helpers.py:44-114 register_account/login_account/bearer, :62-86 refresh-cookie header parsing, :123-136 assert_error_code envelope check",
+    "notes": "One owner per test via unique_email (helpers.py:14-20)"
+   },
+   {
+    "name": "agent contract tests",
+    "maturity": "production",
+    "evidence": "backend/tests/test_agent_contract.py:1-45: importlib-loads the real agent/nexusops_agent.py, monkeypatches /proc stat collectors to constants, validates build_heartbeat output against app/schemas/agent.py AgentHeartbeatIn/AgentContainerIn (extra=\"forbid\" catches undocumented keys); 4 tests",
+    "notes": "Exists because a prior drift 422'd every heartbeat (module docstring)"
+   },
+   {
+    "name": "frontend vitest component suite",
+    "maturity": "production",
+    "evidence": "~33 spec files (28 pages + 5 components in frontend/src); pattern: vi.mock(\"../api/client\") with hoisted mocks + RTL + MemoryRouter/QueryClient/AuthProvider wrapper (frontend/src/pages/DashboardPage.test.tsx:1-24); setup.ts installs jest-dom + afterEach cleanup",
+    "notes": "Entire API client mocked — verifies rendering/UX state, not real contract integration; vitest excludes e2e dir (frontend/vite.config.ts:19-30)"
+   },
+   {
+    "name": "Playwright e2e journey",
+    "maturity": "production",
+    "evidence": "frontend/e2e/journey.spec.ts:69-302 test.describe.serial, 10 tests: register/login UI, logout+admin re-login, server enroll+heartbeat ONLINE w/ containers, monitor fail→incident→mailpit email, notification sink, recovery auto-resolve, deploy good succeeds, deploy -broken fails visibly, audit trail; runs against composed stack edge :8080 + mailpit :8025 (playwright.config.ts:1-13, workers:1, fullyParallel:false)",
+    "notes": "Auth/refresh-rotation model documented and enforced in fixtures.ts:4-27: ONE worker-scoped browser context/cookie jar (SPA boot rotations stay in-jar), never replay a consumed cookie across contexts (reuse detection revokes the session family), separate apiToken request context (:102-121), login budget sized to the 10/min rate limit"
+   },
+   {
+    "name": "Makefile test targets",
+    "maturity": "production",
+    "evidence": "Makefile:48-60: test (backend-unit + frontend vitest, no services), test-backend (needs PG+Redis), test-backend-unit, test-frontend, e2e (playwright install chromium + run); lint/format targets :64-69 cover tests dirs",
+    "notes": "All purely local"
+   },
+   {
+    "name": "CI automation",
+    "maturity": "stub",
+    "evidence": "No .github/, .gitlab-ci.yml, or .circleci in repo root; playwright.config.ts:11 `retries: process.env.CI ? 2 : 0` references a CI env that never exists; only docs/development.md:199-220 documents manual make targets",
+    "notes": "Nothing runs automatically on push/PR"
+   }
+  ],
+  "tenancy_gaps": [
+   "No org/tenant concept anywhere in tests; `owner` fixture assumes single-tenant first-user-becomes-Owner bootstrap (backend/tests/integration/conftest.py:143-152)",
+   "No cross-tenant IDOR suite: test_rbac.py only asserts role boxing 403s (backend/tests/integration/test_rbac.py:48,65,95) — zero resource-ownership scoping tests (user A reading user B's server/secret/deployment)",
+   "Tenant-adjacent greps (org/tenant) in backend/tests only match incidental words in test_security.py/test_schema_redaction.py — no tenancy test data model exists",
+   "Helpers create one owner + role-boxed invitees per test (test_rbac.py:16-36 _invite_user) — no factory for two isolated principals owning parallel resource sets",
+   "_clean_slate truncates all tables globally per test (conftest.py:101-104) — adequate for multi-org fixtures to extend, but nothing seeds them today",
+   "E2E bootstrapVia treats 'fresh DB first register = whole-system bootstrap, else INVITATION_REQUIRED' (frontend/e2e/fixtures.ts:37-56) — single-tenant assumption baked into the journey",
+   "E2E journey has exactly one admin identity (ADMIN constant, fixtures.ts:30) — no second-tenant user, no cross-account negative UI checks",
+   "Integration client fixture pins one client IP (\"127.0.0.1\",54321, conftest.py:129) — per-tenant rate-limit isolation tests would need IP variation via forwarded headers (pattern exists: test_auth_journey.py:283-306)",
+   "No multi-tenant data-isolation check on list endpoints (e.g., pagination over scoped querysets) — test_pagination.py is unit-level only",
+   "Extendable seam for org fixtures: helpers.py pure functions + conftest owner/_seed_rbac_registry — named, but no org-scoped variant exists"
+  ],
+  "docs_needs": [
+   "No CI config in-repo; docs/development.md:199-220 documents manual make targets only — CI wiring undocumented because it does not exist",
+   "No documented test-writing conventions page; regression intent lives in module docstrings (test_app_gating.py:1-12, test_created_at_defaults.py:1-16)",
+   "The e2e refresh-rotation/cookie-jar constraints are documented only as a code comment (frontend/e2e/fixtures.ts:4-27) — fragile knowledge",
+   "docs/development.md:216-220 explains test DB/Redis provisioning but not the flush-hook race-injection pattern for future contributors",
+   "No documented coverage of what the suites do NOT cover (IDOR, tenancy, permissions matrix beyond 3 tests)",
+   "Agent contract test rationale documented in its docstring (test_agent_contract.py:1-9) but not linked from docs/development.md test section"
+  ],
+  "key_contracts": [
+   "Agent payloads must validate against app/schemas/agent.py with extra=forbid; agent module loaded via importlib so drift fails tests not prod (backend/tests/test_agent_contract.py:4-9,36-45)",
+   "Error envelope exactly {error:{code,message,request_id}} with 8+ char request_id (backend/tests/integration/helpers.py:117-136)",
+   "Refresh rotation: replay of rotated token = reuse → family revocation; grace window rescues lost rotation, expiry takes theft path (backend/tests/integration/test_auth_journey.py:67-187)",
+   "Refresh cookie hardening (Secure/httpOnly attrs) follows request transport (test_auth_journey.py:248)",
+   "RBAC seed parity: test registry must insert PERMISSIONS/ROLE_MATRIX exactly like scripts/seed.py (backend/tests/integration/conftest.py:77-98)",
+   "DDL created_at defaults must be bare now() evaluated per insert, never quoted literals folded at CREATE TABLE (backend/tests/integration/test_created_at_defaults.py:11-29)",
+   "Unique-violation losers must adopt the concurrent winner's row, not fail (flush-hook race injection, test_maintenance_sweep.py:109-152)",
+   "ENVIRONMENT gating: openapi.json/Swagger hidden and HSTS wired in production (backend/tests/unit/test_app_gating.py:1-12)",
+   "Secret values never leave metadata endpoints (detail carries no value; resolution substitutes refs at deploy time) (backend/tests/integration/test_secrets.py:28-78)",
+   "Login rate limit 10/min is a budget the e2e fixture designs around (frontend/e2e/fixtures.ts:24-26)",
+   "SSRF guard strictness is environment-pinned: ALLOW_PRIVATE_TARGETS=false forced in tests regardless of dev .env (backend/tests/conftest.py:76-78)",
+   "Deterministic ENVIRONMENT=test seed pair makes pytest + e2e reproducible (docs/development.md:45-57)"
+  ],
+  "extension_points": [
+   "backend/tests/integration/helpers.py — pure payload/auth/cookie helpers; natural home for org/user factory helpers",
+   "`owner` fixture (backend/tests/integration/conftest.py:143-152) — extend into org-scoped owner/member pair without touching tests",
+   "_seed_rbac_registry (conftest.py:77-98) — add org-scoped roles/seeds alongside PERMISSIONS/ROLE_MATRIX",
+   "_clean_slate autouse fixture (conftest.py:101-122) — already full-reset per test; supports N-principal scenarios as-is",
+   "cookie parsing helpers refresh_cookie_header/value/attributes (helpers.py:62-86) — reusable for any multi-session auth test",
+   "test_rbac.py _invite_user pattern (:16-36) — template for tenant-member provisioning via API",
+   "frontend/e2e/fixtures.ts adminSession/apiToken fixtures — add second context per tenant; rotation constraints already documented (:4-27)",
+   "vitest vi.mock(\"../api/client\") hoisted-mock pattern (DashboardPage.test.tsx:7-24) — cloneable for org-switcher/page tests",
+   "Makefile test target composition (:48-60) — add a cross-tenant/idor suite target alongside test-backend-unit",
+   "pytest `integration` marker + --strict-markers (backend/pyproject.toml:77-80) — add tenancy/idor marker for selective runs"
+  ],
+  "risks": [
+   "No CI anywhere: all suites are manual local make invocations; regressions land unless a developer remembers to run them (repo root has no .github; playwright.config.ts:11 CI-gated retries never fire)",
+   "Zero cross-tenant authorization coverage — a multi-tenant redesign currently ships with no regression net for its highest-risk failure class (only role-boxing 403s exist, test_rbac.py)",
+   "E2E requires a fully composed stack + freshly migrated+seeded DB via `make clean && make up` (playwright.config.ts:1-8); serial single-worker, 120s test timeouts, and bootstrap depends on first-user-registration state — brittle and slow",
+   "E2E correctness depends on subtle cookie-jar discipline (never share a consumed refresh cookie across contexts, never close the shared page mid-rotation, fixtures.ts:8-27) — easy to break by adding a parallel context naively",
+   "Per-test TRUNCATE all + engine/redis dispose (conftest.py:101-122) is correct but scales linearly with schema size; pool churn on every test",
+   "Frontend vitest suite fully mocks ../api/client — green tests say nothing about real request/response contract integration; contract drift surface is only covered for the agent, not the SPA",
+   "Integration coverage of core platform areas is thin: rbac 3 tests, notifications 3, event_bus 3, maintenance_sweep 3 (vs auth 12) — authorization and delivery paths least tested",
+   "Fixed client IP in the ASGI client (conftest.py:129) means per-IP rate-limit behavior is only exercised via forwarded-header tests, not real socket variance",
+   "filterwarnings = error::DeprecationWarning:app.* (backend/pyproject.toml:76) makes the suite break on dependency-driven deprecation warnings inside app modules",
+   "Coverage tooling configured ([tool.coverage.run] source=app, backend/pyproject.toml:82-85) but never enforced — no threshold, no CI to gate on it"
+  ]
+ },
+ {
+  "subsystem": "documentation vs implementation reality (README.md + all 9 files in docs/)",
+  "components": [
+   {
+    "name": "README.md",
+    "maturity": "partial",
+    "evidence": "README.md:162-164 claims Secure refresh cookie keyed to ENVIRONMENT via config.cookies_secure; code has no cookies_secure and derives Secure from X-Forwarded-Proto (backend/app/api/v1/auth.py:27-43)",
+    "notes": "Accurate: simulation mode default (.env.example:52), random one-time seed password to stderr (backend/scripts/seed.py:205-207), no fleet-wide metrics endpoint, WS channels (backend/app/core/channels.py), repo layout. Stale: `make dev` failure cause — README.md:99-103 still blames a missing nginx/dev.conf, but docker-compose.dev.yml:37-44 was fixed Sep 13 to mount the real template (frontend/Dockerfile:2-17 still lacks the `develop` stage, so dev build still fails). Docs tree omits platform-vision.md and docker-compose.docker-sock.yml."
+   },
+   {
+    "name": "docs/api.md",
+    "maturity": "production",
+    "evidence": "Endpoint inventory verified against routers: 22 router modules in backend/app/api/v1/ match §6; rate limits match code (backend/app/core/rate_limit.py:94-97: auth 10/min, register 5/5min, refresh 30/min, expensive 20/min, agent 30 & 600); uptime endpoint ?hours=1..720 real (backend/app/api/v1/monitors.py:176-178)",
+    "notes": "Accurate on auth flows, error envelope, pagination, WS protocol, agent ingest, PATCH /docker-hosts, ping-200-on-failure, shared alerts feed. GAP: api.md never states that the deployment engine is the staged simulation — its §6/§9 document deploy endpoints and limitations without disclosing SimulatedDeploymentRunner (backend/app/providers/deployment_runner.py:107)."
+   },
+   {
+    "name": "docs/agent.md",
+    "maturity": "production",
+    "evidence": "Matches agent/nexusops_agent.py and backend/app/api/v1/agent.py:52-72 (hello/heartbeat with X-Agent-Token); token hashing, --insecure/--allow-insecure-transport, exit-on-401, exponential backoff all verified in code",
+    "notes": "Undocumented addition: heartbeats now carry per-container cpu_percent/mem_used_mb (backend/app/schemas/agent.py:79, added Sep 13) — agent.md's collection table (agent.md:9-16) lists only host signals + container state."
+   },
+   {
+    "name": "docs/architecture.md",
+    "maturity": "partial",
+    "evidence": "architecture.md:300-302 says refresh cookie is `Secure` in production via `config.Settings.cookies_secure` — stale, same transport-based fix as README; provider mapping (architecture.md:162,524-527) matches backend/app/providers/docker_factory.py:26-40 and monitor_transport.py:204-246 exactly",
+    "notes": "Accurate: 30 permissions + 5 roles incl. Developer (backend/app/core/permissions.py:80-157), 9 beat cadences (backend/app/tasks/celery_app.py:47-91), audit trigger, sim runner 7-step description, -flaky node (backend/app/tasks/simulation.py:94-96), retention. Stale nuance: §10 calls nx.sync_docker_hosts 'pull recent logs from real ones' — code now collects incrementally (backend/app/services/container_service.py:529) and the sweep/heartbeat adopt/remove containers (commits 71b823e, 6853567, de914f7)."
+   },
+   {
+    "name": "docs/deployment.md",
+    "maturity": "production",
+    "evidence": "Most current doc (Sep 13): correctly describes transport-based Secure cookie (deployment.md:229-239), client-IP trust chain via backend/app/core/client_ip.py (deployment.md:338-458), loopback edge, and the committed docker-compose.docker-sock.yml override (deployment.md:623-653)",
+    "notes": "Honest and verified: TLS not wired (only commented 8443 block in nginx/default.conf.template:88), no /metrics exporter (prometheus-client declared backend/pyproject.toml:24, unused in app/), no built-in backups, no automatic rollback, scale caveats. Accurate on seeding, ENVIRONMENT=production effects, upgrades."
+   },
+   {
+    "name": "docs/development.md",
+    "maturity": "partial",
+    "evidence": "development.md:93 still documents `Settings.cookies_secure` forcing Secure cookies in production — removed from code; development.md:339-340 claims 'The single initial revision' 20260823_2225-b5866787bde4 but backend/alembic/versions/ now holds 6 migrations",
+    "notes": "Stale: §4.2 (development.md:171-174) claims the overlay mounts missing nginx/dev.conf — fixed Sep 13 in docker-compose.dev.yml:37-44 (comment even says 'dev.conf used to be referenced here but never existed'); missing `develop` Docker stage part still true (frontend/Dockerfile:2-17, docker-compose.dev.yml:29). Accurate: make targets, conftest env pinning, migration workflow, resource checklist, beat table, E2E seeding contract."
+   },
+   {
+    "name": "docs/engineering-report.md",
+    "maturity": "partial",
+    "evidence": "engineering-report.md:47-48 says 'four seeded roles' — backend/app/core/permissions.py:80-157 seeds five (Owner/Admin/Operator/Developer/Viewer); §5.3 (engineering-report.md:293-304) is the ACCURATE account of the Secure-cookie transport fix that README/architecture/development/troubleshooting still contradict",
+    "notes": "Point-in-time verification claims (368 backend / 113 frontend tests, 10-step Playwright journey, 20 audit findings) presented as current; raw `def test` count today is 259 (parametrized, unverified total). Accurate: E2E-defect list matches code state (deliveries created_at migration, deploy trigger MissingGreenlet, WS hub eq=False, publish-after-commit stashes)."
+   },
+   {
+    "name": "docs/security.md",
+    "maturity": "partial",
+    "evidence": "Three nonexistent paths cited: security.md:42 backend/app/middleware/security_headers.py and security.md:118 backend/app/middleware/ (no such dir; middleware is backend/app/core/middleware.py, XFF is backend/app/core/client_ip.py), security.md:50 backend/app/core/redaction.py (redaction is backend/app/core/logging.py:46)",
+    "notes": "Also wrong: security.md:32-33 lists 4 roles (code has 5, permissions.py:140); security.md:66 says 'token buckets' — backend/app/core/rate_limit.py:1 implements fixed windows. Accurate: refresh rotation+30s grace (auth_service.py:365-460), API-key scope intersection before superadmin shortcut, per-redirect-hop SSRF validation (monitor_transport.py:81-130), agent cleartext refusal, generate_secrets.sh --force guard."
+   },
+   {
+    "name": "docs/troubleshooting.md",
+    "maturity": "partial",
+    "evidence": "§12 (troubleshooting.md:520-535) explains session drops via `cookies_secure` following ENVIRONMENT and advises running ENVIRONMENT=development — describes the pre-fix behavior; code now sets Secure only when X-Forwarded-Proto is https (backend/app/api/v1/auth.py:27-43), so production-over-HTTP no longer breaks login",
+    "notes": "Stale: §13 (troubleshooting.md:541-546) still blames the missing nginx/dev.conf (fixed Sep 13). Accurate: health-probe separation (§1), 422 reserved-domain email validation (§4, verified vs schemas/auth.py EmailStr), worker healthcheck targeting, lockout mechanics (§11), 'no simulator without the worker' (§13) — simulation stops when worker/scheduler are down (backend/app/tasks/celery_app.py simulation_tick)."
+   },
+   {
+    "name": "docs/platform-vision.md",
+    "maturity": "partial",
+    "evidence": "New proposal doc created today (Sep 20 22:58), marked 'Proposal for review — not yet approved'; its description of today is accurate: SimulatedDeploymentRunner (cites backend/app/providers/deployment_runner.py:107), sim:// transports, and 'no domains/certificates/reverse-proxy subsystem at all'",
+    "notes": "References 6 companion docs that do not exist yet (domain-model.md, multi-tenancy.md, authorization.md, node-agent-architecture.md, product-roadmap.md, platform-security-model.md — platform-vision.md:5,64,66,152). Asserts unverifiable facts about a production 'contabo' instance and test counts (337 unit + 54 integration backend, 109 frontend) with no in-repo evidence."
+   }
+  ],
+  "tenancy_gaps": [
+   "No doc describes any organization/tenant concept — security.md:32-36 presents role wildcards plus vague 'ownership boundaries ... enforced in the service layer' as the entire isolation story; code has no org_id anywhere",
+   "api.md documents every resource (servers, projects, monitors, docker hosts, secrets, deployments) as globally visible to any caller holding the codename — no per-tenant scoping is promised or exists (backend/app/api/v1/ route permissions are flat codenames)",
+   "User-scoping exists only for self-owned rows: api.md documents own-sessions/own-api-keys rules (api.md §6 'foreign keys 404'); there is no doc statement that fleet data is shared across all operators, but that is the behavior",
+   "security.md:12-15 threat model names 'a curious operator' as an adversary but defines no mitigation beyond RBAC codenames; no tenant-boundary threat modeling exists",
+   "deployment.md production hardening (deployment.md:203-222) has zero multi-tenant guidance: one shared seeded admin pattern, no per-customer data isolation, shared rate-limit buckets per IP only",
+   "Audit log documented as append-only (architecture.md:470-496) but carries no tenant dimension — actor + resource + action only, which a multi-tenant redesign would have to extend",
+   "Seeded demo fleet (backend/scripts/seed.py:86-115) is documented as visible to everyone with no scoping; troubleshooting.md and api.md instruct seeding on shared stacks",
+   "platform-vision.md:101-102 states the target ('org_id on every tenant table + a session-scoped query guard') — confirming no tenancy exists today in docs or code"
+  ],
+  "docs_needs": [
+   "Rewrite the Secure-cookie story in README.md:162-164, architecture.md:300-302, development.md:93 and troubleshooting.md §12 (520-535) to the transport-based behavior (backend/app/api/v1/auth.py:27-43); `cookies_secure` no longer exists",
+   "security.md: fix three dead file references (core/redaction.py→core/logging.py:46; app/middleware/security_headers.py→core/middleware.py; app/middleware/ XFF→core/client_ip.py), list the fifth role (Developer), and change 'token buckets' to fixed-window (rate_limit.py:1)",
+   "engineering-report.md:47-48 'four seeded roles' → five, or label the doc as a dated snapshot",
+   "development.md:339-340: 'single initial revision' → six migrations now in backend/alembic/versions/",
+   "Update dev-overlay narrative in README.md:99-103, development.md §4.2 and troubleshooting.md §13: nginx/dev.conf mount was fixed Sep 13 (docker-compose.dev.yml:37-44); only the missing `develop` Dockerfile stage remains broken",
+   "api.md §6/§9: explicitly state deployments execute via SimulatedDeploymentRunner (no real runner exists) so API-only readers are not misled",
+   "Document the `-broken` version-suffix demo hook (deployment_runner.py:223-238) and sim:// URL semantics (always-down/flaky/slow, monitor_transport.py:204-246) in api.md and architecture.md",
+   "agent.md: add per-container cpu/mem stats to the heartbeat payload table (schemas/agent.py:79, shipped Sep 13)",
+   "Document incremental docker log collection and concurrent-insert adoption in architecture.md §10 (container_service.py:529; commits 71b823e, 6853567)",
+   "README repo layout: add docker-compose.docker-sock.yml and docs/platform-vision.md (or prune the latter); platform-vision.md: create or remove its 6 dangling doc references"
+  ],
+  "key_contracts": [
+   "Docker provider selection: unix://|tcp:// → RealDockerProvider; sim:// or SIMULATION_MODE → SimulatedDockerProvider; empty/other → 400 UNSUPPORTED_ENDPOINT (backend/app/providers/docker_factory.py:26-40)",
+   "Monitor transport: sim:// URLs → deterministic SimulatedTransport — sha256(monitor.id + interval bucket); 'always-down' always fails, 'flaky' fails 30%, 'slow' adds 1.5-2.5s latency (backend/app/providers/monitor_transport.py:204-246)",
+   "DeploymentRunner port: fixed 7-step plan PULL_REPO→FINALIZE; any version string ending '-broken' fails HEALTH_CHECK with 503-after-3-attempts (backend/app/providers/deployment_runner.py:55-63,223-238) — the E2E/demo failure hook",
+   "Uniform error envelope {\"error\":{code,message,request_id}} from a single AppError registry (backend/app/core/errors.py; api.md §4.1)",
+   "Refresh cookie Secure follows X-Forwarded-Proto transport, never ENVIRONMENT; HttpOnly, SameSite=Strict, path /api/v1/auth (backend/app/api/v1/auth.py:27-43)",
+   "Refresh rotation with FOR UPDATE lock, 30s one-shot grace replay rescue, second/late replay = TOKEN_REUSE family revocation (backend/app/services/auth_service.py:365-460)",
+   "Authorization = require_permission(codename); API keys intersect key scopes with owner role before superadmin shortcut (backend/app/api/deps.py; security.md:28)",
+   "Beat schedule: 9 fixed cadences, 15s/10s/30s/120s/60s/600s/60s/15min/20s; due rows claimed FOR UPDATE SKIP LOCKED; simulation_tick self-disables without SIMULATION_MODE (backend/app/tasks/celery_app.py:47-91)",
+   "WS channels: global|incidents|server-metrics|container-logs|deployment-logs on nx:* Redis channels (backend/app/core/channels.py:5-17)",
+   "Rate limits: auth 10/min and register 5/5min and refresh 30/min fail-closed (in-process fallback), expensive 20/min, agent hello 30/min heartbeat 600/min fail-open; fixed-window Redis (backend/app/core/rate_limit.py:1-97)",
+   "Seeding contract: opt-in NEXUSOPS_ALLOW_SEED=1 outside ENVIRONMENT=test, random one-time admin password printed once to stderr, advisory-locked idempotent, refuses production (backend/scripts/seed.py:205-207,533-545)",
+   "Retention: raw metrics 24h, hourly rollups 30d, per-source log retention (containers 3d/servers 7d/deployments 30d) + 5000-row cap (backend/app/tasks/maintenance.py; architecture.md:242-246)"
+  ],
+  "extension_points": [
+   "DeploymentRunner Protocol (plan_steps/execute_step streaming) — reserved seam for a real docker-SDK/SSH runner; only SimulatedDeploymentRunner implements it (backend/app/providers/deployment_runner.py:87-107)",
+   "DockerProvider protocol with Real vs Simulated implementations chosen by URL scheme/settings in docker_factory (backend/app/providers/base.py:90, docker_factory.py:26)",
+   "MonitorTransport selection per URL scheme: HTTPMonitorTransport vs SimulatedTransport (backend/app/providers/monitor_transport.py)",
+   "Notification senders smtp|webhook behind a sender port (backend/app/providers/notification_sender.py; architecture.md:163-164)",
+   "Data-driven RBAC: PERMISSIONS registry (30 specs) + ROLE_MATRIX seeded to DB, custom roles first-class (backend/app/core/permissions.py:80-157)",
+   "testkit_router mount hook in backend/app/main.py:210-216 — dev-only fault-injection point, currently defined by no module (dead reserved hook)",
+   "docker-compose.docker-sock.yml committed override pattern for mounting the host docker socket into api+worker (deployment.md:623-653)",
+   "Canonical Redis channel names nx:events / nx:logs:* / nx:deploy:* / nx:metrics:* decouple producers from the WS hub (backend/app/core/channels.py)",
+   "Explicit router inclusion list _include_routers (backend/app/main.py:132-205) — new domains register by editing this tuple",
+   "Env/compose knobs: NEXUSOPS_* host-port mappings, COMPOSE_FILE layering, API_WORKERS, monitor/metrics cadence and retention variables (deployment.md:535-557)"
+  ],
+  "risks": [
+   "Four docs contradict the shipped Secure-cookie behavior (README.md:162, architecture.md:300, development.md:93, troubleshooting.md:520-535) — a contributor following them will mis-diagnose production login behavior, and trust in the docs' claim-by-claim accuracy is undermined",
+   "security.md cites three module paths that do not exist (core/redaction.py, app/middleware/security_headers.py, app/middleware/) — an auditor or new dev following the 'Every control named here points at the module that implements it' promise (security.md:5) hits dead ends",
+   "security.md:32 and engineering-report.md:47 describe 4 roles; the code seeds 5 (Developer, permissions.py:140) — permission-expectation bugs in reviews and tests written against the docs",
+   "security.md:66 claims token buckets; the limiter is fixed-window (rate_limit.py:1) — wrong burst/edge semantics for anyone capacity-planning from the docs",
+   "api.md — the doc API consumers actually read — never discloses that every deployment is a staged simulation; automation built on POST /deployments will expect real artifacts, images and containers that never exist",
+   "The `-broken` version-suffix failure hook and sim:// URL keywords (always-down/flaky/slow) are magic strings inferred only from code/tests; a deployment or monitor whose real data collides with these suffixes behaves unexpectedly and no doc warns",
+   "make dev guidance is half-stale in three docs: the nginx/dev.conf failure was fixed Sep 13 while the missing frontend `develop` stage (frontend/Dockerfile) remains — readers cannot tell which of the two documented causes still applies",
+   "Test-count claims drift across docs (README '300+', engineering-report 368, platform-vision 337+54 backend / 109 frontend; 259 raw test defs counted) — verification claims are unverifiable without a run and will rot further",
+   "engineering-report.md presents point-in-time results (368 tests, mypy 0 across 115 files, 20 audit findings fixed) as the current state; Sep-13 commits (client-IP chain, incremental logs, container adoption) arrived after it and are only covered by deployment.md",
+   "platform-vision.md ships 6 dangling links to nonexistent companion docs and asserts un-evidenced production facts (contabo instance, test counts) — a redesign baseline built on it inherits unverifiable claims",
+   "README repo layout omits docker-compose.docker-sock.yml (the only path to real container logs/controls on the stack host) and platform-vision.md — new contributors miss the self-monitoring override entirely"
+  ]
+ }
+]

@@ -99,9 +99,12 @@ Four-way classification, grounded in the subsystem analysis (evidence in
 ## 3. Phase 0 — Truth pass & hardening
 
 **Why first:** the docs contradict shipped behavior (Secure-cookie descriptions,
-role counts, limiter algorithm), and two correctness bugs are known: secret
-resolution silently degrades to empty on failure, and a revoked agent hot-loops
-401→exit(1) every ~10s. Cheap, de-risks everything after; no schema change.
+role counts, limiter algorithm), and three correctness bugs are known: secret
+resolution silently degrades to empty on failure, a revoked agent hot-loops
+401→exit(1) every ~10s, and the agent install hint emits `NEXUSOPS_URL` where the
+agent process reads `NEXUSOPS_SERVER` (`backend/app/api/v1/servers.py:188-192`) —
+a fresh install that never connects until the env var is corrected by hand.
+Cheap, de-risks everything after; no schema change.
 
 - **Docs:** fix the four Secure-cookie descriptions against
   `backend/app/api/v1/auth.py:27-43`; role counts (5, not 4); fixed-window
@@ -128,6 +131,7 @@ land in their natural phase — column 3):
 | 6 | `Server.name` platform-global uniqueness | Phase 1 (per-org) |
 | 7 | Audit rows lacking org / request-id | Phase 1 |
 | 8 | Secret resolution lacking per-user authorization on the engine path | Phase 0 (fail-closed + audit), Phase 2 (deploy-chain authorization) |
+| 9 | Install hint emits `NEXUSOPS_URL`; the agent reads `NEXUSOPS_SERVER` (servers.py:188-192) — fresh installs never connect | Phase 0 |
 
 **Exit:** docs spot-check clean; fail-closed + backoff tested.
 
@@ -342,18 +346,61 @@ counters accumulate from Phase 1 so enforcement is a gate, not a backfill.
 
 **Phases 0–6a.** The demo that sells (platform-vision §2.2):
 
-> Sign up → org → agent one-liner → node appears with live stats → project →
-> deploy an image → `api.example.com` verified → HTTPS auto → uptime +
-> TLS-expiry monitoring on by default → invite a teammate (Viewer).
+> Accept an operator-issued invite → org → agent one-liner → node appears with
+> live stats → project → deploy an image → `api.example.com` verified → HTTPS
+> auto → uptime + TLS-expiry monitoring on by default → invite a teammate (Viewer).
 
 Why this boundary: it is the smallest loop where every promise in the vision
 doc is *real* (no simulation), each ingredient maps to a shipped phase, and
-nothing in it depends on teams/grants, backups, or billing.
+nothing in it depends on teams/grants, backups, or billing. (Onboarding is
+operator-issued invites, not signup — multi-tenancy.md §2.1.)
 
-**Waits until later:** 6b (git→build), 7 (teams/grants/custom roles), 8
-(backups), 9 (billing enforcement). **Stays out entirely** (non-goals,
-platform-vision §2.1): Kubernetes, a CI engine, a log platform at scale,
-arbitrary remote shell, multi-region control plane.
+**What the customer must bring** — the demo does not work without these, and
+every sales conversation states them up front (full checklist: platform-vision
+§4):
+
+| Prerequisite | VPS path (credible day one) | Home-server/NAT path |
+|---|---|---|
+| Domain + DNS | hosted on **Cloudflare** (v1 cert constraint) + scoped API token | same, plus DDNS if the IP is dynamic |
+| A/AAAA record → node IP | trivial (static public IP) | user-configured port-forward of 80/443 |
+| Reachability | public IP by construction | **CGNAT = unsupported in v1** (no tunnel, by design) |
+| nginx on the node, 80/443 free | one apt/yum line | same |
+| Public container image | any Docker Hub image | same |
+
+**API note:** the permissioned REST API already exists — the sellable version
+ships with a *documented, frozen v1 subset* of it (the endpoints the dashboard
+uses), because integrators build against undocumented behavior and competitors'
+missing/broken API tokens are a documented blocker (competitive review). This is
+a documentation + freeze commitment, not a new workstream.
+
+### 13.1 Scope-creep gates — what must be true before each expansion
+
+Challenge §9 asked for gates, not "later." Each line is the condition under
+which the category earns a phase of its own:
+
+| Category | It becomes justified when… |
+|---|---|
+| **Git builds (6b)** | `deployment.build` codename exists + build isolation is bounded by the op whitelist (authorization.md §2) — **and** trial loss to git-first competitors is measured, not assumed. |
+| **Kubernetes runtime** | A paying customer needs scheduling/scaling docker+nginx cannot deliver, **and** the deploy contract (digest pinning, container identity, health gates) has held unchanged for a full release cycle; K8s arrives as a second runtime provider, never a product fork. |
+| **SSH terminal / webshell** | **Never while the allowlist holds** — a webshell is `node.execute` under another name and voids the transport trust story. Revisit only if legitimate ops prove the allowlist insufficient, with its own threat-model chapter. |
+| **Log platform at scale** | The ship-to-object-storage export is live **and** retention/search complaints come from paying orgs the export does not satisfy. The export is the release valve; a query engine is not. |
+| **More DNS providers** | Two implementations minimum to keep the DNSProvider interface honest (Cloudflare + one more) — driven by measured onboarding drop-off at the Cloudflare step. |
+| **Private registries** | The registry `Connection` kind + pull-secret delivery design exists (deployment-architecture.md §6a deferral; node-agent-architecture.md secret-delivery path). |
+| **Zero-downtime deploys** | Brief-downtime honesty measurably loses deals **and** the two-container health-gated switch + rollback orchestration is designed against the 6a contract. |
+| **Cloud provisioning (buy VPS)** | Agent-onboarded (customer-brought) nodes are the saturated path — provisioning re-introduces credential blast radius and needs its own security review. |
+| **IaC (Terraform provider)** | The frozen public API v1 has been stable for ≥2 releases — a TF provider is a stability commitment, not a feature. |
+| **Plugin marketplace** | Multiple third parties actually ask to extend the op whitelist; until then it stays compile-time-closed (node-agent-architecture.md §5.2). |
+| **AI ops** | After the operation registry has a production audit history; read-side suggestions only, never actions. |
+| **Multi-region control plane** | Measured agent-pull/monitor-cadence latency from one region harms real customers — nodes are already region-independent (outbound-only). |
+| **Enterprise SSO (SAML/OIDC)** | With billing: a paying org with large seat counts demands it; federation grows the auth surface and takes its own platform-security-model.md review. |
+| **Self-serve signup** | Gated on billing plans (multi-tenancy.md §2.1): open registration + abuse control + plan enforcement ship together, as one phase. |
+| **Usage-tier billing** | The Phase 1 metering counters (domain-model.md §2.7) have accumulated real usage cycles — rates need data to be defensible. |
+
+**Waits until later (each behind its gate above):** 6b (git→build), 7
+(teams/grants/custom roles), 8 (backups), 9 (billing enforcement). **Stays out
+entirely** (non-goals, platform-vision §2.1): Kubernetes as the primary runtime,
+a CI engine, a log platform at scale, arbitrary remote shell, multi-region
+control plane.
 
 ## 14. Biggest risks (short form)
 
@@ -364,7 +411,8 @@ arbitrary remote shell, multi-region control plane.
   Let's Encrypt rate limits (staging-first, DNS-provider reuse); single Fernet
   `ENCRYPTION_KEY` today vs per-org DEK envelope later (KMS-ready design in
   secrets-architecture.md).
-- **Product:** scope creep toward CI/K8s (non-goals list is the defense); the
+- **Product:** scope creep toward CI/K8s (non-goals list + the §13.1 gates are
+  the defense); the
   deployment expectation gap — before 6b, image-based deploys must be honestly
   labeled so "Deploy" doesn't imply git-push; trust in a young agent (version
   reporting + out-of-date warnings now, self-update later); supporting a

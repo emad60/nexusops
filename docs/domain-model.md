@@ -12,25 +12,31 @@ This model is an **evolution of the existing schema, not a rewrite**. Concepts m
 Backups). Where the current schema conflicts with the target, the migration path is
 named — see [product-roadmap.md](product-roadmap.md) for phasing.
 
+**Glossary guard — naming rules for every doc and the UI:** Node, not Server.
+Application, not Service. Environment always means the project-scoped entity — never
+the node's free-text tag (that field is renamed "Label", §2.2.1). An Operation is a
+single whitelisted node action, never a shell; a Deployment is the numbered delivery
+run that issues Operations.
+
 ## 1. The hierarchy
 
 ```
 User ──Membership──> Organization ──> Project ──> Application ──> Deployment
                         │                │
-                        │                ├── Environment (project-scoped)
+                        │                ├── Environment (staging/prod)
                         │                ├── Domain → Route → Certificate
                         │                └── Grant (resource-level access)
-                        ├──> Node (today: Server) ──> DockerEndpoint ──> Container
-                        ├──> Operation (whitelisted remote ops)
-                        └──> BackupPolicy → BackupRun → destination
+                        ├──> Node ──> Container
+                        ├──> Operation (one whitelisted node action)
+                        └──> BackupPolicy → Backup → Destination
 ```
 
 - **Organization is the tenant root.** Users belong to orgs via **Membership**; a
   user may belong to many orgs and switch between them. All resources hang off orgs.
-- **Project is the primary work unit** — "Ymart" with its environments, services,
+- **Project is the primary work unit** — "Ymart" with its environments, applications,
   domains, deployments, monitoring, logs — one place. It exists today and keeps that role.
-- **Node is the machine abstraction** — the *existing `Server` entity*, exposed as
-  "Node" in API/UI, extended with capabilities and operations.
+- **Node is the machine abstraction** — a machine with an agent, capabilities, and
+  operations. Containers are what the agent observes on it.
 - **Environment is promoted from application-scope to project-scope** (the
   "Ymart → Production" model). Applications deploy *into* environments.
 - **Every tenant-scoped row carries org_id.** Enforcement is mechanical — see
@@ -63,8 +69,8 @@ erDiagram
     Deployment ||--|{ DeploymentStep : "steps"
 
     %% Infrastructure
-    Organization ||--o{ Node : "owns (today: Server)"
-    Node |o--o| DockerEndpoint : "0..1 (today: DockerHost)"
+    Organization ||--o{ Node : owns
+    Node |o--o| DockerEndpoint : "0..1 docker connection (not user-visible)"
     DockerEndpoint ||--o{ Container : existing
     Node ||--o{ ServerCredential : "existing SSH creds"
     Node ||--o{ Operation : "whitelisted remote ops"
@@ -107,9 +113,9 @@ hang off Node/DockerEndpoint as today; `Monitor` gains a polymorphic target
 |---|---|---|---|
 | **Organization** | `organizations` | id, name, slug (global-unique), status, `plan` (placeholder `free`), created_by_id | Tenant root. Slug is the public handle — unique platform-wide; names may collide, slugs cannot. |
 | **Membership** | `memberships` | org_id, user_id, role_id, status (`invited`/`active`/`suspended`), invited_by_id, joined_at | Unique `(org_id, user_id)`. Invited-but-not-active members have zero access. |
-| **Role** | `roles` | **org_id (nullable = system template)**, name, permissions JSONB | Reuses existing `roles`/`permissions` tables. System templates (Owner/Admin/Operator/Developer/Viewer) are `org_id IS NULL` rows seeded from `ROLE_MATRIX`; v1 orgs reference system roles; org custom roles (org_id rows, permissions ⊆ registry) come later. Wildcard `*` already supported by the engine. |
+| **Role** | `roles` | **org_id (nullable = system template)**, name, permissions JSONB | Reuses existing `roles`/`permissions` tables. System templates (Owner/Admin/DevOps/Developer/Viewer) are `org_id IS NULL` rows seeded from `ROLE_MATRIX`; v1 orgs reference system roles; org custom roles (org_id rows, permissions ⊆ registry) come later. Wildcard `*` already supported by the engine. |
 | **Team / TeamMember** | `teams`, `team_members` | org_id, name; (team_id, user_id) | **Design now, build later.** Org-level roles cover the 5-person example; grants make teams useful for resource-level access later. |
-| **Grant** | `grants` | design-only shape: `org_id, principal (user\|team), principal_id, scope (project\|environment\|node), scope_id, role_id` | "Ali deploys staging but not production" = Developer org-role + Grant(staging-env → Operator). Effective permissions = org role ∪ grants, resolved in ONE place. Implementation phase: roadmap. |
+| **Grant** | `grants` | design-only shape: `org_id, principal (user\|team), principal_id, scope (project\|environment\|node), scope_id, role_id` | "Ali deploys staging but not production" = Developer org-role + Grant(staging-env → DevOps). Effective permissions = org role ∪ grants, resolved in ONE place. Implementation phase: roadmap. |
 | **ApiKey** | `api_keys` | existing + org binding | API keys bind to ONE org; `org = key.org_id` (active-org header ignored for key auth). Per-org automation identities; scopes via existing `scope_matches` wildcards. Revocation kills one automation identity only. |
 
 ### 2.1.1 ApiKey org binding detail
@@ -126,7 +132,7 @@ active-org header, and an `active` membership in that org is required. Consequen
 | Entity | Table | Changes | Notes |
 |---|---|---|---|
 | **Project** | `projects` | + **org_id**; name unique→ per-org unique; + `config` JSONB (Phase 2 — the base layer of deploy config layering) | `owner_id` gets no new access meaning: under orgs, access is governed by membership role; owner_id becomes historical creator (kept for audit, not an access gate). |
-| **Application** | `applications` | none (org via project) | Deployable unit; build_config stays metadata. |
+| **Application** | `applications` | none (org via project) | The deployable unit of a project — what other tools call a *service*. There is deliberately no Service entity (the word collides with the Kubernetes mental model). Build_config stays metadata. |
 | **Environment** | `deployment_environments` | **PROMOTED: application_id → project_id**, + environment_type (dev/staging/prod), node_id | The ONE structural delivery change. See §2.2.1. |
 | **Deployment** | `deployments` | + org_id (denormalized for fast org listings), + node_id stamp | Keeps `(application_id, environment_id)` pair — "deployed what into where". `number` stays per-application. |
 | **DeploymentStep** | `deployment_steps` | none (org via deployment) | Steps + streamed logs of a run. |
@@ -144,6 +150,11 @@ active-org header, and an `active` membership in that org is required. Consequen
   a `production-2` suffix during migration.
 - **Deployment rows keep** `(application_id, environment_id)` — the pair now means
   "application deployed into project environment".
+- **Name collision fixed:** `servers.environment` is a free-text tag (default
+  'production', `backend/app/models/infra.py:57`) shown as an "Environment" field in
+  the node form (`frontend/src/components/ServerForm.tsx:171-174`). After promotion,
+  "Environment" means the project-scoped entity — the node field is renamed **Label**
+  in the Phase 1 rename sweep, and the glossary guard (§0) pins the rule.
 - **Config layering:** project config ⊕ environment config ⊕ deploy-time secret
   refs (`${secret:KEY}`) — most specific wins. Full specification in
   [deployment-architecture.md](deployment-architecture.md).
@@ -153,10 +164,15 @@ active-org header, and an `active` membership in that org is required. Consequen
 | Entity | Table | Changes | Notes |
 |---|---|---|---|
 | **Node** | `servers` (kept) | + **org_id**, + capabilities JSONB, + facts columns | The existing `Server` — exposed as **Node** in API/UI (paths `/nodes`, codenames `node.*`). Table keeps its name initially to avoid FK churn; rename to `nodes` in a later cleanup phase. |
-| **DockerEndpoint** | `docker_hosts` (kept) | none (org via node) | Existing 0..1 relation to a machine. Agent-backed nodes create theirs automatically; TCP-socket nodes configure theirs manually. Exposed as part of the Node resource. |
+| **DockerEndpoint** | `docker_hosts` (kept) | none (org via node) | **Not user-visible** — a node's docker *connection*, never surfaced as its own object (the "Docker hosts" nav page folds into Node detail; roadmap Phase 1/3). Agent-backed nodes create theirs automatically; TCP-socket nodes configure theirs manually. The Phase 1/2 migration backfills or deletes orphan rows and makes `server_id` NOT NULL (`backend/app/models/infra.py:126-128` — it is nullable with `ondelete SET NULL` today), so "org via node" is structurally true. |
 | **Container** | `containers` | none (org via node) | Inventory + stats + logs; heartbeat upsert with savepoint race handling. |
 | **ServerCredential** | `server_credentials` | none (org via node) | Fernet-encrypted SSH credentials; basis for future SSH-based ops. |
 | **Operation** | `operations` (new) | org_id, node_id, type (whitelist), params JSONB, status, requested_by_id, result, timestamps | The remote-ops primitive: agent PULLS ops; never a push tunnel. Types in v1: container lifecycle, log tail, nginx render/apply/reload. Every op is permission-gated and audited. Spec: [node-agent-architecture.md](node-agent-architecture.md). |
+
+An **Operation is a single whitelisted action on one node**; a **Deployment is the
+multi-step delivery run** that issues Operations (Phase 6a). One word each, no
+overlap — Operation is not renamed to Task (collides with Celery tasks) or Action
+(collides with audit `resource.action` strings).
 
 ### 2.4 Routing & TLS (new subsystem)
 
@@ -185,12 +201,12 @@ active-org header, and an `active` membership in that org is required. Consequen
 | **AuditLog** | `audit_logs` | + org_id, + request_id | Append-only stays. Action naming: `resource.action`. |
 | **SystemEvent** | `system_events` | + org_id | Feed of everything; org-scoped. |
 
-### 2.7 Platform ops (new subsystems, design-only in early phases)
+### 2.7 Backups, connections, billing (new subsystems, design-only in early phases)
 
 | Entity | Table | Key fields | Notes |
 |---|---|---|---|
-| **BackupPolicy / BackupRun / BackupDestination** | `backup_policies`, `backup_runs`, `backup_destinations` | org_id, scope (node/volume/database), schedule, retention; run: status, artifact, checksum, verify | Spec: roadmap Phase 8. Destinations: S3-compatible via provider interface. |
-| **Integration** | `integrations` | org_id, kind (dns/cloudflare, s3, slack, github...), encrypted credentials | The home for DNS-provider creds used by DNS-01, S3 creds, source hosts. |
+| **BackupPolicy / BackupRun / BackupDestination** | `backup_policies`, `backup_runs`, `backup_destinations` | org_id, scope (node/volume/database), schedule, retention; run: status, artifact, checksum, verify | Spec: roadmap Phase 8. Destinations: S3-compatible via provider interface. Surfaced to users as **Policy / Backup / Destination** — a user says "a backup", not "a backup run"; `backup_runs` stays the table name. |
+| **Connection** | `integrations` | org_id, kind (dns/cloudflare, s3, slack, github, …), encrypted credentials | The home for external credentials — DNS-provider creds used by DNS-01, S3 creds, source hosts. "Connection," not "Integration" (plainer word, no enterprise-speak). A `registry` kind arrives only with the private-registry design (deployment-architecture.md §6a defers it). |
 | **Plan / UsageCounter** | org row + `usage_counters` | plan on org; counters per dimension per period | Billing attaches to the Organization. Placeholder columns in Phase 1; enforcement in the billing phase. |
 
 ## 3. Cross-cutting decisions
@@ -215,7 +231,7 @@ active-org header, and an `active` membership in that org is required. Consequen
 6. **Providers at every vendor seam.** Docker, nginx, ACME, DNS, S3, git, registries
    are interfaces with one first implementation each.
 7. **Secrets minimization for nodes.** A node receives only the secrets referenced
-   by routes/services actually assigned to it — never the org's secret store.
+   by routes/applications actually assigned to it — never the org's secret store.
 8. **Billing attaches to Organization** — plan placeholder + metering counters from
    the start; enforcement later.
 9. **Everything user-visible is org-scoped** — search, events, audit, WS channels,

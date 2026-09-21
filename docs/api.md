@@ -176,7 +176,8 @@ needs via `require_permission(...)`; denial is `403 FORBIDDEN` with
 | Secrets | `secret.read`, `secret.write` |
 
 Built-in roles: `Owner` (`*`), `Admin`, `Operator`, `Developer`, `Viewer` — seeded from
-`ROLE_MATRIX` in the same file. `GET /api/v1/auth/me` returns your effective
+`ROLE_MATRIX` in the same file (`Operator` is renamed `DevOps` in the Phase 1
+seed migration — authorization.md §2). `GET /api/v1/auth/me` returns your effective
 permission list; `GET /api/v1/meta` returns it without requiring a specific permission.
 
 ```mermaid

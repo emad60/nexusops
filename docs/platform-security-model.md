@@ -83,6 +83,7 @@ flowchart LR
 | B4 | Control plane → outbound fetches | Monitors + webhook channels fetch user-supplied URLs | Classic SSRF surface (§5) |
 | B5 | Node-internal: agent ↔ docker socket | SupplementaryGroups=docker | Agent context is **root-equivalent** on the node |
 | B6 | Control-plane host: docker-sock override | `docker-compose.docker-sock.yml:19-27` mounts host socket into api+worker | Opt-in, NOT enabled in current .env; `container.manage` = host root when on |
+| B7 | Control-plane ↔ Redis | All orgs' log/metric/deploy/event frames flow through one shared pub/sub to every backend instance (`backend/app/ws/hub.py:67`, `backend/app/services/event_bus.py:140`); anything with Redis access sees cross-tenant payloads | Control-plane-internal; controls: channel org-prefixing + hub-side org filtering *(target)*, optional Redis ACLs later |
 
 ## 4. Tenant isolation model (summary)
 
@@ -136,7 +137,7 @@ cross-tenant impact. "Target" = designed mitigation, not yet built.
 | **SSRF** — monitors, webhook channels, docker `tcp://` endpoints as probing oracle | Any `monitor.manage` / `channel.manage` / `server.create` holder | Those codenames (flat today) | Create/update audited; the probe/fetch itself not | Guard: http/https only, no userinfo, every resolved address must be global, fail-closed on unresolvable (backend/app/core/ssrf.py); monitors re-validate at execution time (backend/app/services/monitor_service.py:348-356); webhooks validate at create/update ONLY (backend/app/services/notification_service.py:133); `tcp://` guard `assert_safe_tcp_endpoint` (backend/app/core/ssrf.py:141-177), `unix://`/`agent://` exempt | **Guard is OFF in production today:** `allow_private_targets` defaults True (backend/app/core/config.py:91) and is true in the deployed prod .env:68. DNS-rebinding TOCTOU documented (backend/app/core/ssrf.py:12-17) |
 | **RCE via remote operations** — arbitrary command execution on nodes | Org member; attacker with `operation`-issuing permission *(target)* | Target: whitelisted op types, each mapping to an existing or new codename (`container.lifecycle`, `domain.manage` — the latter is new, added by authorization.md §2 with Phase 4 domains); **no `node.execute`, ever** (authorization.md §2) | Every Operation is a permission-gated, audited row (domain-model.md §2.3) | Target: agent PULLS ops; no push tunnel, no shell. Today: no remote exec exists at all — agent only sends telemetry and issues GETs on the docker socket (agent/nexusops_agent.py:161-182) | Whitelist keeps node blast radius to named op types with params JSONB; capability-based dispatch (docker ops only to nodes reporting docker capability) |
 | **Docker socket root-equivalence** | RCE in agent context; `container.lifecycle` holder on a docker-sock deployment | `container.lifecycle` (= host root when the control plane holds the socket) | Lifecycle ops audited; daemon-level effects are beyond platform audit | Agent runs with docker group (agent/nexusops-agent.service:19) — any agent-context RCE owns the host; socket mount into api+worker is opt-in and NOT enabled in current .env (docker-compose.docker-sock.yml:19-27) | Node root / control-plane host root. Documented warning; keep override off in multi-tenant production *(target)* |
-| **Nginx config injection** *(target — subsystem does not exist yet)* | Future `domain.manage` holder | `domain.manage`; render/apply are whitelisted Operations | Every render/apply = audited Operation (domain-model.md §2.3) | Design mitigations: strict hostname/path validation, rendered-config validation (`nginx -t`) before apply, atomic apply with rollback (domain-model.md §2.4) | Co-hosted domains on the same node share the nginx config — injection = traffic interception/redirect across that node's routes |
+| **Nginx config injection** *(target — subsystem does not exist yet)* | Future `domain.manage` holder | `domain.manage`; render/apply are whitelisted Operations | Every render/apply = audited Operation (domain-model.md §2.3) | Design mitigations: the injection defense is domain-routing.md §6.2's strict allowlists — hostnames anchored to verified Domains, structured fields under `extra=forbid` schemas, rendered config a projection of DB state; `nginx -t` before apply is availability-only (anti-bricking + rollback — it validates syntax; an injected `location`/`proxy_pass` block passes it) (domain-model.md §2.4) | Co-hosted domains on the same node share the nginx config — injection = traffic interception/redirect across that node's routes |
 | **Certificate abuse** — issuing certs for domains you do not own *(target)* | Future `certificate.manage` holder | `certificate.manage` + DNS-verified Domain | Verification + issuance events audited | **DNS-01 as the gate:** ownership proven via DNS TXT before routes go live (domain-model.md §2.4); routes bind only to verified domains | Without the gate: cert for someone else's domain = phishing/interception. With it: attacker limited to DNS they control. CAA records as further hardening |
 | **Domain takeover** *(target)* | Attacker adding a victim's domain; dangling-DNS hijack | `domain.manage` + control of the domain's DNS TXT | Verification events audited | Verification token TXT at enrollment; re-verify on DNS change; routes live only against verified Domains | Victim-domain traffic interception. Same gate as certificate abuse |
 | **Secret access paths** — who can reach secret values, and through what | Members; compromised deploy path; nodes | Today: `secret.read`/`secret.write` flat instance-wide (backend/app/api/v1/secrets.py:27-52); engine path resolves without per-user check (H8, §6). Target: scope layering + per-node minimization | Create/rotate audited; resolution not | API reads are metadata-only — values never returned after create (backend/app/services/secret_service.py:49-62); value egress = deploy-time resolution + *(target)* encrypted delivery to serving node | Today metadata readable cross-org; global secrets (project_id NULL) resolve into every project (backend/app/services/secret_service.py:296-311). Target: org/project/environment layering, SecretVersion history (domain-model.md §2.5) |
@@ -176,6 +177,21 @@ sequenceDiagram
   point; both rows fail closed on an unverified Domain. The platform never issues for an
   unverified domain and never activates a Route on one.
 
+### 5.3 Trust concentrations (labeled, deliberately not mitigated in v1)
+
+Named so the truth is read here, not discovered in an incident. Two concentrations are
+accepted for v1:
+
+- **The control plane is the ACME client and holds every customer TLS private key**
+  (certificate-management.md §4): it generates and stores each key, and a compromised or
+  malicious control plane can silently intercept traffic for any customer domain. Node-side
+  keygen/CSR is a later-phase option, deliberately not built now. Compounding this,
+  `ENCRYPTION_KEY` is write-once (S5) — its loss strands every stored secret and cert key.
+- **Node identity is bearer-token possession.** A cloned agent (token copied to a second
+  host) is undetectable and interleaves its writes into one node row
+  (node-agent-architecture.md §3.4); containment is per-node scoping + fast revoke, not
+  detection.
+
 ---
 
 ## 6. Current-code hardening list
@@ -185,7 +201,7 @@ hardening table (roadmap §3) mirrors these items **except H2**, which it omits 
 only land with Phase 6 real deployments, past the tenancy migration. The roadmap's "Lands in"
 column schedules the items across phases: Phase 0 kicks off (H1 fail-closed, H4 backoff, H8
 fail-closed), H3/H6/H7/H9 land with the Phase 1 tenancy migration, H4's full revocation
-semantics and H5 with Phase 3 agent v2, and H8's deploy-chain authorization with Phase 2.
+semantics and H5/H10 with Phase 3 agent v2, and H8's deploy-chain authorization with Phase 2.
 Keep the two lists synchronized when either changes.
 
 ### 6.1 Core items
@@ -201,6 +217,7 @@ Keep the two lists synchronized when either changes.
 | H7 | **Global unique names** — `Server.name` (and `projects.name`, tags) unique platform-wide; one tenant blocks another's names; enables name-squatting | backend/app/models/infra.py:51; backend/app/models/delivery.py:29; backend/app/models/infra.py:38 | Composite `(org_id, name)` uniques with the tenancy migration (findings, data-model report) |
 | H8 | **Secrets resolution lacks per-user authorization on the engine path** — deployment engine resolves every referenced secret with no per-user secret permission; anyone with `deployment.create` pulls all referenced values into a run | backend/app/services/deployment_engine.py:374-388; flat `secret.read`/`secret.write` (backend/app/api/v1/secrets.py:27-52) | Resolution checks the caller's secret permission for the scope, or values egress only through a service identity with audit; scope layering (org/project/environment) per domain-model.md §2.5 |
 | H9 | **Audit rows lack org + request-id** — no tenant attribution, no request correlation on the row | backend/app/models/observability.py:249-278; request_id exists only in error envelope/log lines (backend/app/core/middleware.py:23-26) | Add `org_id` + `request_id` columns with the tenancy migration (domain-model.md §2.6); stamp from middleware contextvar |
+| H10 | **Agent `--insecure` disables TLS verification** — one-flag bypass of the HTTPS-only posture (mirrors H5): an on-path attacker can impersonate the control plane over `https://` and harvest the node/enrollment token | agent/nexusops_agent.py:319-324 | Hard-fail for non-loopback server URLs behind the same demo/lab override discipline as H5; never allowed during enrollment or rotation delivery (node-agent-architecture.md §6.3) |
 
 ### 6.2 Further findings-sourced items (tracked in this doc only — not in the roadmap's hardening table)
 
@@ -295,9 +312,15 @@ Rules:
 
 ### 10.1 Node revocation playbook (compromised node / leaked agent token)
 
-1. **Rotate the node's agent token** (audited; old token dead immediately —
-   backend/app/services/server_service.py:255-264). Expect the running agent to 401-exit
-   (agent/nexusops_agent.py:481-482) and hot-loop until H4 lands; note this in the incident log.
+1. **REVOKE the node's agent token — zero grace, no delivery** (node-agent-architecture.md
+   §3.3, §3.4). Compromise response is revoke, never rotate: during rotation grace a stolen
+   token still authenticates and can fetch the pending replacement from the heartbeat
+   response. Rotate is the legacy fallback only until the revoke-only path (H4) ships —
+   today rotate is audited and kills the old token instantly
+   (backend/app/services/server_service.py:255-264) but the running agent 401-exits
+   (agent/nexusops_agent.py:481-482) and hot-loops until H4 lands; note this in the incident
+   log. Under the target semantics the 401 codes distinguish `AGENT_TOKEN_REVOKED` from
+   `AGENT_TOKEN_UNKNOWN` (node-agent-architecture.md §3.4) — trust that log line.
 2. If the **node itself** is compromised: stop the agent systemd unit on the node; rotation in
    step 1 already blocks ingest. The staleness sweeper marks the Node OFFLINE after
    `offline_after_seconds` and fires the CRITICAL alert.

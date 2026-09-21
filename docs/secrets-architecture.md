@@ -154,7 +154,7 @@ tenant-correct mechanically.
 
 | Today | Target |
 |:---|:---|
-| Global secret (NULL project) | org-level Secret under the auto-provisioned org (multi-tenancy.md §9) |
+| Global secret (NULL project) | org-level Secret under the auto-provisioned org (multi-tenancy.md §10) |
 | Project secret | Project secret + org_id |
 | Platform-wide `ux_secrets_global_key` | Per-org partial unique indexes (three scope levels) |
 | Application-scoped `deployment_environments` | Project-scoped Environment (domain-model.md §2.2.1); the env scope level activates with promotion |
@@ -214,7 +214,7 @@ layer), not by DB trigger — contrast `audit_logs` trigger
   deploy that carries the refs: `deployment.create` gates the trigger route
   (`backend/app/api/v1/deployments.py:48-51,191`), narrowed by environment grants
   ("Ali deploys staging", authorization.md §4) to specific Environments.
-- A Developer with Grant(staging → Operator) can deploy staging and thereby *use*
+- A Developer with Grant(staging → DevOps) can deploy staging and thereby *use*
   org/project secrets referenced by staging's config — without holding
   `secret.write`. Using a credential via deploy ≠ reading the store; values are
   unreadable by any principal through any API path.

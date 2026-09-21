@@ -577,7 +577,7 @@ defines:
 |---|---|
 | `Owner` | `*` (wildcard — implies every permission, including `role.manage`) |
 | `Admin` | Operator's set plus `user.manage`, `role.read`, `project.manage`, `secret.write` |
-| `Operator` | full fleet lifecycle (`server.*` writes, `credential.write`), containers, delivery (deploy/cancel/rollback), monitoring + incident action, channels, observability reads, `secret.read`; **no** `user.manage`, `role.read`/`role.manage`, `secret.write` |
+| `Operator` (renamed `DevOps` in the Phase 1 seed migration) | full fleet lifecycle (`server.*` writes, `credential.write`), containers, delivery (deploy/cancel/rollback), monitoring + incident action, channels, observability reads, `secret.read`; **no** `user.manage`, `role.read`/`role.manage`, `secret.write` |
 | `Developer` | read-mostly, plus `deployment.create`/`cancel` and `monitor.manage`/`incident.action`; **no** `server.*` writes, `credential.write`, `container.lifecycle`/`remove`, `secret.write`, `channel.manage` |
 | `Viewer` | read-only codenames (`*.read` across servers, containers, delivery, monitoring, channels, observability) plus `container.logs` |
 

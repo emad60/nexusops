@@ -115,7 +115,7 @@ dedicated org-scoped enrollment-token rows (multi-tenancy.md §6).
 |---|---|
 | id, org_id, created_by_id | Org-scoped, audited creation |
 | token_hash | SHA-256 only; raw shown once at creation |
-| single_use (bool) | Single-use default; multi-use for fleet bootstrap |
+| single_use (bool) | Always true in v1 — multi-use is cut (decision in open question 4); fleet bootstrap = automation loops minting one single-use token per node per wave |
 | expires_at | Short TTL (default 1h, max 7d) |
 | revoked_at | Kill switch, independent of expiry |
 | node_id? | Optional: claim a pre-created placeholder Node |
@@ -171,6 +171,13 @@ stale" — operator re-enrolls (§3.4). A stolen old token could also fetch the 
 one during grace; the short default (24h) plus the rule that compromise response
 is **revoke** (zero grace), not rotate, bounds that.
 
+**Delivery contract:** the pending new raw token is served ONLY to requests
+authenticated with the OLD hash — never to a request bearing the new token — and
+until the agent's next heartbeat carries a `rotation_applied` flag (or the grace
+deadline passes), the server re-sends it on every accepted heartbeat; the flag
+ends re-delivery and may shorten grace. A crash between receive and persist
+therefore self-heals on the following beat.
+
 ### 3.4 Revocation semantics — fixing the 401 hot-loop
 
 Today a revoked/rotated-over agent 401s and `exit(1)`s
@@ -187,6 +194,17 @@ loop of rejected requests contradicting docs/agent.md:75. Fix, both sides:
 
 Revocation itself is immediate: token-hash lookup is per-node, so killing one
 node's token never affects the org's other nodes (multi-tenancy.md §6).
+Immediacy is the invariant: token acceptance is never cached across a
+rotate/revoke — the per-request DB hash lookup is what makes "immediate" true.
+Any future accept-cache or per-node limiter keyed on the token must be
+invalidated synchronously on rotate/revoke.
+
+Identity honesty: node identity is bearer-token possession. A cloned agent (the
+token copied to a second host) is indistinguishable and interleaves its writes
+into one node row — hello silently overwrites the hostname and the other static
+facts (`server_service.py:271-286`). Containment is per-node scoping + fast
+revoke, not detection; the cheap tripwire is an event/alert when hello changes
+the hostname or IP on an existing node.
 
 ### 3.5 Reconnect / offline states
 
@@ -238,6 +256,14 @@ Wire facts that matter:
 | Facts merge policy | server | hello continues to overwrite static facts (`server_service.py:271-286`) but writes additionally into `extra` (disks, GPU, systemd units) instead of inventing columns per fact — domain-model.md §2.3's "+ facts columns" is realized as fact keys on the existing `extra` JSONB (one flexible column populated, not new physical columns) |
 | Rate-limit fairness | server | moves from per-client-IP (`backend/app/core/rate_limit.py:69` — NAT'd fleets share one 600/min bucket) to **per-node after auth** |
 
+**Protocol floor, pinned now:** today's wire protocol has no version field —
+`AgentHelloOut` carries only the intervals (`schemas/agent.py:37-43`). When a
+`protocol_version` is introduced, the AGENT refuses any negotiated protocol
+below its shipped maximum; the server may only raise the floor. The existing
+strength this builds on: the agent's op whitelist is compile-time (§5.2, §6.4),
+so a malicious server cannot make an old agent accept new op types —
+negotiation governs cadence and fields, never capability.
+
 ## 5. The Operations framework
 
 ### 5.1 Model and lifecycle
@@ -261,8 +287,24 @@ Lifecycle rules:
   opens a connection to the node. Delivery rides the heartbeat cycle (pending op
   ids in the heartbeat response — see Open question 2 for the alternative).
 - **Serialize.** One in-flight op per node, executed strictly sequentially.
-- **Idempotent claim + result.** A late duplicate result after expiry is a 200
-  no-op; the row stays terminal.
+- **Claim is a single compare-and-set.** `pending → claimed` happens in one
+  conditional update recording `claimed_at` and an `attempts` counter; a second
+  claimant loses the CAS and sees the current state.
+- **`expires_at` gates every transition.** Claim AND result refuse any op whose
+  `expires_at` is past, regardless of stored status (`expires_at` = creation +
+  per-type timeout, e.g. 60s). This bounds replay of a backup-restored `pending`
+  Operation row to the timeout window with zero new infrastructure.
+- **Results only from claimed/running; terminal states immutable.** A result
+  against a `pending`, `expired`, or `cancelled` row is refused; once
+  `succeeded`/`failed`/`expired`/`cancelled`, the row never transitions again. A
+  late duplicate result after expiry is a 200 no-op; the row stays terminal.
+- **The expiry sweep covers pending AND claimed alike.** A claimed op whose agent
+  dies before reporting is expired by the same sweep — never stuck. **Decision:
+  no automatic re-queue on agent crash.** Re-delivering a possibly-executed op to
+  a possibly-alive agent risks double execution of a non-idempotent op; the row
+  is left to expire (`expired` + audit `operation.expire`) and the operator
+  re-issues a fresh op. The `attempts` counter stays in the schema to bound any
+  future re-queue and to make claim-retry storms visible.
 - **Timeouts** per-type (§5.2), enforced control-plane-side via `expires_at`
   checked by the ops sweeper; the agent also enforces a local deadline and
   reports a timeout failure rather than hanging.
@@ -298,7 +340,12 @@ sequenceDiagram
 ### 5.2 Whitelisted operation types
 
 **This table is the entire exec surface. Nothing outside it ships; adding a type is
-a schema-registry change + contract tests + review, never a params pass-through.**
+a schema-registry change + contract tests + review, never a params pass-through.
+No companion doc may invent an op type outside this registry table** — the
+secret/cert delivery types the companions cite (`secret.env.apply` from
+secrets-architecture.md §7, `certificate.install`/`certificate.remove` from
+certificate-management.md §6) appear here as *reserved* rows and ship only with
+secret/cert delivery, behind their own review.
 
 | Type | Params (validated schema) | Result | Permission codename | Capability | Timeout |
 |---|---|---|---|---|---|
@@ -310,6 +357,8 @@ a schema-registry change + contract tests + review, never a params pass-through.
 | `nginx.render` | route set snapshot | rendered config hash + `nginx -t` output | `domain.manage` | nginx | 30s |
 | `nginx.apply` | rendered config + expected hash | applied + validate result | `domain.manage` | nginx | 60s |
 | `nginx.reload` | — | reload result | `domain.manage` | nginx | 30s |
+| `secret.env.apply` | *reserved* — defined by secrets-architecture.md §7 | delivery ack, never values | assigned with its own review | — | per §7 |
+| `certificate.install` / `certificate.remove` | *reserved* — defined by certificate-management.md §6 | file-write result, never key material | assigned with its own review | — | per cert doc |
 
 Notes:
 
@@ -319,7 +368,12 @@ Notes:
   fast when the node's `capabilities` lack the required capability (§2.3).
 - nginx ops presuppose the routing subsystem (domain-routing.md, future); the
   agent validates configs with `nginx -t` before apply and keeps the previous
-  config for rollback (ProxyProvider contract, domain-model.md §2.4).
+  config for rollback (ProxyProvider contract, domain-model.md §2.4). `nginx -t`
+  validates syntax only — an injected `location`/`proxy_pass` block passes it —
+  so it is availability/anti-bricking (with rollback), not a security control;
+  the injection defense is domain-routing.md §6.2's allowlists: hostnames
+  anchored to verified Domains, structured fields under `extra=forbid` schemas,
+  rendered config as a projection of DB state.
 - Today's control-plane container actions (`container_service.trigger_action`,
   `backend/app/services/container_service.py:141-207`) work only for
   provider-backed hosts — under the ops framework they become Operation rows for
@@ -330,6 +384,9 @@ Notes:
 - Result shape is per-type validated server-side, bounded in size; failures carry
   a stable error code + sanitized message (provider-style `sanitize_error`,
   `backend/app/providers/base.py:26-49` — no raw daemon bodies).
+- Op results are agent-asserted, never verified: the platform's guarantee is
+  attribution and bounded blast radius, not execution proof. Downstream consumers
+  (re-render, dashboards) must treat success as a report, not a fact.
 - Every transition emits `operation.*` events to the org-scoped event feed; the
   dashboard watches via WS (org-prefixed channels, multi-tenancy.md §5).
 - Audit rows: `operation.create` (user actor), `operation.claim`,
@@ -372,6 +429,15 @@ server URL** — the warning becomes a hard error without an explicit env overri
 (demo/lab only), and install.sh only enrolls against `https://`. The token
 authenticates every call, and the enrollment token (§3.2) is more sensitive still:
 it mints node identities.
+
+The `--insecure` flag is the TLS-side twin of that hole: it swaps in
+`ssl._create_unverified_context()` (`agent/nexusops_agent.py:319-324`) and
+disables server-cert verification entirely, so an on-path attacker can
+impersonate the control plane over `https://` and harvest the node/enrollment
+token. Rule: disabled TLS verification is treated exactly like plain HTTP —
+hard-fail for any non-loopback server URL under the same demo/lab override
+discipline as the HTTP rule above, and never allowed during enrollment (§3.2)
+or rotation delivery (§3.3).
 
 ### 6.4 No arbitrary exec
 
@@ -469,8 +535,10 @@ This one-liner plus heartbeat v2 **is** the wedge demo (platform-vision.md §2.2
 3. **`logs.tail` vs sweep collection:** the 30s whole-host sweep already ships
    container logs (`maintenance.py:152-188`); are `logs.tail` ops for *live follow*
    only, or does op-based collection replace sweep collection for agent-backed nodes?
-4. **Multi-use enrollment tokens:** convenient for Ansible-style fleet bootstrap but
-   standing credentials — restrict to Admin+ with audit, or drop from v1?
+4. **Multi-use enrollment tokens — decided, cut from v1.** One single-use token
+   per node, minted per fleet wave (automation loops). A multi-use token is a
+   standing org-enrollment credential whose leak lets an attacker enroll
+   attacker-controlled nodes within TTL; cutting is the cheaper and safer answer.
 5. **nginx capability proof:** self-reported hello claims — does v1 require a
    lightweight probe (`nginx -v` at hello) before `nginx.*` ops dispatch, or is
    claim + op-failure feedback enough?

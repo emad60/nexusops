@@ -33,8 +33,11 @@ whitelisted types, each mapping to an existing or new codename (container lifecy
 general exec ever appears, it gets its own codename + stricter approval — never a
 generic execute permission.
 
-**DevOps ≈ Operator.** User-visible role name becomes "DevOps" (display rename;
-stored name kept for compat).
+**One name: DevOps.** The stored system-role row is renamed `Operator` → `DevOps`
+in the Phase 1 seed migration (the FK-facing change is the `roles.name` value on
+the org-NULL template rows; membership rows reference role IDs, so the rename is
+a seed update, not a data migration). No display-vs-stored split: docs, API, and
+DB use one name.
 
 ## 3. The five system roles (target)
 
@@ -45,7 +48,7 @@ Per-role permission sets (authoritative source after migration: `ROLE_MATRIX` in
   requires Owner. Exactly one active Owner per org.
 - **Admin** — everything except: `billing.manage`, and Owner-only actions
   (org transfer, org delete). All registry groups read+manage.
-- **DevOps (Operator)** — all `node.*`, `container.*`, `domain.*`, `certificate.*`,
+- **DevOps** — all `node.*`, `container.*`, `domain.*`, `certificate.*`,
   `deployment.*` incl. rollback, `monitor.*` incl. incident.action, `backup.*`
   (read/create/restore), `project.read` + `project.manage`,
   `operation.read`, `secret.read` (metadata), `metric/log/event.read`,
@@ -67,7 +70,7 @@ Per-role permission sets (authoritative source after migration: `ROLE_MATRIX` in
   scope (project|environment|node), scope_id, role_id`.
 - Effective permissions = org role ∪ grants, resolved in ONE function next to
   `user_has_permission()`; require_permission needs no changes.
-- Example: Ali = Developer org-role + Grant(staging env → Operator) → can deploy
+- Example: Ali = Developer org-role + Grant(staging env → DevOps) → can deploy
   staging, cannot touch production. Ahmed = Viewer + Grant(node-3 → DevOps) → can
   restart containers on node-3 only.
 - Environments are the natural grant scope because Phase 2 promotes them to

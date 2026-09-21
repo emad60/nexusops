@@ -195,6 +195,26 @@ methods; **NginxProvider is the first and only v1 implementation**:
   Nodes without the capability never appear in the upstream picker and never
   receive `nginx.*` ops.
 
+**Routing pre-flight (Phase 3, reported through the same hello channel).** The
+capability flag alone says "this node once had nginx" — not "routing will work
+here." Route creation additionally requires a **pre-flight** the agent runs and
+reports, stored in `servers.capabilities`:
+
+- **nginx installed** — binary present on PATH;
+- **nginx running** — master process visible / unit active;
+- **ports 80/443 free** — a stdlib socket bind probe from the agent (bind success
+  = free; `EADDRINUSE` = taken; the result names the blocked port and, where
+  readable, the occupant).
+
+`POST /routes` and `POST /routes/{id}/enable` refuse nodes that fail the
+pre-flight with a named error: *"NexusOps routing needs exclusive use of 80/443
+on this node — port 443 is held by <occupant>."* This is **refusal, not
+coexistence**: NexusOps never shares 80/443 with another proxy (two writers to
+the same port family conflict constantly), and it never touches the pre-existing
+service — the pre-flight just names what blocks the bind. The check re-runs at
+enable time, not only creation: a node can gain a conflicting service after the
+route was created.
+
 ## 6. Config rendering — strict allowlists
 
 ### 6.1 What is rendered
@@ -310,7 +330,12 @@ Honest grounding: the agent today reports containers with **empty port arrays**
 (`server_service.py:536-539` upserts `ports=[]`); the upstream picker and
 loopback-port rendering need the agent to start reporting ports — a wire extension
 pinned by the contract tests (`backend/tests/test_agent_contract.py`). Phase 4 work,
-not hand-waved.
+not hand-waved. The deployment side completes the handoff: the 6a `container.run` op
+publishes `127.0.0.1:<port>` per the environment's declared publish spec
+(deployment-architecture.md §5.1), so an agent-deployed container always has the
+loopback address the renderer prefers — and the upstream picker lists only containers
+with reported published ports, so a deploy-then-route can never silently produce an
+unreachable upstream.
 
 ### 8.2 Certificate selection rule (this doc owns it)
 
@@ -395,15 +420,24 @@ rate-limit zones never leak stale entries after route deletion.
    UI shows the TXT record to publish.
 2. **Verify** — publish `_nexusops.<name>` TXT at the DNS provider; click Verify (or
    let the sweep retry). `verified` + NS snapshot stored; routes may go live.
-3. **Create route** — pick node (nginx capability), container:port, path `/`,
-   optional headers/rate-limit; enable → render + apply (§7); uptime monitor
-   auto-attaches (opt-out, §13).
-4. **HTTPS** — request a certificate (`certificate.manage`), DNS-01 via the domain's
+3. **Point traffic** — publish an **A/AAAA record** for the hostname at the node's
+   public IP. NexusOps cannot do this for the user (the agent cannot edit DNS — by
+   design), and verification alone proves nothing about reachability: after
+   verification, a best-effort check resolves the hostname and **warns** when it does
+   not match the serving node's public IP (a warning, not a gate). A user can pass
+   every status as green with zero traffic arriving if they skip this step — the
+   warning exists so silence never looks like success.
+4. **Create route** — pick node (nginx capability + routing pre-flight passed),
+   container:port, path `/`, optional headers/rate-limit; enable → render + apply
+   (§7); uptime monitor auto-attaches (opt-out, §13). Route creation is **refused**
+   on a node that fails the routing pre-flight (§5.1) with a message naming the
+   conflict.
+5. **HTTPS** — request a certificate (`certificate.manage`), DNS-01 via the domain's
    `dns_provider_id`; on `issued` + delivered, bind `scheme=https` + `certificate_id`
    → re-render serves TLS. Full spec: **certificate-management.md** (§5–§7).
-5. **Operate** — sweeps keep re-proving control; NS change or lost TXT pulls routes
+6. **Operate** — sweeps keep re-proving control; NS change or lost TXT pulls routes
    until re-verified; expiry monitors page through the incident pipeline.
-6. **Decommission** — disable route → apply removes its fragment; domain delete
+7. **Decommission** — disable route → apply removes its fragment; domain delete
    blocked while enabled routes reference it.
 
 ## 12. API surface, permissions, audit
@@ -440,6 +474,16 @@ auto-attaches (opt-out via `monitor_optout`): an **uptime** monitor on the route
 certificate, a **TLS-expiry** monitor (certificate-management.md §10) — both on the
 existing engine, page through the same incident pipeline, fail independently.
 
+**Vantage point, disclosed.** Uptime monitors probe **from the control plane** —
+the UI says so ("checked from the NexusOps control plane"), not just this doc. A
+node whose ports 80/443 are not publicly reachable (NAT without the port
+forward, node powered off, firewall) fails the uptime check even when the
+application itself is healthy. Therefore, for a target the control plane cannot
+reach, surface **"unreachable from NexusOps"** as a distinct monitor state —
+not DOWN (no evidence the app is unhealthy) and not UP (no evidence either
+way). The agent-side container-health checks landing in the same phase provide
+the inside vantage; together the two states give the honest picture.
+
 ## Open questions
 
 1. **Control-plane DNS resolver dependency** — dnspython (new backend dep) vs a
@@ -452,9 +496,13 @@ existing engine, page through the same incident pipeline, fail independently.
 4. **Delegated subdomains** — a route hostname NS-delegated elsewhere can change
    hands without the apex NS changing; apex checks don't catch it. Per-hostname NS
    pinning is heavy — defer or build before DNS-heavy tenants exist.
-5. **Installing nginx** — the op whitelist has no package-manager op; nginx must
-   pre-exist for the capability flag. Runbook vs constrained `nginx.install` op —
-   node-agent-architecture.md owns the whitelist.
+5. **Installing nginx — DECIDED: user-side, surfaced by the pre-flight.** No
+   `nginx.install` op: a package-manager operation is the widest entry the
+   whitelist could have (root-equivalent arbitrary-package execution) and the
+   routing pre-flight (§5) makes it unnecessary — an nginx-less node fails the
+   pre-flight with a named error and an install runbook link, instead of
+   silently failing at first render. node-agent-architecture.md owns the
+   whitelist and keeps it closed.
 6. **HTTP-01 challenge fragment** — certificate-management.md §4.4 renders a
    temporary challenge location via the ProxyProvider path; template owner needs
    recording when HTTP-01 lands.

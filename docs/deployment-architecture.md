@@ -120,6 +120,11 @@ steps dispatch to the node as whitelisted `Operation` rows the **agent pulls**
 The control plane never sits in the customer traffic path; routing terminates on the
 node's nginx (platform-vision.md §5).
 
+**Network model for 6a: published loopback ports only.** Deployed containers publish
+`127.0.0.1:<host_port> → <container_port>` from the environment's declared publish
+spec — that loopback address is what nginx routes to (domain-routing.md §8.1) and
+what the healthcheck probes (§14.5). Per-project docker networks are DEFERRED.
+
 ## 4. Runner registry — the DI fix
 
 Replace the two hard-instantiation sites (`deployment_engine.py:194,345`) with a
@@ -221,7 +226,11 @@ secrets table uses, decrypted only when the op is claimed and delivered over the
 agent's TLS channel — and **redacted on every read path**: `operation.read`/list
 responses, and any `operation.*` events the ops framework emits
 (node-agent-architecture.md §5.3), render secret-bearing params in their
-`${secret:KEY}` reference form, never resolved values. The agent must not echo
+`${secret:KEY}` reference form, never resolved values. **Redaction is mechanical,
+not inferred:** the runner writes op params with secret positions as `${secret:KEY}`
+reference markers plus a separate encrypted resolved-values blob, so every read
+path renders references by substituting markers — it never guesses which params
+were secret. The agent must not echo
 resolved values into op output lines or result payloads; as defense in depth the
 runner redacts known resolved values line-level before op output persists as
 `LogEntry` rows or streams as step lines (both gated only by `deployment.read`,
@@ -237,6 +246,33 @@ Developer gains it explicitly (their enumerated `deployment.read/create/cancel` 
 excludes it, and Developers must be able to run git builds). Until that amendment
 ships, 6b is blocked.
 
+**Container identity (6a).** Phase 2 makes environments project-scoped, so an
+`app-env` slug is not unique on a shared node — two orgs' `web-prod` would derive
+the identical container name and `STOP_OLD` could stop another org's container.
+Contract:
+
+- Deterministic namespaced name `nxa-{project}-{app}-{env}`; a collision with any
+  existing container fails the deployment with 409 at RESOLVE_CONFIG — before
+  STOP_OLD ever runs.
+- The run op stamps platform docker labels (`nxa.org`, `nxa.project`, `nxa.app`,
+  `nxa.env`, `nxa.deployment`). STOP_OLD and future route binding target by platform
+  labels, never by bare name; the agent **refuses to stop or replace containers
+  lacking platform labels** (unlabeled = not ours).
+
+**Port reality (must).** The agent forwards the `Ports` array it already receives
+from `/containers/json` (`agent/nexusops_agent.py:208-217`) and the heartbeat upsert
+stops writing `ports=[]` (`backend/app/services/server_service.py:536-538`).
+RESOLVE_CONFIG validates the deployment's declared host ports against the node's
+container inventory (409 on conflict, before any node op); execution re-checks
+before STOP_OLD executes — a host-port collision must surface at plan time, not
+after the old container is already down.
+
+**Volume policy (decided).** Named volumes only: declared in environment config,
+platform-namespaced `nxa-{project}-{app}-{env}-{name}`, created by the run op if
+absent. Bind mounts / host paths stay structurally absent from the params schema.
+Redeploying a stateful image without declared volumes recreates empty storage —
+the deploy flow states this plainly rather than presenting redeploy as data-safe.
+
 ### 5.2 `RunContext` extension
 
 | Field | Source | Status |
@@ -248,15 +284,45 @@ ships, 6b is blocked.
 | `build_config` | application | new (`delivery.py:54`) |
 | `resolved_config` | §7 layering merge (non-secret keys) | new |
 | `healthcheck` | environment healthcheck config | new (`delivery.py:81` today) |
-| `container_name` | derived (`app-env` slug) | new |
+| `container_name` | derived deterministic `nxa-{project}-{app}-{env}` + platform labels (§5.1) | new |
 | `project_name` … `secrets` | today's fields | kept (`server_name` stays display-only) |
 
 ## 6. Phased scope
 
 ### 6a — Image-based deploys (needs Phase 3 ops framework)
 
-Trigger: `POST /deployments/applications/{id}/deployments` with `{version, image_ref}`;
-`deployments` gains `image_ref` (6a) so rollback can re-deploy the exact artifact.
+Trigger: `POST /deployments/applications/{id}/deployments` with `{version, image_ref}`.
+`deployments` gains `image_ref` **and `image_digest`** (6a): the PULL_IMAGE op result
+MUST return the resolved manifest digest (the Engine API reports `RepoDigests`), the
+digest is stamped on the deployment row and shown in deployment detail, and rollback
+re-deploys `image_ref@sha256:<digest>` verbatim. A mutable tag re-pushed between
+deploy and rollback must never change what rolls back. `image_ref` syntax is
+validated at trigger — registry/repo with an explicit tag, no implicit `:latest`;
+floating tags are allowed but always paired with the recorded digest.
+
+**Registry scope (decided): 6a supports public registries only.** A private-image
+pull fails with a clear error naming the cause; private registry auth is DEFERRED
+behind an integrations registry-kind design (domain-model.md §2.7 lists no registry
+kind today) with encrypted creds delivered per-deployment like secrets.
+
+**Brief downtime, labeled.** 6a is stop-then-start: STOP_OLD runs before RUN_NEW,
+and ops deliver on the heartbeat cycle with one in-flight op per node
+(node-agent-architecture.md §5.1; 30s default cadence), so the stop→run→healthy
+window realistically spans multiple pickup cycles — minutes, not milliseconds. The
+deploy dialog, API, and docs label 6a deploys as brief-downtime. Zero-downtime
+(create-new-first + route switch — two containers plus the Phase 4 route layer) is
+explicitly DEFERRED, not silently absent.
+
+**Recovery contract.** A RUN_NEW failure after a successful STOP_OLD leaves the app
+down; the recovery path is rollback — STOP_OLD tolerates a missing container (first
+deploy) and the previous image is already cached on the node from the last pull.
+This is the stated contract, not an emergent behavior.
+
+**Serialization (decided).** A trigger returns 409 while another deployment for the
+same `(application_id, environment_id)` is QUEUED/RUNNING — two deployments would
+interleave STOP_OLD/RUN_NEW on one node (ops serialize per node, not per
+deployment). Rejection is the simplest safe rule and consistent with the engine's
+`FOR UPDATE` claim discipline (`deployment_engine.py:278-297`).
 
 | # | Step | Op type | Failure semantics | Default timeout |
 |---|---|---|---|---|
@@ -302,7 +368,7 @@ Effective config = layered merge, **most specific wins**:
 
 | Layer | Source | Precedence |
 |---|---|---|
-| Project config | `projects.config` (new JSONB, Phase 2 — **amendment owned by this doc**: not yet in domain-model.md §2.2's Project row or roadmap §5's Phase 2 DB list; both must take the column when 6a's layering lands) | 1 (base) |
+| Project config | `projects.config` (new JSONB, Phase 2 — present in domain-model.md §2.2's Project row and roadmap Phase 2's DB list; this amendment has landed in both) | 1 (base) |
 | Environment config | `deployment_environments.config` (exists, `delivery.py:84`) | 2 (overrides project per key) |
 | Deploy-time secret refs | `${secret:KEY}` values in either layer, resolved at RESOLVE_CONFIG | 3 (always wins over literals) |
 
@@ -390,7 +456,8 @@ SUCCESS version of the same application+environment, replaying the full step pla
 Target changes are additive only:
 
 - For 6a, "last good version" becomes concrete: the rollback target's persisted
-  `image_ref` is re-deployed verbatim (hence the column in §6a).
+  `image_ref@sha256:<digest>` is re-deployed verbatim (§6a — the digest is what
+  makes "exact artifact" true; a mutable tag alone would not).
 - Rollback permission stays `deployment.rollback` (DevOps role, authorization.md §3).
 - `DeploymentStatus.ROLLBACK` (`models/enums.py:65`) remains an unused member;
   retire it in a cleanup migration rather than repurposing it.
@@ -407,6 +474,12 @@ Rules:
 - Runs render realistic 7-step output with the existing `-broken` health hook —
   that hook is demo tooling and **never** exists in `AgentDeploymentRunner`
   (platform-vision.md §3, honesty principle).
+- The sim's log lines fabricate behavior the real contract will not have —
+  "Connections drained: 0 active after 200ms" and "Preserved as {target}-prev for
+  rollback window" (`deployment_runner.py:186-193`): no drain and no preserved
+  container exist in 6a (§6a labels real deploys brief-downtime). Annotate the sim
+  output accordingly so demo output never trains expectations the real runner
+  will break.
 - The UI keeps the "Simulated" chip on deploy/run views while a simulated runner
   produced the deployment (roadmap Phase 0 honesty labels); simulated deployments are
   distinguishable in API payloads via the deployment's kind.
@@ -423,16 +496,20 @@ Rules:
    endpoint with chunked POSTs, op log rows the runner tails, or a Redis list per op.
    Affects the Phase 3 wire protocol; must be fixed when the Operations framework
    lands.
-3. **Private registry auth (6a).** `container.pull` for private images needs
-   registry credentials delivered as op params (from `integrations`,
-   domain-model.md §2.7). Scope into 6a or ship public-only images first?
-4. **Concurrent deployments per environment.** Nothing today serializes two
-   QUEUED/RUNNING deployments of the same application+environment; they would race
-   on the node (two `STOP_OLD`/`RUN_NEW` interleavings). Reject with 409 vs queue
-   serially per environment — decide in 6a.
-5. **Healthcheck config schema.** Environment healthcheck config (path/port/
-   interval/retries — `healthcheck_path` exists today, `delivery.py:81`) needs a
-   schema sign-off consistent with domain-model §2.2.1 before 6a.
+3. **Private registry auth (6a) — DECIDED: out of 6a.** Public registries only
+   (§6a); private auth is deferred behind an integrations registry-kind design
+   (domain-model.md §2.7 currently has no registry kind) with encrypted creds
+   delivered per-deployment like secrets. Revisit only after that design exists.
+4. **Concurrent deployments per environment — DECIDED: reject 409** while another
+   deployment for the same `(application_id, environment_id)` is QUEUED/RUNNING
+   (§6a). Queue-serially was the alternative; rejection is simplest and protects
+   the one-op-per-node invariant.
+5. **Healthcheck config schema — DECIDED (6a precondition):**
+   `{path, port, interval_seconds, retries, timeout_seconds}` with the probe target
+   fixed as the container's published loopback port on the node (not the container
+   IP, not the platform). Probe evidence (attempts, status codes, final failure)
+   persists into step output so FAILED health is auditable. `healthcheck_path`
+   (`delivery.py:81`) seeds the path field.
 6. **Per-node op serialization vs step budgets.** Operations serialize one
    in-flight op per node (node-agent-architecture.md §5.1); a deployment op queued
    behind another deployment's in-flight op on a busy node can exhaust its

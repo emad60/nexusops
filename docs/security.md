@@ -29,8 +29,10 @@ of the server running the compose stack, and physical access.
 
 ## Authorization (RBAC)
 
-Roles are `Owner`, `Admin`, `Operator`, `Viewer`, mapped to wildcard permission
-strings in `backend/app/core/permissions.py`. Every route declares the codename it
+Roles are `Owner`, `Admin`, `Operator`, `Developer`, `Viewer` (five; earlier
+drafts of this doc said four), mapped to wildcard permission
+strings in `backend/app/core/permissions.py` — the `Operator` row is renamed
+`DevOps` in the Phase 1 seed migration (authorization.md §2). Every route declares the codename it
 requires; `has_permission` evaluates wildcard matches plus the API-key intersection
 above. Ownership boundaries (e.g. non-owners cannot read other tenants' resources)
 are enforced in the service layer queries, not in the frontend.

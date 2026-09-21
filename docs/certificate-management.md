@@ -12,12 +12,19 @@ subsystem at all** — no certificate model, no ACME client, no DNS integration
 docs/deployment.md, which terminates the *dashboard's* own TLS, not customer traffic).
 Everything below is a design spec for new work.
 
+**v1 constraint, stated where HTTPS is promised:** issuance is DNS-01 only, and v1's
+DNSProvider implementation is **Cloudflare only** — v1 HTTPS requires the domain's
+DNS hosted on Cloudflare plus a scoped API token; other DNS providers are later
+phases. This constraint is surfaced in the add-domain UI flow (platform-vision.md §4
+prerequisite list) as a prompted setup step with token-scope instructions — never
+discovered at certificate-request time.
+
 What exists and is reused:
 
 | Existing capability | Ground | Reuse here |
 |---|---|---|
 | Fernet helpers `encrypt_str` / `decrypt_str` / `digest_of` | backend/app/core/security.py:131-158 | Encrypt cert chain + private key at rest; display fingerprint |
-| Fernet-ciphertext-at-rest precedents | secrets.ciphertext (models/secrets.py:23-59), server_credentials.secret_ciphertext (models/infra.py:101-116), notification_channels.config_ciphertext (models/notify.py:27-48) | Same pattern for cert columns and Integration creds |
+| Fernet-ciphertext-at-rest precedents | secrets.ciphertext (models/secrets.py:23-59), server_credentials.secret_ciphertext (models/infra.py:101-116), notification_channels.config_ciphertext (models/notify.py:27-48) | Same pattern for cert columns and Connection creds |
 | Metadata-only reads for secret-like resources | secret_service.py:49-62, channel config write-only (notification_service.py:103-120) | Certificate API never returns key material |
 | Log/audit redaction of sensitive keys | core/logging.py:19-60 (`private_key`, `token`, `credential`, ... substrings), applied in audit_service.py:54 | Defense-in-depth on every leak path |
 | Beat cadences + atomic claims | celery_app.py:47-93, claim pattern monitor_service.py:293-313 (`FOR UPDATE SKIP LOCKED`) | Renewal sweep, stuck-state sweep |
@@ -28,7 +35,8 @@ What exists and is reused:
 
 Honesty labels: the agent today implements hello/heartbeat only — no operations channel
 exists yet; the ops framework this doc leans on is specified in
-node-agent-architecture.md, not built. Likewise `Integration` is design-only
+node-agent-architecture.md, not built. Likewise the `Connection` entity (the DNS
+credential home; called *Integration* in earlier drafts) is design-only
 (domain-model.md §2.7). Nothing here is simulated *or* real — it is unbuilt.
 
 ## 2. Certificate entity
@@ -160,7 +168,7 @@ idempotent, driven by the row's status + `next_attempt_at`.
 
 ```mermaid
 sequenceDiagram
-    participant U as Operator (certificate.manage)
+    participant U as DevOps (certificate.manage)
     participant A as API
     participant W as Celery worker
     participant AC as ACME (Let's Encrypt)

@@ -34,9 +34,9 @@ journey), and deployed.
 ## 2. The direction
 
 > NexusOps becomes a **control plane for self-hosted infrastructure**: connect any
-> Linux machine with a lightweight agent, organize machines/projects/domains under
-> organizations, and make SSH+Nginx+Certbot+Docker CLI work possible from one
-> coherent, permissioned, audited platform.
+> Linux machine with a lightweight outbound-only agent, organize machines/projects/
+> domains under organizations, and do the Nginx+Certbot+Docker CLI work you do today
+> over SSH from one coherent, permissioned, audited platform — without the SSH part.
 
 The product boundary — "simple for the customer, sophisticated underneath":
 
@@ -45,9 +45,9 @@ The product boundary — "simple for the customer, sophisticated underneath":
 | **Nodes** — any Linux machine in ~60 seconds | enrollment, agent identity, capabilities, heartbeats, upgrades |
 | **Projects** — an app or system as the unit of work | environment config layering, secret refs, deploy orchestration |
 | **Deployments** — click Deploy, watch steps | build/run orchestration on the node, health checks, rollback |
-| **Domains** — add api.example.com → service | DNS verification, nginx rendering, TLS, redirects |
-| **HTTPS** — automatic | ACME issuance/renewal (DNS-01), key protection, expiry monitoring |
-| **Monitoring** — automatic for everything you add | polymorphic monitors, incidents, notifications |
+| **Domains** — add api.example.com → application | DNS verification, nginx rendering, TLS, redirects |
+| **HTTPS** — automatic issuance + renewal after a one-time DNS-provider integration | ACME issuance/renewal (DNS-01), key protection, expiry monitoring |
+| **Monitoring** — auto-attached to everything you add; alert delivery needs one configured channel | polymorphic monitors, incidents, notifications |
 | **Team** — invite, roles, least privilege | RBAC, grants, audit of every mutation |
 | **Backups** — schedule and forget | policies, destinations, encryption, verification, restore |
 
@@ -67,23 +67,62 @@ Explicitly out of scope, to protect the boundary:
 
 ## 2.2 The wedge (differentiation)
 
-Existing tools cluster at extremes:
+A September 2026 competitive review (Coolify, Portainer, Dokploy, Dokku, CapRover,
+EasyPanel, Kamal, Komodo, Sliplane — facts with source URLs, no exaggeration in either
+direction) found:
 
-- **Single-server PaaS** (Coolify, Dokploy, Dokku): easy deploys, but one server, weak
-  teams/multi-tenancy, no cross-node view.
-- **Container dashboards** (Portainer): container ops, no projects/deployments/domains.
-- **Cloud-native** (Vercel/Render/Fly): great DX, but cloud-only — home servers, RPis,
-  and dedicated boxes are second-class or unsupported.
+- **Coolify / Dokploy / Dokku / CapRover / Kamal** — the turnkey PaaS class — all reach
+  servers over **SSH**. Coolify v4 stores a passphrase-less private key per server and
+  needs port 22 open; Dokploy and CapRover require root SSH keys; Dokku and Kamal are
+  SSH throughout. Coolify's shipped multi-server model is "same app, N servers" with
+  documented limitations (same-arch nodes, external registry required, no compose /
+  persistent storage / traffic distribution on additional servers). Its v5 redesign
+  (`coold`, a Rust agent dialing outbound over gRPC, SSH demoted to bootstrap) adopts
+  exactly this outbound-agent architecture but is **announced, not shipped** — v5 date
+  TBD as of September 2026.
+- **Portainer** is a container-management layer, not a PaaS: no per-app domains, no
+  certificate issuance, no git→image builds. Its Edge Agent has done outbound-only,
+  no-inbound-ports node onboarding for years (load-tested at 15,000 environments);
+  tunnel configuration and fleet conveniences are Business-edition-gated, and CE is
+  deliberately missing RBAC/audit/backup destinations.
+- **Komodo** (free, GPL-3.0) ships an outbound-only, NAT-friendly agent since v2.0.0
+  (March 2026) with the most granular per-resource permissions in the space — but no
+  built-in domain/TLS/reverse-proxy management.
+- **Cloud platforms** (Vercel/Render/Fly): great DX, but cloud-only — home servers,
+  RPis, and dedicated boxes are second-class.
 
-The wedge: **multi-node + multi-tenant + self-hostable control plane + agent-based**.
-One place where a person with three VPSes, a Raspberry Pi and a home server — or a
-team of five — runs containers, gets HTTPS automatically, and shares access safely.
+The wedge, stated precisely so it survives scrutiny:
+
+> **The first turnkey self-hosted PaaS — deploys + domains + TLS + monitoring in one
+> product — where every server onboards via an outbound-only agent: zero SSH, zero
+> inbound ports, NAT-friendly.**
+
+Scope notes that keep the claim honest:
+
+- **"First" scopes to the turnkey PaaS class.** Komodo v2 and Portainer's Edge Agent
+  are real precedents for the transport pattern in adjacent categories (deploy
+  automation and container management respectively) — "nobody does outbound agents"
+  would be false and is not the claim. The defensible moat is the **bundle**: agent
+  transport + turnkey domains/TLS + multi-tenant RBAC + monitoring + secrets/audit in
+  one product. Coolify v5's `coold` validates the architecture; when it ships, the
+  transport alone stops differentiating, and the bundle + permissions carry positioning.
+- **The transport is also the trust story:** no stored SSH keys anywhere, no port-22
+  requirement, no root login for the control plane, and root-equivalent docker.sock
+  access bounded by a compile-time op allowlist ([node-agent-architecture.md](node-agent-architecture.md)).
+- **ARM64 agent + installer from day one** is table stakes, not a differentiator
+  (Coolify officially supports Pi Zero 2 W–5; Dokploy builds amd64-only images and
+  cross-arch deploys fail — support ARM64 without overclaiming).
 
 The smallest coherent first sellable version (the "instantly valuable" demo):
 
-> Sign up → create org → install agent on your box → node appears with live stats →
-> create a project → deploy an image → add `api.example.com` → HTTPS works →
-> uptime + TLS-expiry monitoring on by default → invite a teammate with Viewer role.
+> Accept an operator-issued invite → install the agent on your box → node appears with
+> live stats → create a project → deploy an image → add `api.example.com` → HTTPS
+> issuance + auto-renewal → uptime + TLS-expiry monitoring auto-attached → invite a
+> teammate with Viewer role.
+
+For the first version, onboarding is via **operator-issued invites to pre-created
+orgs** — self-serve signup is a product decision deliberately deferred, not an
+implementation detail (see [multi-tenancy.md](multi-tenancy.md) §2.1).
 
 ## 3. Guiding principles
 
@@ -114,19 +153,41 @@ The smallest coherent first sellable version (the "instantly valuable" demo):
 
 ## 4. Customer journey (target)
 
-1. Sign up → create organization (or accept an invite).
-2. Install the agent (one curl-pipe-bash command with an org-scoped enrollment token).
-3. Node appears in seconds — OS, arch, CPU/mem/disk, **capabilities** (Docker ✓ Nginx ✓
-   Systemd ✓ GPU ✓), live stats.
-4. Create a project → environment (staging/production) → service (image + config).
-5. Deploy — watch steps stream live; health check gates routing.
-6. Add domain `api.example.com` → verify via DNS → route → upstream (node:container:port).
-7. HTTPS on by default: DNS-01 issuance, auto-renewal, expiry monitored.
-8. Monitoring auto-attaches: uptime + TLS expiry per domain, container health, node
-   heartbeat.
-9. Invite the team; roles like DevOps (can deploy staging, not production) come from
+**Prerequisites the user brings — NexusOps and the agent cannot create these.** The
+agent, by design, cannot buy domains, create DNS records, configure routers or
+firewalls, or install packages:
+
+- A domain whose DNS you control — **v1 certificates require the DNS hosted on
+  Cloudflare** plus a scoped API token (other providers are later phases).
+- An **A/AAAA record** pointing your hostname at the node's public IP.
+- **Public reachability**: a VPS with a public IP, or a home server with a working
+  port-forward of 80/443. **CGNAT nodes cannot serve customer traffic in v1** — there
+  is no tunnel, by design (§2.1). Certificate issuance still works there (DNS-01 needs
+  no inbound connectivity at issuance time); serving does not.
+- **nginx installed on the node, ports 80/443 free** — routing takes exclusive use;
+  the routing pre-flight refuses nodes that fail it with a named error.
+- A **public container image** (v1 deploys pull from public registries only).
+
+1. **Join** — accept an operator-issued invite; the first user of a fresh deployment
+   bootstraps as owner of the first organization ([multi-tenancy.md](multi-tenancy.md) §2.1).
+2. **Install the agent** — one command with a per-node enrollment token (env-delivered,
+   not argv). Node appears in ~60 seconds: OS, arch, CPU/mem/disk, capabilities
+   (Docker ✓ Nginx ✓ Systemd ✓ — GPU is not a v1 capability), live stats.
+3. **Create a project** → environment (staging/production) → **application** (image + config).
+4. **Deploy** — watch steps stream live; the health check gates routing.
+5. **Add domain** `api.example.com` → verify via DNS TXT → point an A/AAAA record →
+   route → upstream (node:container:port). Route creation is refused with a named error
+   if the node fails the routing pre-flight.
+6. **HTTPS**: DNS-01 issuance + auto-renewal, after the one-time Cloudflare-token
+   integration. Issuance works from any network; serving requires the reachability
+   prerequisite above.
+7. **Monitoring auto-attaches**: uptime (probed from the control plane — see the
+   vantage-point note in domain-routing.md §13) + TLS expiry per domain, container
+   health, node heartbeat. **Add a notification channel** (and control-plane SMTP for
+   email) so alerts actually reach someone.
+8. **Invite the team**; roles like DevOps (can deploy staging, not production) come from
    org roles + resource grants.
-10. Everything audited; events feed; notification channels on incidents.
+9. **Everything audited**; events feed; notification channels fire on incidents.
 
 ## 5. Control plane / data plane boundary
 
@@ -183,10 +244,23 @@ The smallest coherent first sellable version (the "instantly valuable" demo):
 
 ## 6. Success criteria for v1 (first sellable version)
 
-- **Time-to-value < 10 minutes** from signup to a deployed, HTTPS-served, monitored
-  service on your own hardware — no SSH required for the happy path.
-- **Zero cross-tenant access** — proven by a CI IDOR suite (see platform-security-model.md).
-- Agent install works on Debian/Ubuntu, Fedora, Arch, Alpine (agent is stdlib-only).
+- **Time-to-value < 10 minutes** from agent install to a deployed, HTTPS-served,
+  monitored application — **given the §4 prerequisite checklist**. Honest by path:
+  - *VPS with public IP, Cloudflare DNS, nginx preinstalled, public image:* the
+    10-minute claim is credible after prerequisites are in hand.
+  - *Home server behind NAT:* everything above plus a user-configured port-forward of
+    80/443 (and DDNS if the IP is dynamic); certificate issuance works regardless;
+    CGNAT = unsupported, labeled as such.
+  - *First-timer buying a domain and setting up Cloudflare mid-journey:* expect an
+    hour+ — that setup is outside NexusOps and never claimed otherwise.
+- **No SSH for the happy path given the pre-flight passes.** The agent cannot install
+  packages, edit DNS, or configure routers; the routing pre-flight surfaces what it
+  finds (nginx missing, 80/443 busy) as named errors, and resolving those is
+  user-side, by design.
+- **Zero cross-tenant access** — proven by the CI IDOR suite extended with write-path,
+  identity-map, Core-statement, and raw-SQL RLS probes ([multi-tenancy.md](multi-tenancy.md) §7).
+- Agent install works on Debian/Ubuntu, Fedora, Arch, Alpine, **ARM64** (agent is
+  stdlib-only; ARM64 is table stakes per the competitive review).
 - Every destructive/remote operation is permissioned, audited, and reversible where
   possible.
 - The production contabo instance migrates in place through every phase with zero

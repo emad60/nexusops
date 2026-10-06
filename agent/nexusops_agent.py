@@ -33,6 +33,14 @@ import urllib.parse
 
 AGENT_VERSION = "1.0.0"
 
+#: Cadence a server-rejected token is re-checked at. Deliberately long: a
+#: revoked or rotated-away token cannot repair itself, and the shipped systemd
+#: unit uses ``Restart=always``/``RestartSec=10`` — exiting on 401 turned every
+#: revocation into an endless storm of rejected requests. Parking here instead
+#: keeps the node quiet until an operator re-enrolls it
+#: (docs/node-agent-architecture.md §3.4).
+REVOKED_POLL_SECONDS = 900
+
 _STOP = {"flag": False}
 
 
@@ -415,6 +423,27 @@ def build_heartbeat(
     return payload, now_cpu, container_cpu_prev
 
 
+def _interruptible_sleep(seconds: float) -> None:
+    """Sleep in short slices so SIGTERM/SIGINT stop the agent promptly."""
+    deadline = time.monotonic() + seconds
+    while not _STOP["flag"] and time.monotonic() < deadline:
+        time.sleep(0.5)
+
+
+def _warn_revoked(warned: bool) -> bool:
+    """Print the revoked-state notice once per entry; return True thereafter."""
+    if warned:
+        return True
+    print(
+        "[nexusops-agent] token rejected by server — this node is revoked or was "
+        "rotated away. NOT exiting (systemd would restart into a request storm); "
+        f"retrying every {REVOKED_POLL_SECONDS // 60} minutes. Re-enroll this node "
+        "with a fresh token to restore reporting.",
+        file=sys.stderr,
+    )
+    return True
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="NexusOps host agent")
     parser.add_argument("--server", default=os.environ.get("NEXUSOPS_SERVER", ""),
@@ -455,15 +484,27 @@ def main(argv: list[str] | None = None) -> int:
         "disk_total_gb": int(usage.total / 1024**3),
         "hostname": socket.gethostname(),
     }
-    try:
-        status, data = client.request("POST", "/agent/hello", hello_payload)
-    except (OSError, http.client.HTTPException) as exc:
-        print(f"[nexusops-agent] server unreachable: {exc}", file=sys.stderr)
-        return 1
-    if status != 200:
+    revoked_warned = False
+    while not _STOP["flag"]:
+        try:
+            status, data = client.request("POST", "/agent/hello", hello_payload)
+        except (OSError, http.client.HTTPException) as exc:
+            print(f"[nexusops-agent] server unreachable: {exc}", file=sys.stderr)
+            return 1
+        if status == 200:
+            break
+        if status == 401:
+            # A rejected token is not a transient failure: park, don't exit.
+            revoked_warned = _warn_revoked(revoked_warned)
+            if args.once:
+                return 1
+            _interruptible_sleep(REVOKED_POLL_SECONDS)
+            continue
         print(f"[nexusops-agent] enrollment rejected (HTTP {status}): "
               f"{data.get('error', {}).get('code', 'unknown')}", file=sys.stderr)
         return 1
+    if _STOP["flag"]:
+        return 0  # shutdown requested while parked in the revoked cadence
     interval = max(int(data.get("heartbeat_interval_seconds", interval)), 5)
     print(f"[nexusops-agent] enrolled as '{data.get('name', '?')}'; "
           f"heartbeating every {interval}s", file=sys.stderr)
@@ -478,8 +519,17 @@ def main(argv: list[str] | None = None) -> int:
             if status == 204:
                 failures = 0
             elif status == 401:
-                print("[nexusops-agent] token rejected by server; exiting", file=sys.stderr)
-                return 1
+                # Revoked/rotated-away token: park instead of exiting (see
+                # REVOKED_POLL_SECONDS). Retrying is not pointless — a server
+                # misconfiguration that 401s transiently heals on its own —
+                # but a genuine revocation needs a re-enroll, which the
+                # operator is told about once per state entry.
+                revoked_warned = _warn_revoked(revoked_warned)
+                failures = 0
+                if args.once:
+                    return 1
+                _interruptible_sleep(REVOKED_POLL_SECONDS)
+                continue
             else:
                 failures += 1
         except (OSError, http.client.HTTPException) as exc:

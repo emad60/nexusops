@@ -1,7 +1,9 @@
 # Platform Security Model — NexusOps
 
-**Status:** Proposal for review — not yet approved for implementation.
-**Date:** 2026-09-21
+**Status:** Partly implemented — the tenancy half shipped with Phase 1
+(`docs/multi-tenancy.md` §0, `docs/security.md`); the later-phase material stays
+design and is marked *(target)* throughout.
+**Date:** 2026-09-21 (tenancy controls implemented 2026-09-24)
 **Companions:** [platform-vision.md](platform-vision.md) · [domain-model.md](domain-model.md) · [multi-tenancy.md](multi-tenancy.md) · [authorization.md](authorization.md)
 **Supersedes:** [security.md](security.md) (single-tenant audit doc; its controls remain accurate and are re-listed in §7)
 
@@ -10,16 +12,21 @@
 NexusOps is becoming a multi-tenant control plane for customer-owned machines. The security
 model therefore has two halves:
 
-- **What is enforced today** — grounded in code, path:line cited. Today's deployment is
-  single-tenant: every flat permission (e.g. `server.read`) sees every row; there is no
-  Organization, no org_id anywhere in the 31-table schema (findings, data-model report).
+- **What is enforced today** — grounded in code, path:line cited. **As of Phase 1 this
+  includes tenancy:** every tenant table carries `org_id`, the session guard refuses
+  scope-less DML and Core statements, PostgreSQL row-level security binds behind the
+  least-privilege `nexusops_app` role, and every request names its organization with
+  `X-Org-Id` (validated against active memberships). Permissions are resolved from the
+  membership in that organization, so `node.read` no longer implies every row on the
+  instance. A flat permission still sees every row *of its own organization* — the
+  resource-level narrowing of Grants remains design (§ target).
 - **What is specified (target)** — design commitments for the multi-tenant platform, marked
   *(target)*. Where a mitigation is only designed, the threat-model table says so.
 
 **Consistency vocabulary:** Organization / Membership / Node (=Server) / Project /
 Environment (project-scoped) / Domain / Route / Certificate / Operation / Secret /
-SecretVersion. Permission codenames below use **target** naming (`node.*`); current code
-uses `server.*` pending the Phase 1 rename (authorization.md §2). There is deliberately
+SecretVersion. Permission codenames below use `node.*`; the Phase 1 rename has
+landed and the current code matches (authorization.md §2). There is deliberately
 **no `node.execute`** — see the RCE row in §5.
 
 ### 1.1 Real vs simulated today (do not mistake one for the other)
@@ -31,12 +38,13 @@ uses `server.*` pending the Phase 1 rename (authorization.md §2). There is deli
 | Docker provider for demo/CI | **Simulated.** `docker_sim` provider + global `SIMULATION_MODE` flip every host's provider fleet-wide; sim tick writes into the same tables as real heartbeats | backend/app/providers/docker_sim.py:39-100; backend/app/providers/docker_factory.py:31-32 |
 | Monitor transports | **Simulated for `sim://` URLs** (deterministic sha256 outcomes; `always-down`, `flaky`, …). Real httpx probes are real | backend/app/providers/monitor_transport.py:204-242 |
 | Domains / certificates / nginx reverse proxy | **Does not exist.** Nothing to simulate; §5 rows for these are threat *designs* | platform-vision.md §1 |
+| Multi-tenancy (organizations, memberships, `org_id`, RLS) | **Real**, shipped in Phase 1. Organizations + memberships exist, every tenant table carries `org_id`, and PostgreSQL RLS binds behind the `nexusops_app` role | backend/app/core/tenancy.py; backend/alembic/versions/20260922_1000-a3f1c8d24b6e_add_tenancy_foundation.py; multi-tenancy.md §0 |
 
 ## 2. Assets
 
 | Asset | Where it lives | Why it matters |
 |---|---|---|
-| Organization identity, Memberships, roles, grants | `organizations`, `memberships`, `roles` *(target)*; today flat `users.role_id` | The tenancy boundary itself |
+| Organization identity, Memberships, roles, grants | `organizations`, `memberships` (shipped); `roles` is instance-wide in v1, grants *(target)*. `users.role_id` survives only as the default role for a new membership | The tenancy boundary itself |
 | Secret values + SecretVersion history | `secrets.ciphertext`, `secret_versions` (Fernet at rest) | Customer credentials for apps; full account takeover material |
 | Node control (Operations) | `operations` *(target)* | Whitelisted remote ops = the only remote-execution surface |
 | Agent enrollment tokens | `servers.agent_token_hash` (SHA-256) | Permanent write credential to one node's data-plane record |
@@ -127,14 +135,14 @@ cross-tenant impact. "Target" = designed mitigation, not yet built.
 
 | Threat | Who could invoke | Authorization required | Audited | Failure behavior | Cross-tenant impact |
 |---|---|---|---|---|---|
-| **Cross-tenant IDOR** — direct-ID read/write of another Organization's objects via REST, search, or scoped-helper bypass | Org member; attacker with leaked JWT/API key | Today: flat codename only (e.g. `server.read`) — no org dimension anywhere. Target: active Membership + validated `X-Org-Id`; scoped helpers return 404 | Mutations audited; reads only access-logged (backend/app/core/middleware.py:56-100) | Today: none — flat permissions see ALL rows (findings, auth report). Target: 404, no existence leak; violation = CI-block (§8) | Full cross-org read today; target: none |
+| **Cross-tenant IDOR** — direct-ID read/write of another Organization's objects via REST, search, or scoped-helper bypass | Org member; attacker with leaked JWT/API key | **Shipped (Phase 1):** active Membership + validated `X-Org-Id`, session guard, and RLS behind `nexusops_app`; a foreign id is a 404 with the same envelope as a random uuid | Mutations audited; reads only access-logged (backend/app/core/middleware.py:56-100) | **Shipped:** 404 with no existence leak; the 24-test suite in `tests/integration/test_tenant_isolation.py` blocks regressions (§8) | **None**, verified by raw-SQL probes as the application role and by the IDOR suite |
 | **WS cross-tenant subscription** — subscribing to channels/events of another org | Any connected user | Today: WS auth frame + per-subscribe permission re-check only (backend/app/ws/hub.py:347-361) — no org check | WS subscriptions not audited; close codes 4401/4403 | Today: `global`/`incidents` channels fan EVERY event to any `event.read`/`monitor.read` holder (backend/app/ws/hub.py:462-475); entity channels check permission+existence only | Live cross-org event/log/metric streaming today. Target: org-prefixed channels; publish helpers stamp org (multi-tenancy.md §5) |
 | **Background-job tenancy** — Celery task or sweep reading/writing across orgs | Queued work from any tenant's permissioned action; maintenance sweeps | None at task level (permission-less by design, authorization.md §6.4); the *enqueuing* API action was permissioned | Enqueue audited; task execution not | Today: sweeps iterate global tables — trim_logs deletes across the whole table (backend/app/tasks/maintenance.py:54-59). Target: `org_scope(org_id)` per task; `system_scope()` iterates orgs explicitly | One tenant's data subject to global sweeps/caps today. Target: org-partitioned |
 | **Agent token theft** — `nxa_` token captured (network path, node file read) | On-path observer (plain HTTP); anyone reading `/etc/default/nexusops-agent` (0600) | Token IS the authorization: permanent, non-expiring write credential to ONE server's data-plane record | Agent calls rate-limited (hello 30/min, heartbeat 600/min) but not audited; agent events use ActorType.AGENT (backend/app/services/server_service.py:334,596) | Overwrite host facts unvalidated at hello (backend/app/services/server_service.py:271-286); forge metrics/containers; force ONLINE defeating offline alerting; **no revoke-only path** — rotate = running agent 401-exits (backend/app/services/server_service.py:255-264) | Confined to the token's node (global hash lookup → that server only, backend/app/api/v1/agent.py:35-49). Target: org-scoped tokens + dual-token grace (§6 H4) |
 | **Node compromise** — attacker with root on a customer node | Node root — no platform credential needed | None (root already) | Platform cannot audit on-node actions | Agent context is root-equivalent via docker group (agent/nexusops-agent.service:19); attacker can also forge facts (row above) | Confined to that node + secrets delivered to it. Target: per-node secret minimization — node receives only secrets its assigned routes/services reference, never the org store (domain-model.md §3.7) |
 | **Agent→control-plane attacks** — forged heartbeats/facts/containers | Token thief; compromised node | Valid `nxa_` token | No (ingestion is write-only; events ActorType.AGENT) | Schemas bound + `extra=forbid` (backend/app/schemas/base.py:16) 422 unknown keys; BUT static facts overwritten unvalidated; fake stats land as real MetricSnapshot rows; container rows upserted verbatim beyond enum/length validation (findings, agent report) | Poisoned inventory/metrics/alerts for that node's org; detection (offline alerting) can be silenced |
 | **Control-plane compromise blast radius** | Edge RCE, supply chain, insider with DB | — (compromise) | Attacker controls the audit API; DB-trigger append-only survives API-level attackers, not DB-level ones | JWT_SECRET alone is bounded: forged JWTs still need a live session row (`sid` check, backend/app/api/deps.py:120-127); ENCRYPTION_KEY exposes every Fernet ciphertext (secrets, channel configs, SSH creds); docker-sock override (B6) = control-plane host root | Everything (single shared PG/Redis). Mitigations: fail-fast config, non-root containers, no TLS-in-repo gap closed; per-org data keys *(target, open question)* |
-| **SSRF** — monitors, webhook channels, docker `tcp://` endpoints as probing oracle | Any `monitor.manage` / `channel.manage` / `server.create` holder | Those codenames (flat today) | Create/update audited; the probe/fetch itself not | Guard: http/https only, no userinfo, every resolved address must be global, fail-closed on unresolvable (backend/app/core/ssrf.py); monitors re-validate at execution time (backend/app/services/monitor_service.py:348-356); webhooks validate at create/update ONLY (backend/app/services/notification_service.py:133); `tcp://` guard `assert_safe_tcp_endpoint` (backend/app/core/ssrf.py:141-177), `unix://`/`agent://` exempt | **Guard is OFF in production today:** `allow_private_targets` defaults True (backend/app/core/config.py:91) and is true in the deployed prod .env:68. DNS-rebinding TOCTOU documented (backend/app/core/ssrf.py:12-17) |
+| **SSRF** — monitors, webhook channels, docker `tcp://` endpoints as probing oracle | Any `monitor.manage` / `channel.manage` / `node.create` holder | Those codenames (flat today) | Create/update audited; the probe/fetch itself not | Guard: http/https only, no userinfo, every resolved address must be global, fail-closed on unresolvable (backend/app/core/ssrf.py); monitors re-validate at execution time (backend/app/services/monitor_service.py:348-356); webhooks validate at create/update ONLY (backend/app/services/notification_service.py:133); `tcp://` guard `assert_safe_tcp_endpoint` (backend/app/core/ssrf.py:141-177), `unix://`/`agent://` exempt | **Guard is OFF in production today:** `allow_private_targets` defaults True (backend/app/core/config.py:91) and is true in the deployed prod .env:68. DNS-rebinding TOCTOU documented (backend/app/core/ssrf.py:12-17) |
 | **RCE via remote operations** — arbitrary command execution on nodes | Org member; attacker with `operation`-issuing permission *(target)* | Target: whitelisted op types, each mapping to an existing or new codename (`container.lifecycle`, `domain.manage` — the latter is new, added by authorization.md §2 with Phase 4 domains); **no `node.execute`, ever** (authorization.md §2) | Every Operation is a permission-gated, audited row (domain-model.md §2.3) | Target: agent PULLS ops; no push tunnel, no shell. Today: no remote exec exists at all — agent only sends telemetry and issues GETs on the docker socket (agent/nexusops_agent.py:161-182) | Whitelist keeps node blast radius to named op types with params JSONB; capability-based dispatch (docker ops only to nodes reporting docker capability) |
 | **Docker socket root-equivalence** | RCE in agent context; `container.lifecycle` holder on a docker-sock deployment | `container.lifecycle` (= host root when the control plane holds the socket) | Lifecycle ops audited; daemon-level effects are beyond platform audit | Agent runs with docker group (agent/nexusops-agent.service:19) — any agent-context RCE owns the host; socket mount into api+worker is opt-in and NOT enabled in current .env (docker-compose.docker-sock.yml:19-27) | Node root / control-plane host root. Documented warning; keep override off in multi-tenant production *(target)* |
 | **Nginx config injection** *(target — subsystem does not exist yet)* | Future `domain.manage` holder | `domain.manage`; render/apply are whitelisted Operations | Every render/apply = audited Operation (domain-model.md §2.3) | Design mitigations: the injection defense is domain-routing.md §6.2's strict allowlists — hostnames anchored to verified Domains, structured fields under `extra=forbid` schemas, rendered config a projection of DB state; `nginx -t` before apply is availability-only (anti-bricking + rollback — it validates syntax; an injected `location`/`proxy_pass` block passes it) (domain-model.md §2.4) | Co-hosted domains on the same node share the nginx config — injection = traffic interception/redirect across that node's routes |
@@ -194,11 +202,11 @@ accepted for v1:
 
 ---
 
-## 6. Current-code hardening list
-
-Every item below is a defect in today's code, evidenced at path:line. The roadmap's Phase 0
-hardening table (roadmap §3) mirrors these items **except H2**, which it omits — H2's fix can
-only land with Phase 6 real deployments, past the tenancy migration. The roadmap's "Lands in"
+## 6. Current-code hardening listEvery item below was a defect in the code as of this document's date, evidenced
+at path:line. **H1 and the agent half of H4 are now fixed (Phase 0, marked ✅/◐
+below); the rest are still open.** The roadmap's Phase 0 hardening table (roadmap
+§3) mirrors these items **except H2**, which it omits — H2's fix can only land
+with Phase 6 real deployments, past the tenancy migration. The roadmap's "Lands in"
 column schedules the items across phases: Phase 0 kicks off (H1 fail-closed, H4 backoff, H8
 fail-closed), H3/H6/H7/H9 land with the Phase 1 tenancy migration, H4's full revocation
 semantics and H5/H10 with Phase 3 agent v2, and H8's deploy-chain authorization with Phase 2.
@@ -208,10 +216,10 @@ Keep the two lists synchronized when either changes.
 
 | # | Hardening item | Evidence (current code) | Fix direction |
 |---|---|---|---|
-| H1 | **Silent secret-resolution degradation** — missing or undecryptable `${secret:KEY}` refs resolve to `""` with only a log warning; deploys proceed without credentials | backend/app/services/secret_service.py:314-324; engine wrapper swallows all exceptions → `{}` (backend/app/services/deployment_engine.py:377-388) | Fail the deployment on unresolved refs (explicit allow-missing opt-in later); re-raise in the engine wrapper |
+| H1 ✅ **FIXED (Phase 0)** | ~~**Silent secret-resolution degradation** — missing or undecryptable `${secret:KEY}` refs resolved to `""` with only a log warning; deploys proceeded without credentials~~ | Was: backend/app/services/secret_service.py:314-324; engine wrapper swallowed all exceptions → `{}` | Shipped: `resolve_secrets_for_environment` raises `SecretResolutionError`; the engine-owned `RESOLVE_CONFIG` step (planned first, refused by runners) fails through `_finalize_failed` with the remaining steps `SKIPPED`, and audits `secret.resolve_failed` + one `secret.resolve` per resolved key/version |
 | H2 | **Real deployments never receive secrets** — `docker_real.py` has zero `ctx.secrets` references; only the simulated runner consumes them | backend/app/providers/deployment_runner.py:70,210 (sim runner) vs backend/app/providers/docker_real.py (no reference) | Wire resolved secrets into the real runner's container creation; contract test pinning the behavior |
 | H3 | **WS global channel exposure** — `global` and `incidents` channels fan EVERY event instance-wide to any `event.read`/`monitor.read` holder | backend/app/ws/hub.py:462-475 | Org-prefix channels + publish helpers stamping org (multi-tenancy.md §5); ship with the tenancy phase, not after |
-| H4 | **Agent token non-revocation + 401 hot-loop** — revoke = rotate = running agent 401-exits; systemd restarts it every 10s forever; no dual-token grace | backend/app/services/server_service.py:255-264 (rotation only); agent/nexusops_agent.py:481-482 (401→exit 1); agent/nexusops-agent.service (Restart=always, RestartSec=10) | Revoke-only path + bounded dual-token grace window; agent backs off terminally on 401 instead of restart-looping (docstring at docs/agent.md:75 already claims this — make it true) |
+| H4 ◐ **agent side FIXED (Phase 0)** | **Agent token non-revocation + 401 hot-loop** — revoke = rotate = running agent 401-exited; systemd restarted it every 10s forever; no dual-token grace | backend/app/services/server_service.py:255-264 (rotation only); agent/nexusops_agent.py (was 401→exit 1); agent/nexusops-agent.service (Restart=always, RestartSec=10) | **Done:** the agent parks in `REVOKED_POLL_SECONDS` (900) with a once-per-entry notice instead of exiting, so no restart storm. **Still open (Phase 3):** the revoke-only path and bounded dual-token grace window |
 | H5 | **Agent plain-HTTP transport option** — token sniffable on the path; only a stderr warning | agent/nexusops_agent.py:328-353 | Default-deny plain HTTP to non-loopback targets; keep explicit opt-in flag with audible warning; TLS termination guidance in install flow |
 | H6 | **Rate limits keyed by IP only** — NAT'd agent fleets share one 600/min heartbeat bucket; no per-user/org dimension on user routes | backend/app/core/rate_limit.py:69; agent limits backend/app/api/v1/agent.py:31-32 | Two-dimension keys: per-node for agent routes, per-org/per-user for authenticated routes (§9) |
 | H7 | **Global unique names** — `Server.name` (and `projects.name`, tags) unique platform-wide; one tenant blocks another's names; enables name-squatting | backend/app/models/infra.py:51; backend/app/models/delivery.py:29; backend/app/models/infra.py:38 | Composite `(org_id, name)` uniques with the tenancy migration (findings, data-model report) |
@@ -273,7 +281,7 @@ suite asserts only role-boxing 403s (backend/tests/integration/test_rbac.py:48,6
 before the tenancy phase can ship safely.
 
 Spec (multi-tenancy.md §7): a parametrized suite at
-`backend/tests/integration/test_tenancy_isolation.py` that, for **every** org-scoped listing
+`backend/tests/integration/test_tenant_isolation.py` that, for **every** org-scoped listing
 and detail endpoint, asserts org B's principal gets 404/403 on org A's objects. Coverage must
 include:
 
@@ -287,9 +295,11 @@ include:
 
 Rules:
 
-1. **CI gate, not a convenience.** The suite runs on every PR; red = merge blocked. It is the
-   **Phase 1 exit criterion** — no phase ships without it green (multi-tenancy.md §7). This
-   requires standing up CI itself first (it does not exist today).
+1. **CI gate, not a convenience.** The suite runs on every PR; red = merge blocked. It was
+   the **Phase 1 exit criterion** and is green as of 2026-09-24 (24 cross-tenant tests plus
+   the raw-SQL RLS probes in `backend/tests/integration/test_tenant_isolation.py`).
+   Wiring it into CI itself is still open — CI does not exist yet, so today the gate is
+   enforced by running `make test-backend` locally and in review.
 2. **Two-org fixtures** extend the existing helpers/conftest pattern (pure helpers +
    `_seed_rbac_registry`); no new framework.
 3. **404 over 403** for cross-org object reads: no existence leak.

@@ -316,8 +316,9 @@ docker compose exec api alembic heads
 ```
 
 `current` below `head` (or `None` on an empty database) means the schema is
-behind. Today there is a single head: `b5866787bde4` (initial schema,
-`backend/alembic/versions/`).
+behind. Today there is a single head: `f1a2b3c4d5e6`
+(`backend/alembic/versions/`); the chain starts at the initial schema
+`b5866787bde4`.
 
 **Fix.**
 
@@ -519,17 +520,22 @@ logins right before (5+ attempts), or the audit trail shows
 a page reload (once the 15-minute access token expires) you are logged out and
 the refresh call fails.
 
-**Cause.** The refresh token lives in an HttpOnly cookie
-(`nxo_rt`, `backend/app/services/auth_service.py`) whose `Secure` flag follows
-`ENVIRONMENT`: `cookies_secure` is true in `production`
-(`backend/app/core/config.py`). Browsers refuse to store `Secure` cookies over
-plain HTTP, and the composed stack serves plain HTTP on :8080 — so in
-`ENVIRONMENT=production` behind no TLS, the cookie is silently discarded.
+**Cause.** The refresh token lives in an HttpOnly cookie (`nxo_rt`,
+`backend/app/services/auth_service.py`) whose `Secure` flag is derived from the
+request's transport: `X-Forwarded-Proto` when the edge sets it (nginx always
+overwrites it with its own `$scheme`, so it is not client-spoofable), otherwise
+the request scheme (`_transport_is_https`, `backend/app/api/v1/auth.py`).
+Browsers refuse to store `Secure` cookies over plain HTTP, so if your outer
+proxy reports `https` while the browser actually talks plain HTTP to it — a
+common misconfiguration when a host proxy terminates TLS but forwards the
+original scheme — the cookie is silently discarded.
 
-**Fix.** Run with `ENVIRONMENT=development` when testing over
-`http://localhost:8080`, or put real TLS in front of nginx in production. This
-is intentional fail-safe behavior, not a bug to work around by editing the
-cookie flags.
+**Fix.** Make the reported scheme match reality: terminate TLS and let the
+proxy set `X-Forwarded-Proto: https`, or access the edge directly over
+`http://localhost:8080` (no forwarded header, so the request scheme is used).
+The flag is deliberately **not** tied to `ENVIRONMENT` — tying it to production
+mode made production-over-plain-HTTP unusable (login succeeded, every reload
+bounced back to `/login`), so editing `ENVIRONMENT` is not the fix.
 
 ---
 
@@ -538,13 +544,11 @@ cookie flags.
 - **`make dev` (dev profile) is currently broken at build time.**
   `docker-compose.dev.yml` builds the `frontend` service with `target: develop`,
   but `frontend/Dockerfile` defines only the `build` and `runtime` stages —
-  compose fails with a missing-target error before anything starts. On top of
-  that, the same file bind-mounts `./nginx/dev.conf` over the nginx template,
-  and `nginx/` contains only `default.conf.template` and a `Dockerfile` — on
-  Linux, Docker would materialize the missing source as an empty directory and
-  nginx would start without a usable config. Until a `develop` stage and
-  `nginx/dev.conf` are added, use `make up` (the production-shaped stack) for
-  local work.
+  compose fails with a missing-target error before anything starts. (The
+  overlay no longer references a phantom `nginx/dev.conf`: it mounts the real
+  `./nginx/default.conf.template` and only swaps `WEB_UPSTREAM` to the Vite
+  port.) Until a `develop` stage is added, use `make up` (the production-shaped
+  stack) for local work and run Vite on the host.
 - **No host-side SMTP endpoint by default.** See section 10 — Mailpit's SMTP
   port is internal-only as shipped.
 - **First-admin bootstrap and seeding do not compose after the fact.** The

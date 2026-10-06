@@ -22,8 +22,18 @@ notification, and deploy → step logs → rollback.
   (`backend/app/services/deployment_engine.py`).
 - **Secrets store** — Fernet-encrypted at rest (`ENCRYPTION_KEY`), versioned, resolvable
   by the deployment engine but never returned in plaintext after creation.
+- **Multi-tenant by construction** — `User → Membership → Organization →` every
+  tenant-owned resource. The active organization is chosen per request with
+  `X-Org-Id` and validated against the caller's memberships (a JWT identifies a
+  user, never a tenant); roles are per-organization; enforcement is three
+  independent nets — a SQLAlchemy session guard that refuses scope-less writes, a
+  row-stamping flush hook, and PostgreSQL row-level security behind a
+  least-privilege `nexusops_app` role. WebSocket sockets, worker jobs, Redis
+  frames, search, audit rows, secrets and agent/node calls are all org-scoped
+  (`docs/multi-tenancy.md`).
 - **RBAC + audit log** — DB-backed permission registry with custom roles
-  (`require_permission(...)` dependencies) and a full audit trail of mutations.
+  (`require_permission(...)` dependencies) and a full audit trail of mutations,
+  each row attributed to the organization it happened in.
 - **Operations dashboard** — fleet counters plus a live event feed on the `global`
   WebSocket channel. Note: there is no fleet-wide metrics history endpoint yet, so the
   dashboard charts nothing; per-server timeseries live on each server's detail page.
@@ -50,10 +60,14 @@ flowchart LR
 ```
 
 REST lives under `/api/v1` with OpenAPI docs at `/api/docs`. Errors use a single
-envelope: `{"error": {"code", "message", "request_id"}}`. WebSocket channels:
-`global`, `server-metrics`, `container-logs`, `deployment-logs`, `incidents`.
-Auth uses short-lived JWT access tokens (held in SPA memory) plus opaque refresh tokens
-that are SHA-256-hashed at rest, rotated on use, and carry reuse detection.
+envelope: `{"error": {"code", "message", "request_id"}}`. **Every authenticated
+request must name its organization** in `X-Org-Id` (API keys are bound to one
+organization and ignore the header; `GET /organizations` lists where you may act).
+WebSocket channels: `global`, `server-metrics`, `container-logs`,
+`deployment-logs`, `incidents` — a socket is bound to one organization and never
+receives another's events. Auth uses short-lived JWT access tokens (held in SPA
+memory) plus opaque refresh tokens that are SHA-256-hashed at rest, rotated on use,
+and carry reuse detection.
 
 ## Quickstart
 
@@ -83,7 +97,11 @@ credentials ever exist in a production deployment.
 laptop-runnable with zero real infrastructure: simulated agents emit heartbeats and
 deterministic sine-wave metrics, Docker containers and deployments are simulated, and
 monitor checks run against simulated targets. The UI shows a **SIMULATION MODE** badge
-while it is active. Set it to `false` and enroll real agents to manage actual hosts.
+while it is active, and each simulated deployment view carries its own **Simulated**
+chip. Set it to `false` and enroll real agents to manage actual hosts. The exact
+per-capability breakdown — what is real, what is simulated, and when each becomes real —
+is the honesty box in
+[architecture.md §12](docs/architecture.md#12-simulated-capabilities-honesty-box).
 
 ## Development
 
@@ -97,8 +115,9 @@ UI on http://localhost:8025. Host-mapped ports: postgres `127.0.0.1:5433`,
 redis `127.0.0.1:6390`.
 
 **Known issue:** `make dev` currently fails at build time — the overlay targets a
-`develop` stage that `frontend/Dockerfile` does not define, and mounts an
-`nginx/dev.conf` that does not exist. Until those land, use `make up` and run Vite on
+`develop` stage that `frontend/Dockerfile` does not define. (The overlay itself is
+otherwise correct now: it mounts the real `nginx/default.conf.template` and only swaps
+`WEB_UPSTREAM` to the Vite port.) Until the stage lands, use `make up` and run Vite on
 the host (`cd frontend && npm run dev`; it proxies `/api`, WebSockets included, to the
 :8080 edge). Details in [docs/development.md](docs/development.md) §4.2.
 
@@ -151,9 +170,13 @@ nexusops/
 - [docs/troubleshooting.md](docs/troubleshooting.md) — common failure modes and fixes.
 - [docs/engineering-report.md](docs/engineering-report.md) — build & verification
   report: what was delivered, how it was tested, audit results, known gaps.
-- [docs/platform-vision.md](docs/platform-vision.md) — **platform-evolution proposal
-  (for review, not yet approved)**: multi-tenant direction, target domain model,
-  tenancy enforcement, authorization, phased roadmap. Companion specs:
+- [docs/multi-tenancy.md](docs/multi-tenancy.md) — **implemented (Phase 1)**: the
+tenancy model as built — org resolution, the session guard, PostgreSQL RLS and the
+  role split, organization-bound WebSockets, worker scoping, and the cross-tenant
+  test suite.
+- [docs/platform-vision.md](docs/platform-vision.md) — platform-evolution direction,
+  target domain model, authorization, phased roadmap (the tenant foundation in it is
+  now shipped; the later-phase entities are still design). Companion specs:
   [domain-model.md](docs/domain-model.md), [multi-tenancy.md](docs/multi-tenancy.md),
   [authorization.md](docs/authorization.md), [product-roadmap.md](docs/product-roadmap.md),
   [node-agent-architecture.md](docs/node-agent-architecture.md),
@@ -167,6 +190,15 @@ nexusops/
 
 - **Change `POSTGRES_PASSWORD`** before first start — compose refuses to boot without
   it, and the seeded dev admin password is intentionally only created by `make seed`.
+- **Set `POSTGRES_APP_PASSWORD` (and `POSTGRES_APP_USER`) before the first start.**
+  The stack uses two database roles: `POSTGRES_USER`/`POSTGRES_PASSWORD` is the owner
+  that owns the schema and runs migrations, while the runtime connects as
+  `nexusops_app` — `NOSUPERUSER NOBYPASSRLS`, not the owner — so row-level security
+  actually binds. The migration provisions that role and its password from these
+  variables, so set them *before* `make up`; pointing the runtime at the owner role
+  would silently drop the database-level tenancy net, which is why the application
+  refuses to start against an owner DSN (`backend/app/core/config.py`,
+  `rls_enforced`).
 - **Rotate the secrets**: `JWT_SECRET` (≥ 32 chars) and `ENCRYPTION_KEY` (Fernet). Both
   are placeholders in `.env.example`; generate real ones with
   `./scripts/generate_secrets.sh`. Losing `ENCRYPTION_KEY` means losing stored secrets.

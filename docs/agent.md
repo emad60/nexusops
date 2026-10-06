@@ -70,6 +70,12 @@ python3 nexusops_agent.py --server https://nexusops.example.com --token nxa_... 
 Flags: `--interval N` (≥5 s), `--insecure`, `--allow-insecure-transport`, `--once`.
 Environment overrides: `NEXUSOPS_SERVER`, `NEXUSOPS_TOKEN`, `NEXUSOPS_INTERVAL`.
 
-Failure handling: failed beats back off exponentially (up to 5 min) and recover
-automatically; an expired/revoked token exits with status 1 so the supervisor
-does not hot-loop against a rejected credential.
+Failure handling: transient failures back off exponentially (up to 5 min) and
+recover automatically. A **rejected token does not exit** — the unit runs with
+`Restart=always`/`RestartSec=10`, so exiting turned every revocation into an
+endless storm of rejected requests. Instead the agent parks in a 15-minute
+re-attempt cadence (`REVOKED_POLL_SECONDS`), says so once on stderr, and stays
+alive until an operator re-enrolls the node with a fresh token. Under `--once`
+it still exits non-zero, because that mode is a smoke test. Full revocation
+semantics (a distinct `REVOKED` node state and `AGENT_TOKEN_REVOKED` vs
+`AGENT_TOKEN_UNKNOWN` codes) land with agent v2, Phase 3.

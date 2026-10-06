@@ -1,7 +1,51 @@
 # Authorization Architecture
 
-**Status:** Proposal for review — not yet approved for implementation.
-**Date:** 2026-09-20
+**Status:** Partly implemented. The org-aware authorization half shipped with
+Phase 1 (§0); the registry changes in §2 and the grants/custom-role work in
+§4 and §7 remain design.
+**Date:** 2026-09-20 (authorization change implemented 2026-09-24)
+
+## 0. What shipped (Phase 1)
+
+**Authority is the membership, not the user.** A request's permissions come from
+`Membership.role` **in the active organization** (`app/api/deps.py`
+`_load_permissions`); `User.role_id` survives only as the default applied when a
+membership is created. The consequences are load-bearing:
+
+- a person can be an Admin in one organization and a Viewer in another, and the
+  same access token means different things in each;
+- `ctx.has_permission()` returns **False** whenever the request has no active
+  membership — including for a user whose account-level role would have granted
+  the codename;
+- an API key still passes its own scope check *first*, so a least-privilege key
+  stays least-privilege even if its owner is a superadmin;
+- `User.is_superadmin` remains an instance-operator escape hatch and bypasses the
+  membership check (deliberately: it is how the bootstrap owner administers a
+  fresh instance), but it does **not** widen tenancy — every read still has to
+  name an organization the user belongs to, so a superadmin in org B cannot see
+  org A's rows.
+
+**One gate, one org check.** `require_permission(...)` is unchanged and remains
+the only HTTP gate; the active organization is resolved once per request in
+`resolve_auth` (`X-Org-Id` for humans, `api_keys.org_id` for machine keys — the
+header is *ignored* for key auth so a key cannot be reinterpreted into another
+tenant). WS subscribe frames re-check permissions **and** the channel's
+organization against the socket's binding (`app/ws/hub.py`).
+
+**Member management is organization-local.** `PATCH /users/{id}` writes the role
+held in the active organization and `DELETE /users/{id}` suspends that
+membership; neither touches the account or its sessions. An organization's last
+active member cannot be suspended (`LAST_MEMBER_PROTECTED`), the multi-tenant
+successor to the last-superadmin guard.
+
+**Shipped from this document:** the `server.*` → `node.*` registry rename
+(including `credential.write` → `node.credential.write`) and the `/v1/nodes`
+API surface, applied in one migration (`20260923_1000-c4e2a1f7b9d3`) that also
+rewrites the stored API-key scope strings. **Not shipped:** the `Operator` →
+`DevOps` role rename, the new codenames (`member.invite`, `org.manage`, …) and
+everything in §4/§7. Permission codenames today are exactly the ones in
+`backend/app/core/permissions.py`; the registry is still instance-wide
+(`roles.org_id` is NULL for every row in v1).
 
 ## 1. Principles (already true in the codebase, kept)
 
@@ -17,9 +61,11 @@
 
 ## 2. Registry changes (Phase 1 + new subsystems)
 
-**Rename in one migration:** `server.*` → `node.*` (registry, seeded permission
-rows, ROLE_MATRIX, stored API-key scope strings, code, UI strings). `credential.write`
-becomes `node.credential.write`.
+**Renamed (shipped):** `server.*` → `node.*` across the registry, seeded
+permission rows, `ROLE_MATRIX`, stored API-key scope strings, code, routes, SPA
+strings and docs (migration `c4e2a1f7b9d3`). `credential.write` became
+`node.credential.write`; the old `/v1/servers` routes remain as a schema-hidden
+compatibility alias.
 
 **Add:** `member.invite`, `member.remove`, `org.manage`, `billing.manage`,
 `domain.read`, `domain.manage`, `certificate.read`, `certificate.manage`,
@@ -33,11 +79,23 @@ whitelisted types, each mapping to an existing or new codename (container lifecy
 general exec ever appears, it gets its own codename + stricter approval — never a
 generic execute permission.
 
-**One name: DevOps.** The stored system-role row is renamed `Operator` → `DevOps`
-in the Phase 1 seed migration (the FK-facing change is the `roles.name` value on
-the org-NULL template rows; membership rows reference role IDs, so the rename is
-a seed update, not a data migration). No display-vs-stored split: docs, API, and
-DB use one name.
+**Shipped (2026-10-04):** the operations control plane, authorised exactly as
+above — dispatch and cancel check the codename the operation *type* declares
+(`container.lifecycle`, `container.remove`, `container.logs`), which is why the
+route cannot express it as a static FastAPI dependency. **`operation.read` was
+not added:** listing and reading operations uses `node.read`, since an operation
+is a node-scoped artifact and no separate read grant is needed yet. Only the
+`container.*` types are whitelisted; `nginx.*` and the reserved secret/cert types
+ship with their subsystems. Dispatch is additionally **capability-gated,
+fail-closed**: until per-node capability advertisement lands (Phase 3), a type
+whose capability cannot be verified is refused `409 NODE_CAPABILITY_UNVERIFIED`
+(see node-agent-architecture.md §5.4).
+
+**One name: DevOps.** *(Not shipped.)* The stored system-role row will be renamed
+`Operator` → `DevOps` (the FK-facing change is the `roles.name` value on the
+org-NULL template rows; membership rows reference role IDs, so the rename is a seed
+update, not a data migration). Until it lands the seeded role is still `Operator`.
+No display-vs-stored split: docs, API, and DB use one name.
 
 ## 3. The five system roles (target)
 

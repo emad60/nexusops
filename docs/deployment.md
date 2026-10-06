@@ -204,7 +204,8 @@ tokens (`scripts/generate_secrets.sh`).
 
 | Variable | Why it matters |
 |---|---|
-| `POSTGRES_PASSWORD` | **Required by compose** (`:?` guard). Used by the `postgres` container *and* to assemble `DATABASE_URL` when `DATABASE_URL` is unset (`backend/app/core/config.py`). The `change-me-postgres` default is a dev fallback — change it. |
+| `POSTGRES_PASSWORD` | **Required by compose** (`:?` guard). Used by the `postgres` container *and* to assemble `DATABASE_URL` when `DATABASE_URL` is unset (`backend/app/core/config.py`). The `change-me-postgres` default is a dev fallback — change it. This is the **owner** credential: it owns the schema and runs migrations. |
+| `POSTGRES_APP_PASSWORD` | **Set before the first start.** The runtime's `nexusops_app` role password. The tenancy migration creates that role (`NOSUPERUSER NOBYPASSRLS`, not the owner) and installs the row-level-security policies; the compose runtime services get `POSTGRES_APP_USER`/`POSTGRES_APP_PASSWORD` in their `DATABASE_URL`, while the migrate step uses the owner. Unset → the app assembles an owner DSN and refuses to start (`rls_enforced` in `backend/app/core/config.py`), which is deliberate: pointing the runtime at the owner role silently disables every database-level tenant policy. |
 | `JWT_SECRET` | **Required, no default.** JWT signing key; must be ≥ 32 chars or the process refuses to start. `openssl rand -hex 32`. |
 | `ENCRYPTION_KEY` | **Required, no default.** Fernet key encrypting stored secrets at rest (`backend/app/services/secret_service.py`) and notification channel configs. Must validate as a Fernet key or startup aborts. **Rotating it makes previously stored secrets undecryptable** — treat it as write-once. |
 | `ENVIRONMENT` | `development` \| `production` \| `test`. Drives the behaviour changes below. |
@@ -212,6 +213,12 @@ tokens (`scripts/generate_secrets.sh`).
 | `ALLOW_PRIVATE_TARGETS` | Dev convenience: lets monitors/webhooks target private networks (SSRF-guard bypass). **Must be `false` in production.** |
 | `SIMULATION_MODE` | Simulated fleet end-to-end, UI badge, `nx.simulation_tick` beat task. **Must be `false` in production.** |
 | `SMTP_*` | Email notifications. In compose `SMTP_HOST=mailpit` (a sink, not a real mailer) — set a real relay for production. |
+
+> **Two database roles, by design.** `POSTGRES_USER`/`POSTGRES_PASSWORD` owns every
+table and runs `alembic upgrade`; `POSTGRES_APP_USER`/`POSTGRES_APP_PASSWORD` serves
+request traffic with row-level security enforced. Migrations therefore bypass tenancy
+policies (by role) and requests cannot. Do not point the runtime at the owner: the
+stack will start, and tenant isolation will quietly lose its database-level net.
 
 Other knobs (all validated in `backend/app/core/config.py`): `LOG_LEVEL`,
 `ACCESS_TOKEN_TTL_MINUTES` (15), `REFRESH_TOKEN_TTL_DAYS` (14),
@@ -286,7 +293,13 @@ server {
     location / {
         proxy_pass http://127.0.0.1:8080;      # the repo's nginx edge
         proxy_http_version 1.1;
-        proxy_set_header Host $host;
+        # Preserve the port. The app's WebSocket origin check treats a handshake
+        # as same-origin when `Origin`'s netloc equals `Host`, and `$host`
+        # DROPS the port — so a browser served from a non-default port is
+        # rejected `403`. Add this once in the `http {}` block (`map` is only
+        # valid there); the empty-key arm covers HTTP/1.0 clients with no Host:
+        #     map $http_host $nx_host_header { "" $host; default $http_host; }
+        proxy_set_header Host $nx_host_header;
         # Stamp the client address at the trust boundary — OVERWRITE, don't
         # append ($proxy_add_x_forwarded_for would pass client-injected XFF
         # entries upstream). See "Client IP resolution" below.
@@ -310,8 +323,10 @@ server {
 The API runs with `--proxy-headers`, so `X-Forwarded-Proto` from your outer proxy
 is honoured. Routing through the repo's edge keeps the WebSocket handling, the
 2 MB body cap and the edge security headers in one place. Set `CORS_ORIGINS` to
-the `https://` origin, and `ENVIRONMENT=production` so the refresh cookie gets
-`Secure`.
+the `https://` origin. Set `ENVIRONMENT=production` for HSTS and to hide the docs —
+the refresh cookie's `Secure` flag is not tied to it: the flag follows
+`X-Forwarded-Proto`, so it switches on by itself once the outer proxy reports
+`https`.
 
 ### Option B: enable the in-repo TLS block yourself
 
@@ -588,7 +603,7 @@ matter which service logged it.
 Access log event (`AccessLogMiddleware` in `backend/app/core/middleware.py`):
 
 ```json
-{"event": "request", "method": "GET", "path": "/api/v1/servers", "status": 200,
+{"event": "request", "method": "GET", "path": "/api/v1/nodes", "status": 200,
  "duration_ms": 12, "ip": "203.0.113.7", "user_id": "…", "request_id": "…",
  "level": "info", "timestamp": "2026-09-10T12:00:00.000000Z", "logger": "…"}
 ```

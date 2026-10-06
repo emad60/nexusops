@@ -1,7 +1,9 @@
 # Platform Vision — NexusOps
 
-**Status:** Proposal for review — not yet approved for implementation.
-**Date:** 2026-09-20
+**Status:** Direction agreed; the tenancy foundation (Phase 1) has shipped — see
+`multi-tenancy.md` §0 for what is real today and `product-roadmap.md` §4 for the
+delivered scope. Everything after the tenancy foundation is still design.
+**Date:** 2026-09-20 (Phase 1 delivered 2026-09-24)
 **Reads best after:** [domain-model.md](domain-model.md) · [multi-tenancy.md](multi-tenancy.md) · [authorization.md](authorization.md)
 
 ---
@@ -91,21 +93,24 @@ direction) found:
 - **Cloud platforms** (Vercel/Render/Fly): great DX, but cloud-only — home servers,
   RPis, and dedicated boxes are second-class.
 
-The wedge, stated precisely so it survives scrutiny:
+The wedge, stated precisely so it survives scrutiny — **no "first" or category-leader
+claim**: the transport pattern and each individual capability have precedents, and the
+positioning is the combination, not primacy.
 
-> **The first turnkey self-hosted PaaS — deploys + domains + TLS + monitoring in one
-> product — where every server onboards via an outbound-only agent: zero SSH, zero
-> inbound ports, NAT-friendly.**
+> **A self-hosted PaaS bundle — deploys + domains + TLS + monitoring in one product —
+> where every server onboards via an outbound-only agent: no SSH keys stored, no
+> inbound ports required, NAT-friendly.**
 
 Scope notes that keep the claim honest:
 
-- **"First" scopes to the turnkey PaaS class.** Komodo v2 and Portainer's Edge Agent
-  are real precedents for the transport pattern in adjacent categories (deploy
-  automation and container management respectively) — "nobody does outbound agents"
-  would be false and is not the claim. The defensible moat is the **bundle**: agent
-  transport + turnkey domains/TLS + multi-tenant RBAC + monitoring + secrets/audit in
-  one product. Coolify v5's `coold` validates the architecture; when it ships, the
-  transport alone stops differentiating, and the bundle + permissions carry positioning.
+- **No primacy claim.** Komodo v2 (March 2026) and Portainer's Edge Agent are real,
+  shipped precedents for outbound-only onboarding in adjacent categories (deploy
+  automation and container management respectively); Coolify v5's announced `coold`
+  adopts the same transport. "Nobody does outbound agents" would be false, and so
+  would "the first." The defensible position is the **bundle**: agent transport +
+  turnkey domains/TLS + multi-tenant RBAC + monitoring + secrets/audit in one product,
+  plus the open-source, self-hostable deployment model. When Coolify v5 ships, the
+  transport stops differentiating on its own and the bundle + permissions carry it.
 - **The transport is also the trust story:** no stored SSH keys anywhere, no port-22
   requirement, no root login for the control plane, and root-equivalent docker.sock
   access bounded by a compile-time op allowlist ([node-agent-architecture.md](node-agent-architecture.md)).

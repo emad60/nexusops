@@ -1,7 +1,9 @@
 # Domain Model — NexusOps as a Multi-Tenant Platform
 
-**Status:** Proposal for review — not yet approved for implementation.
-**Date:** 2026-09-20
+**Status:** Partly implemented. The tenant layer (`Organization`, `Membership`,
+`org_id` ownership, RLS) shipped with Phase 1; the later-phase entities in this
+document (Domains, Certificates, Operations, Backups, Grants, Plan) remain design.
+**Date:** 2026-09-20 (tenant layer implemented 2026-09-24)
 **Companions:** [platform-vision.md](platform-vision.md) · [multi-tenancy.md](multi-tenancy.md) · [authorization.md](authorization.md)
 
 ## 0. Design stance
@@ -17,6 +19,29 @@ Application, not Service. Environment always means the project-scoped entity —
 the node's free-text tag (that field is renamed "Label", §2.2.1). An Operation is a
 single whitelisted node action, never a shell; a Deployment is the numbered delivery
 run that issues Operations.
+
+> **Naming status.** The vocabulary above is the target and is used throughout this
+document. The `server.*` → `node.*` **surface rename has landed** (Phase 1):
+> permission codenames, API paths (`/api/v1/nodes`, with a schema-hidden
+> `/api/v1/servers` alias), the SPA and docs all say Node, and migration
+> `c4e2a1f7b9d3` renamed the stored permission rows and API-key scopes. The Python
+> internals and the `servers` table keep their names until the cleanup phase
+> (§2.3); `server_id` as a path-parameter / column name is unchanged.
+
+## 0.1 Shipped tenant layer (Phase 1)
+
+| Concept | Table | As built |
+|---|---|---|
+| **Organization** | `organizations` | The tenant root. `name`/`slug` unique, `status` (ACTIVE/SUSPENDED), `is_provisional` for the migration-provisioned tenant, `created_by_id`, `renamed_at`. A CHECK constraint forbids the reserved system uuid. RLS-exempt (it *is* the tenant) |
+| **Membership** | `memberships` | `(org_id, user_id)` unique, `role_id`, `status` (ACTIVE/SUSPENDED), `created_by_id`. The role here — not `User.role_id` — is the authority inside the organization. RLS-exempt (validating `X-Org-Id` is a cross-org read) |
+| **Tenant ownership** | `org_id` on every tenant table | `OrgScoped` mixin + `org_id_column()`; NOT NULL, indexed, `ON DELETE CASCADE` to `organizations`, enforced twice more (session guard, RLS `USING`/`WITH CHECK`) |
+| **Instance-level identity** | `users`, `sessions`, `refresh_tokens` | Deliberately **no** `org_id`: a person belongs to many organizations and a session is a credential of the account. Their tenancy boundary is the owner's membership, applied at the API level (directory, member CRUD, session listing/revocation) |
+| **Pre-org credentials** | `api_keys`, `agent_credentials` | Each row carries the `org_id` its credential is bound to, because the lookup must happen before a tenant is known; that column *is* the boundary for the request that follows |
+| **Role templates** | `roles` | Instance-wide in v1: `org_id` exists but is NULL for every row (the five system roles). Custom roles are a later phase (§7) |
+
+The backfill is deterministic and documented: existing rows are attributed to one
+organization named after the instance creator, `is_provisional = true`, editable
+through `PATCH /organizations/{id}` — never an arbitrary or vendor-named tenant.
 
 ## 1. The hierarchy
 
@@ -167,7 +192,7 @@ active-org header, and an `active` membership in that org is required. Consequen
 | **DockerEndpoint** | `docker_hosts` (kept) | none (org via node) | **Not user-visible** — a node's docker *connection*, never surfaced as its own object (the "Docker hosts" nav page folds into Node detail; roadmap Phase 1/3). Agent-backed nodes create theirs automatically; TCP-socket nodes configure theirs manually. The Phase 1/2 migration backfills or deletes orphan rows and makes `server_id` NOT NULL (`backend/app/models/infra.py:126-128` — it is nullable with `ondelete SET NULL` today), so "org via node" is structurally true. |
 | **Container** | `containers` | none (org via node) | Inventory + stats + logs; heartbeat upsert with savepoint race handling. |
 | **ServerCredential** | `server_credentials` | none (org via node) | Fernet-encrypted SSH credentials; basis for future SSH-based ops. |
-| **Operation** | `operations` (new) | org_id, node_id, type (whitelist), params JSONB, status, requested_by_id, result, timestamps | The remote-ops primitive: agent PULLS ops; never a push tunnel. Types in v1: container lifecycle, log tail, nginx render/apply/reload. Every op is permission-gated and audited. Spec: [node-agent-architecture.md](node-agent-architecture.md). |
+| **Operation** | `operations` (shipped 2026-10-04, migration `e7c4a2b9d1f3`) | org_id, node_id, type (whitelist), params JSONB, status, requested_by_id, result, attempts, claimed_at, expires_at, timestamps | The remote-ops primitive: agent PULLS ops; never a push tunnel. RLS-covered like every tenant table. **Whitelisted and shipped:** `container.start/stop/restart/remove`, `logs.tail` — each reusing an existing codename. **Not shipped:** nginx render/apply/reload and the reserved secret/cert types, and no executing agent yet (the delivery path is node-agent-architecture.md §5's open question). Every op is permission-gated and audited. Spec: [node-agent-architecture.md](node-agent-architecture.md). |
 
 An **Operation is a single whitelisted action on one node**; a **Deployment is the
 multi-step delivery run** that issues Operations (Phase 6a). One word each, no

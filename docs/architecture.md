@@ -44,8 +44,22 @@ by a session-scoped query guard (`with_loader_criteria`) rather than scattered
 checks; the active org is chosen per request via `X-Org-Id` — the JWT carries
 identity, not tenancy.
 
+**The tenant foundation is shipped** (Phase 1, 2026-09-24). `organizations` +
+`memberships` exist, every tenant table carries `org_id`, the session guard
+refuses scope-less DML and Core statements instead of narrowing them silently,
+and PostgreSQL row-level security is live behind a separate `nexusops_app` role
+(`USING` + `WITH CHECK`, GUC re-issued per transaction) — three independent nets
+(`multi-tenancy.md` §0). The consequences a reader of this document should expect:
+requests must carry `X-Org-Id`; the user directory and session listing are bounded
+by membership rather than by an `org_id` column; WebSocket sockets are bound to one
+organization and cross-organization frames are dropped; workers claim a row, resolve
+its organization, then act inside it. **Shipped since:** the `server.*` → `node.*`
+rename and the `Server` → `Node` surface naming (API paths `/nodes`, with a
+schema-hidden `/servers` alias). **Not yet shipped:** every later-phase entity in
+the companion specs.
+
 **Naming.** The existing `Server` entity is exposed as **Node** (API paths
-`/nodes`, codenames `server.*` → `node.*`); the `servers` table keeps its name
+`/nodes`, codenames `node.*`); the `servers` table keeps its name
 until a later cleanup phase. **Environment** is promoted from application scope
 to project scope ("Ymart → Production") — the one structural delivery change.
 **DockerEndpoint** (today `DockerHost`) stays a separate row — it models a
@@ -54,8 +68,10 @@ to project scope ("Ymart → Production") — the one structural delivery change
 **Explicitly out of scope** (protects the boundary): Kubernetes, CI, a log
 platform at scale, and arbitrary remote shell (platform-vision.md §2.1).
 
-Companion specs (proposals for review — design targets, not shipped behavior;
-the rest of this document describes shipped behavior unless marked *target*):
+Companion specs (design targets — the rest of this document describes shipped
+behavior unless marked *target*; `multi-tenancy.md` and the tenant half of
+`domain-model.md`/`authorization.md` are now implemented, the rest of each is
+still design):
 
 | Doc | Covers |
 |---|---|
@@ -304,7 +320,7 @@ Entity status against the target model:
 | Entity | Table | Status | Target change |
 |---|---|---|---|
 | Organization / Membership | `organizations` / `memberships` | new | tenant root; user↔org via Membership with role + status |
-| Node | `servers` (kept) | existing, renamed at surface | + `org_id`, capabilities + facts; codenames `server.*` → `node.*` |
+| Node | `servers` (kept) | existing, renamed at surface | + `org_id`, capabilities + facts; codenames `node.*` (renamed from `server.*`) |
 | DockerEndpoint | `docker_hosts` (kept) | existing | exposed as part of Node; 0..1 per node |
 | Environment | `deployment_environments` | **promoted** | `application_id` → `project_id`; dev/staging/prod type; node binding |
 | Domain / Route / Certificate | `domains` / `routes` / `certificates` | new | DNS-verified domains; hostname+path routes; ACME certs |
@@ -361,8 +377,7 @@ Three credential families coexist:
 1. **Users** — Argon2id password (`backend/app/core/security.py`,
    `PasswordHasher` defaults) + short-lived JWT access token + opaque refresh
    token.
-2. **API keys** — `nxo_...` opaque keys for machine clients; only the SHA-256
-   hash is stored, with JSONB scope patterns (e.g. `server.*`). *Target:* keys
+2. **API keys** — `nxo_...` opaque keys for machine clients; only the SHA-256    hash is stored, with JSONB scope patterns (e.g. `node.*`). *Target:* keys
    bind to one Organization (domain-model.md §2.1).
 3. **Agent tokens** — `nxa_...` per-server enrollment tokens, also
    hash-at-rest, resolved by `X-Agent-Token` in `backend/app/api/v1/agent.py`.
@@ -457,8 +472,9 @@ sessions, so the same code would run in a dedicated process.
 **Protocol** (JSON frames): `{action: auth | auth_apikey | subscribe |
 unsubscribe | ping}`, replies `subscribed/unsubscribed/event/error/pong`.
 
-1. Client connects; the hub checks `Origin` against the CORS allowlist
-   (mismatch → close `4403`).
+1. Client connects; the hub checks `Origin` against the CORS allowlist **or the
+   request's own `Host`** (same-origin, compared by netloc, so a browser on a
+   non-default port counts; a mismatch closes `4403`).
 2. Client must send within 10 s either
    `{"action":"auth","token":"<jwt>"}` or
    `{"action":"auth_apikey","key":"nxo_..."}`. Auth mirrors the HTTP path:
@@ -475,7 +491,7 @@ unsubscribe | ping}`, replies `subscribed/unsubscribed/event/error/pong`.
 |---|---|---|---|
 | `global` | — | `event.read` | `nx:events` |
 | `incidents` | — | `monitor.read` | `nx:events` (only `INCIDENT_*`/`MONITOR_*` types) |
-| `server-metrics` | `server_id` | `metric.read` + `server.read` | `nx:metrics:<server_id>` |
+| `server-metrics` | `server_id` | `metric.read` + `node.read` | `nx:metrics:<server_id>` |
 | `container-logs` | `container_id` | `container.logs` | `nx:logs:<container_id>` |
 | `deployment-logs` | `deployment_id` | `deployment.read` | `nx:deploy:<deployment_id>` |
 
@@ -550,11 +566,18 @@ the engine then queues a fresh deployment of that old version with
 `trigger=ROLLBACK`, `is_rollback=true` and `rollback_of_id` set. History
 therefore stays append-only — nothing is re-run in place, and the rollback
 itself has a number, logs and steps like any other deployment. Environment
-variables resolve `${secret:KEY}` references at execution time on the worker —
-after the row is claimed and marked `RUNNING`, `_resolve_secrets` runs inside
-`_run` (`deployment_engine.py:328`); queue time only plans and persists the
-`DeploymentStep` rows (project-scoped `Secret` beats global; see §12 for the
-honesty caveat).
+variables resolve `${secret:KEY}` references at execution time on the worker, in the **engine-owned
+`RESOLVE_CONFIG` step** that `queue_deployment` plans ahead of every runner step.
+`_run_config_resolution` executes it (`deployment_engine.py`) — a runner refuses
+the step (`ENGINE_STEPS`), so it can never be dispatched and silently "pass".
+Resolution is **fail-closed**: a reference naming no row, or one this
+`ENCRYPTION_KEY` cannot decrypt, marks the step FAILED and the deployment
+FAILED through the standard `_finalize_failed` path (remaining steps `SKIPPED`,
+`failure_reason` = `Step RESOLVE_CONFIG failed: … missing: KEY`), with an audited
+`secret.resolve_failed` row naming the keys; success writes one `secret.resolve`
+audit row per reference (key name + version, never a value) and an output line
+on the step. Project-scoped `Secret` beats global. See §13 for the honest caveat
+about who consumes the resolved values.
 
 ## 9. RBAC registry
 
@@ -562,27 +585,27 @@ Authorization is data, not code paths. `backend/app/core/permissions.py`
 defines:
 
 - `PERMISSIONS` — a tuple of 30 `PermissionSpec(codename, group, description)`
-  entries across eight groups (Access Control, Servers, Containers, Delivery,
+  entries across eight groups (Access Control, Nodes, Containers, Delivery,
   Monitoring, Notifications, Observability, Secrets), e.g.
-  `server.update`, `container.lifecycle`, `deployment.rollback`,
+  `node.update`, `container.lifecycle`, `deployment.rollback`,
   `secret.write`. The registry is seeded into the `permissions` table.
-  *Target (Phase 1):* rename `server.*` → `node.*` (`credential.write` →
-  `node.credential.write`) and add `member.*`, `org.manage`, `billing.manage`,
-  `domain.*`, `certificate.*`, `backup.*`, `operation.read` — deliberately
-  **no `node.execute`**: operations are whitelisted types mapped to existing
-  codenames (authorization.md §2).
+  *Shipped (Phase 1):* the `server.*` → `node.*` rename (`credential.write` →
+  `node.credential.write`). *Still to add:* `member.*`, `org.manage`,
+  `billing.manage`, `domain.*`, `certificate.*`, `backup.*`, `operation.read` —
+  deliberately **no `node.execute`**: operations are whitelisted types mapped to
+  existing codenames (authorization.md §2).
 - `ROLE_MATRIX` — seed grants for the five built-in roles:
 
 | Role | Grants |
 |---|---|
 | `Owner` | `*` (wildcard — implies every permission, including `role.manage`) |
 | `Admin` | Operator's set plus `user.manage`, `role.read`, `project.manage`, `secret.write` |
-| `Operator` (renamed `DevOps` in the Phase 1 seed migration) | full fleet lifecycle (`server.*` writes, `credential.write`), containers, delivery (deploy/cancel/rollback), monitoring + incident action, channels, observability reads, `secret.read`; **no** `user.manage`, `role.read`/`role.manage`, `secret.write` |
-| `Developer` | read-mostly, plus `deployment.create`/`cancel` and `monitor.manage`/`incident.action`; **no** `server.*` writes, `credential.write`, `container.lifecycle`/`remove`, `secret.write`, `channel.manage` |
-| `Viewer` | read-only codenames (`*.read` across servers, containers, delivery, monitoring, channels, observability) plus `container.logs` |
+| `Operator` (to be renamed `DevOps`; role rename not yet shipped) | full fleet lifecycle (`node.*` writes, `node.credential.write`), containers, delivery (deploy/cancel/rollback), monitoring + incident action, channels, observability reads, `secret.read`; **no** `user.manage`, `role.read`/`role.manage`, `secret.write` |
+| `Developer` | read-mostly, plus `deployment.create`/`cancel` and `monitor.manage`/`incident.action`; **no** `node.*` writes, `node.credential.write`, `container.lifecycle`/`remove`, `secret.write`, `channel.manage` |
+| `Viewer` | read-only codenames (`*.read` across nodes, containers, delivery, monitoring, channels, observability) plus `container.logs` |
 
 - `scope_matches` — API-key scope patterns: exact match, `*`, or prefix
-  wildcards like `server.*`.
+  wildcards like `node.*`.
 
 Checks are centralized: `require_permission("codename")`
 (`backend/app/api/deps.py`) is a dependency factory used by routers; it
@@ -680,7 +703,7 @@ tooling**; the phases that make them real are in
 
 | Capability | Code | Real parts | Simulated parts | Becomes real |
 |---|---|---|---|---|
-| Deployments | `providers/deployment_runner.py:107` (`SimulatedDeploymentRunner`) | queueing, race-safe numbering, streamed logs, cancel, rollback, alerting, audit | the 7 steps (`PULL_REPO → … → FINALIZE`) fabricate git/docker output with sleep pacing; no shell command, image or container ever exists | Phase 6 (6a image, 6b git) |
+| Deployments | `providers/deployment_runner.py:107` (`SimulatedDeploymentRunner`) | queueing, race-safe numbering, streamed logs, cancel, rollback, alerting, audit, and the engine-owned `RESOLVE_CONFIG` step (real, fail-closed secret resolution) | the 7 runner steps (`PULL_REPO → … → FINALIZE`) fabricate git/docker output with sleep pacing; no shell command, image or container ever exists | Phase 6 (6a image, 6b git) |
 | Docker inventory for `sim://` hosts | `providers/docker_sim.py` (`SimulatedDockerProvider`) | full provider protocol surface | deterministic SHA-256-seeded images/volumes/networks; logs replay stored rows; selected for `sim://` endpoints or `SIMULATION_MODE=true` (`docker_factory.py:26-40`) | demo/CI tooling stays |
 | Monitor checks for `sim://` URLs | `providers/monitor_transport.py:204-246` (`SimulatedTransport`) | outcome classification, incident pipeline | deterministic sha256(monitor.id + interval bucket); URL keywords: `always-down` always fails, `flaky` fails 30%, `slow` adds 1.5–2.5 s | demo tooling stays |
 
@@ -705,10 +728,13 @@ Documented rather than hidden:
 
 - **Deployments are simulated** ([§12](#12-simulated-capabilities-honesty-box));
   no real code ships anywhere in v1.
-- **Secret resolution degrades silently**: unresolved or undecryptable
-  `${secret:KEY}` refs resolve to `""` with a log warning, so a deploy proceeds
-  without credentials; only the simulated runner consumes resolved secrets at
-  all (`secret_service.py:277-325`). Phase 0 makes this fail-closed.
+- **Only the simulated runner consumes resolved secrets**: resolution itself is
+  real, audited and fail-closed (`secret_service.resolve_secrets_for_environment`
+  raises `SecretResolutionError`; the engine fails the deployment before its
+  first step), but the resolved values reach `RunContext.secrets`, which only
+  `SimulatedDeploymentRunner` reads. Nothing is delivered to a node yet — real
+  delivery rides the agent Operations framework (Phase 6a;
+  platform-security-model.md H2).
 - **SSRF guard DNS-rebinding window** (`backend/app/core/ssrf.py`): URLs are
   validated (scheme allowlist, no userinfo, all resolved addresses public,
   fail-closed on unresolvable hosts), but validation and the actual request
@@ -764,6 +790,11 @@ Documented rather than hidden:
 - API assembly: `backend/app/main.py`, `backend/app/api/v1/`
 - Models/migrations: `backend/app/models/`, `backend/alembic/versions/`
 - Auth: `backend/app/services/auth_service.py`, `backend/app/api/v1/auth.py`, `backend/app/core/security.py`, `frontend/src/api/client.ts`
+- Tenancy: `backend/app/core/tenancy.py` (scopes, guard, GUC), `backend/app/models/tenancy.py`,
+  `backend/app/api/deps.py` (`X-Org-Id` resolution), `backend/app/ws/hub.py` (socket binding),
+  `backend/app/tasks/_util.py` (worker scopes),
+  `backend/tests/integration/test_tenant_isolation.py`, and the RLS roles/policies in
+  `backend/alembic/versions/20260922_1000-a3f1c8d24b6e_add_tenancy_foundation.py`
 - WebSocket: `backend/app/ws/hub.py`, `frontend/src/hooks/useEventStream.ts`
 - Deployments: `backend/app/services/deployment_engine.py`, `backend/app/providers/deployment_runner.py`
 - Providers/factory: `backend/app/providers/docker_factory.py`, `monitor_transport.py`, `docker_sim.py`
@@ -783,3 +814,15 @@ fixed-window limiter; updated the sweep/log-collection mechanics; ER updated
 to the org-scoped target model (existing/new/promoted). Sections describing
 the org model, Domain/Route/Certificate, Operations and grants are design
 specs — proposals for review, not shipped behavior.*
+
+*Doc version 2.2 — 2026-09-24 (Phase 1, multi-tenancy.md §0). §1 now records the
+shipped tenant foundation: `organizations`/`memberships`, `org_id` on every tenant
+table, the session guard + stamping listener, PostgreSQL RLS behind `nexusops_app`
+with `USING`/`WITH CHECK` policies, membership-bounded user/session surfaces,
+organization-bound WebSocket sockets and worker org resolution. §8 updated (Phase 0):
+secret resolution is fail-closed and audited per reference, executed as the
+engine-owned `RESOLVE_CONFIG` step planned ahead of every runner step; §13's
+"secret resolution degrades silently" limitation was narrowed to "only the
+simulated runner consumes resolved values". The `server.*` → `node.*` rename
+**shipped** (`multi-tenancy.md` §0 delta 9); the later-phase entities
+(Operation/Domain/Certificate/Backup/Grant) are **not** shipped.*

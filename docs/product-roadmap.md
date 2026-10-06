@@ -54,11 +54,12 @@ Four-way classification, grounded in the subsystem analysis (evidence in
 **Refactors (existing code, changed mechanics):**
 
 - Deployment engine: the runner is hard-instantiated at two sites
-  (`backend/app/services/deployment/engine.py` ~194 and ~345) → a runner
-  registry with DI; `AgentDeploymentRunner` added beside the simulated one.
+  (`backend/app/services/deployment_engine.py`, queue time and execute time) → a
+  runner registry with DI; `AgentDeploymentRunner` added beside the simulated one.
 - `resolve_auth`: gains active-org validation (`core/tenancy.py` guard).
 - Secret resolution: silent-degrade-to-empty → **fail-closed** + audit event
-  at resolution time.
+  at resolution time. *(Shipped in Phase 0 — §3; the explicit persisted
+  `RESOLVE_CONFIG` step remains Phase 2.)*
 - Rate limiter: IP-only dimension → org+IP (NAT agent fleets share one bucket
   today).
 - `Server.name`: platform-global unique → per-org.
@@ -73,8 +74,10 @@ Four-way classification, grounded in the subsystem analysis (evidence in
   via its env var) → org-scoped `enrollment_tokens` rows with lifecycle
   (single-use, expiry, revocation).
 - `--allow-insecure-transport` (plain-HTTP agent option) — removed.
-- `server.*` permission codenames → `node.*` (one migration).
-- `/v1/servers` paths → `/v1/nodes` (alias in Phase 1, removal in cleanup).
+- `server.*` permission codenames → `node.*` (one migration — **shipped**,
+  `20260923_1000-c4e2a1f7b9d3`).
+- `/v1/servers` paths → `/v1/nodes` (**shipped**; `/v1/servers` kept as a schema-
+  hidden alias in Phase 1, removal in cleanup).
 - Platform-global `Server.name` uniqueness → per-org.
 - The `-broken` health-check demo hook → real healthcheck gating in Phase 6a
   (demo-labeled until then).
@@ -86,9 +89,9 @@ Four-way classification, grounded in the subsystem analysis (evidence in
 | # | Phase | Ships | Depends on |
 |---|---|---|---|
 | 0 | Truth pass & hardening | docs fixed against code; fail-closed secret resolution; agent backoff | — |
-| 1 | Tenancy foundation | orgs/memberships/roles, org_id backfill, X-Org-Id + session guard, node rename, IDOR suite green | 0 |
+| 1 | Tenancy foundation | orgs/memberships/roles, org_id backfill, X-Org-Id + session guard, node rename, IDOR suite green, **operations control plane + fail-closed capability gate (CAS state machine; per-node capability advertisement + delivery land in phase 3)** | 0 |
 | 2 | Projects & environments | env promotion to project scope, SecretVersion, layered secret scope | 1 |
-| 3 | Nodes & agent v2 | capabilities+facts, enrollment v2, Operations framework, HTTPS-only agent | 1 |
+| 3 | Nodes & agent v2 | capabilities+facts, enrollment v2, **per-node capability advertisement + operations delivery** (the control plane and the fail-closed gate are already in), HTTPS-only agent | 1 |
 | 4 | Domains & routes | Domain/Route entities, DNS verification, NginxProvider, apply pipeline, polymorphic monitors | 3 |
 | 5 | Certificates | ACME DNS-01, DNSProvider (Cloudflare first), renewal scan, encrypted delivery, TLS-expiry monitors | 4 |
 | 6 | Real deployments | 6a image-based via agent ops; 6b git→build on node | 3 (6a), 3+4 (6b) |
@@ -98,42 +101,50 @@ Four-way classification, grounded in the subsystem analysis (evidence in
 
 ## 3. Phase 0 — Truth pass & hardening
 
-**Why first:** the docs contradict shipped behavior (Secure-cookie descriptions,
-role counts, limiter algorithm), and three correctness bugs are known: secret
-resolution silently degrades to empty on failure, a revoked agent hot-loops
-401→exit(1) every ~10s, and the agent install hint emits `NEXUSOPS_URL` where the
-agent process reads `NEXUSOPS_SERVER` (`backend/app/api/v1/servers.py:188-192`) —
-a fresh install that never connects until the env var is corrected by hand.
-Cheap, de-risks everything after; no schema change.
+**Status: DELIVERED** (2026-09-22). No schema change, as planned. What landed:
 
-- **Docs:** fix the four Secure-cookie descriptions against
-  `backend/app/api/v1/auth.py:27-43`; role counts (5, not 4); fixed-window
-  limiter (not token bucket); disclose simulated deployments/sim:// in README +
-  architecture.md.
-- **API:** no new routes. Deployment trigger fails fast on secret-resolution
-  errors instead of deploying with empty values.
-- **Frontend:** honesty labels — a "Simulated" chip on deploy/run views until
-  Phase 6.
-- **Security:** fail-closed resolution + audit event (no values) at resolution
-  time; agent auth-failure backoff instead of hot-loop exit.
-- **Testing:** unit tests for fail-closed resolution; agent backoff test.
+| Item | Where |
+|---|---|
+| Fail-closed secret resolution + resolution audit | `secret_service.resolve_secrets_for_environment` raises `SecretResolutionError`; the engine-owned `RESOLVE_CONFIG` step (planned first, executed by the engine, refused by any runner) fails the deployment through the standard `_finalize_failed` path, with `secret.resolve_failed` (DENIED) naming the keys and one `secret.resolve` row per resolved key+version |
+| Agent auth-failure backoff (no 401 hot-loop) | `agent/nexusops_agent.py` parks in `REVOKED_POLL_SECONDS` (900) instead of `exit(1)`; `--once` still fails loudly |
+| Install-hint env-var bug | `backend/app/api/v1/servers.py` now says `--server/--token` (or `NEXUSOPS_SERVER`/`NEXUSOPS_TOKEN`) instead of the never-read `NEXUSOPS_URL` |
+| Simulated-deployment honesty chip | `frontend/src/components/SimulatedChip.tsx`, rendered on the deployment list + detail views, gated on the runtime `/meta` flag |
+| Docs truth pass | Secure-cookie descriptions (api/deployment/development/security/troubleshooting), role count (5), fixed-window limiter (not token bucket), dead module paths in `security.md`, `make dev` `dev.conf` claim, agent 401 behavior; simulated deployments / `sim://` disclosed in README + architecture §12 |
+| Tests | 5 agent-backoff unit tests; fail-closed resolution + audit assertions in `test_secrets.py` / `test_deployments_simulated.py` |
+
+**Why first (as planned):** the docs contradicted shipped behavior (Secure-cookie
+descriptions, role counts, limiter algorithm), and three correctness bugs were
+known. Cheap, de-risks everything after.
+
+Delivered as scoped: no new routes; the deployment run fails fast on
+secret-resolution errors instead of deploying with empty values; the honesty
+chip is gated on the runtime `/meta` flag so a real instance never shows it.
 
 **The hardening list** (kept consistent with platform-security-model.md; items
-land in their natural phase — column 3):
+land in their natural phase — column 3). ✅ = delivered in Phase 0:
 
 | # | Known issue | Lands in |
 |---|---|---|
-| 1 | Silent secret-resolution degradation (empty dict on failure) | Phase 0 |
-| 2 | Agent 401→exit(1) hot-loop on revocation | Phase 0 (backoff), Phase 3 (full revocation semantics) |
+| 1 ✅ | Silent secret-resolution degradation (empty dict on failure) | Phase 0 |
+| 2 ✅ | Agent 401→exit(1) hot-loop on revocation | Phase 0 (backoff), Phase 3 (full revocation semantics) |
 | 3 | Agent plain-HTTP option (`--allow-insecure-transport`) | Phase 3 (HTTPS-only) |
-| 4 | WS global channel exposure | Phase 1 (org-prefixed channels) |
-| 5 | Rate limits keyed by IP only (NAT fleets share a bucket) | Phase 1 (org+IP dimension) |
-| 6 | `Server.name` platform-global uniqueness | Phase 1 (per-org) |
-| 7 | Audit rows lacking org / request-id | Phase 1 |
-| 8 | Secret resolution lacking per-user authorization on the engine path | Phase 0 (fail-closed + audit), Phase 2 (deploy-chain authorization) |
-| 9 | Install hint emits `NEXUSOPS_URL`; the agent reads `NEXUSOPS_SERVER` (servers.py:188-192) — fresh installs never connect | Phase 0 |
+| 4 ✅ | WS global channel exposure | Phase 1 — event frames carry their organization and the hub drops cross-org frames (not channel-prefixed; multi-tenancy.md §0 delta 2) |
+| 5 ⏳ | Rate limits keyed by IP only (NAT fleets share a bucket) | moved to Phase 2 (org+IP dimension) |
+| 6 ✅ | `Server.name` platform-global uniqueness | Phase 1 — `uq_servers_org_name` (and the same for tags/projects) |
+| 7 ✅ | Audit rows lacking org / request-id | Phase 1 — `audit_logs.org_id`, tenant-scoped reads, append-only trigger unchanged |
+| 8 ✅ (fail-closed + audit) / ⏳ (authorization) | Secret resolution lacking per-user authorization on the engine path | Phase 0 (fail-closed + audit), Phase 2 (deploy-chain authorization) |
+| 9 ✅ | Install hint emitted `NEXUSOPS_URL`; the agent reads `NEXUSOPS_SERVER` — fresh installs never connected | Phase 0 |
 
-**Exit:** docs spot-check clean; fail-closed + backoff tested.
+**Exit criteria met:** docs spot-check clean; fail-closed resolution and agent
+backoff covered by tests (403 backend / 164 frontend green).
+
+One scoping decision worth recording: the plan said the *trigger* would fail
+fast, but resolution runs on the worker at execution time. Phase 0 therefore
+fails the deployment at its **first step** — the engine-owned `RESOLVE_CONFIG`
+step, planned ahead of every runner step (secrets-architecture.md §5) — rather
+than at `POST /deployments`. A queue-time *preflight* (so the API rejects an
+unresolvable config before queuing) is still open, and is where the remaining
+half of hardening item 8 (deploy-chain authorization) belongs.
 
 ## 4. Phase 1 — Tenancy foundation
 
@@ -145,20 +156,55 @@ enforcement must exist before resources multiply. Full spec:
   template); org_id backfill with `server_default` → NOT NULL on projects,
   servers, secrets, monitors, incidents, notification_channels, api_keys,
   deployments (denormalized), audit_logs (+`request_id`), system_events.
-- **API:** `X-Org-Id` validation in `resolve_auth` (optional while single-org);
+- **API:** `X-Org-Id` validation in `resolve_auth` (always required — shipped);
   scoped helpers; codename rename `server.*`→`node.*` (registry, seeded rows,
-  ROLE_MATRIX, stored key scopes, code, UI strings); `/v1/nodes` +
-  deprecated `/v1/servers` alias; ApiKey org binding.
+  ROLE_MATRIX, stored key scopes, code, UI strings — shipped); `/v1/nodes` +
+  deprecated `/v1/servers` alias (shipped); ApiKey org binding.
 - **Frontend:** single-org UX unchanged day one; org switcher appears with the
   second org.
 - **Security:** `core/tenancy.py` session guard (`with_loader_criteria`) +
   scoped helpers; IDOR suite
-  (`backend/tests/integration/test_tenancy_isolation.py`); org+IP limiter
+  (`backend/tests/integration/test_tenant_isolation.py`); org+IP limiter
   dimension.
 - **Testing:** parametrized cross-tenant suite over every org-scoped listing
   and detail route; two-org fixtures extend the existing RBAC fixtures.
 - **Exit:** IDOR suite green; one-org backfill proven on production contabo in
   place; zero user-visible change beyond the rename.
+
+### Delivered (2026-09-24)
+
+Phase 1 shipped as specified, with the deltas recorded in `multi-tenancy.md` §0:
+
+- **DB/migration:** `20260922_1000-a3f1c8d24b6e_add_tenancy_foundation.py` —
+  `organizations` + `memberships`, `org_id` on every tenant table (indexed,
+  NOT NULL after a deterministic backfill), `roles.org_id`, `audit_logs.org_id`,
+  per-organization uniqueness for servers/tags/projects, the `agent_credentials`
+  routing table, the `nexusops_owner`/`nexusops_app` role split, row-level-security
+  policies with `USING` **and** `WITH CHECK`, and a trigger keeping `server_tags`
+  inside the tag's own organization.
+- **Backfill:** one organization per instance, named after the oldest user,
+  `is_provisional = true`, renameable via `PATCH /organizations/{id}` — never a
+  vendor-named or arbitrary tenant.
+- **API:** `X-Org-Id` **always** required for human callers (validated against active
+  memberships), API keys bound to their own organization, `/organizations` for
+  discovery, membership-scoped user directory and session listing/revocation.
+- **Enforcement:** session guard (`with_loader_criteria` for reads, refusal for
+  unscoped DML/Core), `before_flush` ownership stamping, PostgreSQL RLS behind the
+  app role, allowlisted `system_scope`, and organization-bound WS/Celery/Redis/agent
+  paths.
+- **Frontend:** org bootstrap from `GET /organizations`, persisted selection, org
+  requirement gate, and a switcher in the shell.
+- **Tests:** 24 cross-tenant isolation tests (IDOR by read/update/delete/search/
+  session/agent/operation, raw-SQL RLS probes as the app role, catalog coverage,
+  unscoped-access and identity-map tests, worker and Redis delivery), plus the
+  system-scope allowlist and WS-hub unit tests. 437 backend / 172 frontend, all green.
+
+The `server.*` → `node.*` rename and the `/v1/nodes` surface (with the
+`/v1/servers` compatibility alias) landed after this date as the phase's last
+follow-up (migration `20260923_1000-c4e2a1f7b9d3`); see `multi-tenancy.md` §0
+delta 9. **Still open from this phase:** hardening item 5 (org+IP rate limiting)
+moved to Phase 2, and the queue-time deployment preflight (with deploy-chain
+authorization) remains open from Phase 0.
 
 ## 5. Phase 2 — Projects & environments
 
@@ -265,7 +311,7 @@ registered runner among two. Spec: [deployment-architecture.md](deployment-archi
   stream over the existing Redis deployment channel; per-step timeouts +
   cancel.
 - **Refactor:** runner registry replaces the two hard-instantiation sites in
-  `backend/app/services/deployment/engine.py`; `AgentDeploymentRunner`
+  `backend/app/services/deployment_engine.py`; `AgentDeploymentRunner`
   implements the existing protocol, dispatching steps as agent operations and
   streaming StepLines back; `SimulatedDeploymentRunner` stays, demo/CI-labeled.
 - **6a steps:** resolve → pull image → stop old → run new (env from Phase 2

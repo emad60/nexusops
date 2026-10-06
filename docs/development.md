@@ -82,7 +82,8 @@ shows up immediately, not on the first request. Copy `.env.example` and adjust.
 
 | Variable | Why |
 | --- | --- |
-| `POSTGRES_PASSWORD` | Compose fails fast with `set POSTGRES_PASSWORD in .env` if unset. |
+| `POSTGRES_PASSWORD` | Compose fails fast with `set POSTGRES_PASSWORD in .env` if unset. Owner role: owns the schema, runs migrations. |
+| `POSTGRES_APP_USER`, `POSTGRES_APP_PASSWORD` | Runtime role (`nexusops_app`, `NOSUPERUSER NOBYPASSRLS`) that serves request traffic with row-level security enforced. The tenancy migration provisions the role from these values, so set them before the first `make up`. With them unset the app assembles an owner DSN and refuses to start (`rls_enforced`). The test suite uses the same split via `TEST_APP_ROLE`/`TEST_APP_PASSWORD`. |
 | `JWT_SECRET` | Must be ≥ 32 chars (validated at startup). `openssl rand -hex 32`. |
 | `ENCRYPTION_KEY` | Must be a valid Fernet key (validated at startup). Encrypts secret values at rest — **rotating it permanently destroys every stored secret value**. `./scripts/generate_secrets.sh` writes both keys and refuses to overwrite existing real values without `--force` (it prints the blast radius first). |
 
@@ -90,8 +91,8 @@ shows up immediately, not on the first request. Copy `.env.example` and adjust.
 
 | Group | Variables | Effect |
 | --- | --- | --- |
-| Core | `ENVIRONMENT`, `LOG_LEVEL` | `ENVIRONMENT=production` disables OpenAPI/Swagger, forces `Secure` auth cookies, and trims error detail (see `app/main.py` `docs_enabled`, `Settings.cookies_secure`). `LOG_LEVEL`: TRACE…CRITICAL. |
-| Database | `POSTGRES_*`, `DATABASE_URL`, `DB_POOL_SIZE`, `DB_MAX_OVERFLOW` | If `DATABASE_URL` is unset it is assembled from the `POSTGRES_*` parts. Must be a `postgresql+psycopg://` (psycopg3) URL. |
+| Core | `ENVIRONMENT`, `LOG_LEVEL` | `ENVIRONMENT=production` disables OpenAPI/Swagger and trims error detail (see `app/main.py` `docs_enabled`). It does **not** set the refresh cookie's `Secure` flag — that follows the request transport (`X-Forwarded-Proto`, `app/api/v1/auth.py` `_transport_is_https`), so it appears by itself behind TLS and never breaks plain-HTTP access. `LOG_LEVEL`: TRACE…CRITICAL. |
+| Database | `POSTGRES_*`, `DATABASE_URL`, `DB_POOL_SIZE`, `DB_MAX_OVERFLOW` | If `DATABASE_URL` is unset it is assembled from the `POSTGRES_*` parts (and from `POSTGRES_APP_USER`/`POSTGRES_APP_PASSWORD` for the runtime). Must be a `postgresql+psycopg://` (psycopg3) URL. Two roles are in play: the owner migrates, `nexusops_app` serves traffic under RLS. |
 | Redis | `REDIS_URL` | Broker, result backend, cache, and WS pub/sub transport. |
 | Auth | `ACCESS_TOKEN_TTL_MINUTES` (15), `REFRESH_TOKEN_TTL_DAYS` (14), `CORS_ORIGINS`, `LOGIN_MAX_ATTEMPTS` (5), `LOGIN_LOCKOUT_SECONDS` (900) | Short JWT access tokens held in SPA memory; opaque refresh tokens in an HttpOnly SameSite=Strict cookie. `CORS_ORIGINS` is a comma list, no trailing slash. |
 | Simulation | `SIMULATION_MODE` | `true` (the `.env.example` default) makes everything laptop-runnable: simulated agents emit heartbeats and deterministic sine-wave metrics, Docker containers and deployments are simulated, monitors probe simulated targets. The UI shows a **SIMULATION MODE** badge while active. |
@@ -167,14 +168,16 @@ not start cleanly.
 
 - The overlay builds the frontend with `target: develop`, but
   `frontend/Dockerfile` defines only `build` and `runtime` stages — the `develop`
-  target does not exist, so the build fails.
-- The overlay bind-mounts `./nginx/dev.conf` over the nginx template, but `nginx/`
-  contains only `default.conf.template` and a `Dockerfile`. On Linux, Docker
-  materializes the missing source as an empty directory, leaving nginx without a
-  usable config (also noted in `docs/troubleshooting.md` §13).
+  target does not exist, so the build fails. **This is the only remaining
+  blocker.**
+- ~~The overlay bind-mounts `./nginx/dev.conf` over the nginx template, but
+  `nginx/` contains only `default.conf.template` and a `Dockerfile`.~~ Fixed: the
+  overlay mounts the real `./nginx/default.conf.template` and only swaps
+  `WEB_UPSTREAM` to `frontend:5173`, so the dev edge and the production edge use
+  one template and cannot drift.
 
-Until those two land, use `make up` and run Vite on the host instead — it is wired
-for exactly that:
+Until the `develop` stage lands, use `make up` and run Vite on the host instead —
+it is wired for exactly that:
 
 ```bash
 cd frontend && npm run dev    # vite on :5173, strictPort
@@ -225,8 +228,11 @@ make test                 # unit backend + frontend vitest — no services neede
   `asyncio_mode = "auto"`, `--strict-markers`, and the single custom marker
   `integration: requires PostgreSQL + Redis`. `DeprecationWarning` raised from
   `app.*` code is an error — fix the source, do not filter it.
-- The suite collects roughly 350 test cases today (unit + integration; integration
-  tests are parametrized, so a handful of functions cover many scenarios).
+- The suite collects 437 test cases today (unit + integration; integration tests are
+  parametrized, so a handful of functions cover many scenarios). 22 of them are the
+  cross-tenant isolation gate in `tests/integration/test_tenant_isolation.py`, which
+  connects to Postgres as the RLS-enforced application role to probe the policies
+  without the ORM.
 
 > **Gotcha:** the Makefile builds `DATABASE_URL` from the shell environment
 > (`$POSTGRES_PASSWORD`, default `change-me-postgres`) — it does **not** read your
@@ -334,7 +340,10 @@ always hand-written) → `make migrate`. The API container re-applies
 `alembic upgrade head` on every start via `backend/docker-entrypoint.sh`, so a
 fresh `docker compose up` is always at head. Check drift with
 `alembic current` / `alembic heads` (see `docs/troubleshooting.md` §7 for the
-container-side variant).
+container-side variant), and rely on
+`backend/tests/integration/test_migration_drift.py`: it runs Alembic's
+`compare_metadata` against the migrated test database and fails on any diff, so a
+model change without a migration is caught by the suite itself.
 
 The single initial revision is
 `backend/alembic/versions/20260823_2225-b5866787bde4_initial_schema.py`.
@@ -480,9 +489,9 @@ the nginx edge log — the edge sets long `proxy_read_timeout` (3600 s) and
 
 ## 10. Known limitations (read before you file a bug)
 
-- **`make dev` does not currently start cleanly** — missing `develop` stage in
-  `frontend/Dockerfile` and missing `nginx/dev.conf` (section 4.2). Use
-  `make up` + host `npm run dev`.
+- **`make dev` does not currently start cleanly** — the `develop` stage is
+  missing from `frontend/Dockerfile` (section 4.2). Use `make up` + host
+  `npm run dev`.
 - **Seed credentials differ by environment** — deterministic
   `admin@nexusops.example.com / nexusops-admin` only in `ENVIRONMENT=test`; other
   non-production seeds generate and print a one-time password (section 2).

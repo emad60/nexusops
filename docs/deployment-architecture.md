@@ -33,9 +33,9 @@ only real I/O is `asyncio.sleep` pacing and `token_hex` digests
    string ends in `-broken` (`deployment_runner.py:223-239`), an explicit E2E/demo
    hook, not a real probe.
 2. **No DI — the runner is hard-instantiated at two sites.**
-   `deployment_engine.py:194` (queue time) and `deployment_engine.py:345`
-   (execute time) both call `SimulatedDeploymentRunner()` directly. Swapping in a
-   real runner requires engine edits, not just a new adapter.
+   `backend/app/services/deployment_engine.py` (queue time and execute time) both
+   call `SimulatedDeploymentRunner()` directly. Swapping in a real runner
+   requires engine edits, not just a new adapter.
 3. **`RunContext` cannot feed a real runner.** Its only fields are
    `project_name, application_name, environment_name, version, git_commit,
    server_name, secrets` (`deployment_runner.py:59-70`) — `server_name` is a display
@@ -46,12 +46,16 @@ only real I/O is `asyncio.sleep` pacing and `token_hex` digests
    (`models/delivery.py:53-54`), `Environment.server_id/healthcheck_path/config`
    (`models/delivery.py:78-84`). The engine builds `RunContext` at
    `deployment_engine.py:187-193` and `321-329` without any of it.
-4. **Secret resolution silently degrades to empty on failure.**
-   `deployment_engine.py:374-387` (`_resolve_secrets`) catches every exception and
-   returns `{}` with a warning; `secret_service.py:314-324` resolves missing or
-   undecryptable refs to `""` with a warning. A deploy then proceeds without its
-   required credentials. There is no audit event at resolution time, and only the
-   simulated runner ever consumes `ctx.secrets` (`deployment_runner.py:210`).
+4. ~~Secret resolution silently degrades to empty on failure.~~ **FIXED in
+   Phase 0 (fail-closed + audited).** `resolve_secrets_for_environment` now
+   raises `SecretResolutionError` instead of resolving to `""`, and the
+   engine-owned `RESOLVE_CONFIG` step (planned before `PULL_REPO`, executed by
+   the engine, refused by any runner) fails the deployment through the standard
+   `_finalize_failed` path — an audited `secret.resolve_failed` row naming the
+   keys, and one `secret.resolve` audit row per successfully resolved reference
+   (key + version only). **Still open:** only the simulated runner consumes
+   `ctx.secrets` (`deployment_runner.py:210`), so nothing reaches a node yet —
+   platform-security-model.md H2, wired in 6a.
 5. **Cancel is cooperative between steps only.** `cancel_requested` is polled at the
    top of the step loop (`deployment_engine.py:346-357`); an in-flight step cannot be
    interrupted and there is no per-step timeout — the only wall-clock enforcement is
@@ -127,7 +131,8 @@ what the healthcheck probes (§14.5). Per-project docker networks are DEFERRED.
 
 ## 4. Runner registry — the DI fix
 
-Replace the two hard-instantiation sites (`deployment_engine.py:194,345`) with a
+Replace the two hard-instantiation sites in
+`backend/app/services/deployment_engine.py` (queue time and execute time) with a
 registry selected by a **kind stored on the deployment row at queue time**, so the
 plan persisted at queue time and the runner used at execute time cannot diverge:
 
@@ -326,7 +331,7 @@ deployment). Rejection is the simplest safe rule and consistent with the engine'
 
 | # | Step | Op type | Failure semantics | Default timeout |
 |---|---|---|---|---|
-| 1 | RESOLVE_CONFIG | — (control plane) | unresolved/undecryptable secret → deploy FAILED (§8) | 60s |
+| 1 | RESOLVE_CONFIG | — (engine-owned, planned first) | unresolved/undecryptable secret → step FAILED, deploy FAILED (§8) | — |
 | 2 | PULL_IMAGE | `container.pull` | registry error → FAILED | 240s |
 | 3 | STOP_OLD | `container.stop` | missing old container → tolerated (first deploy) | 60s |
 | 4 | RUN_NEW | `container.run` | create/start failure → FAILED; old container already stopped → rollback advised | 120s |
@@ -385,7 +390,9 @@ Effective config = layered merge, **most specific wins**:
 
 ## 8. Secret-resolution hardening (fail-closed, audited)
 
-Replaces today's degrade-to-empty behavior (§1.1.4):
+**Status: the fail-closed policy below shipped in Phase 0.** The "Today" column
+is the pre-Phase-0 behavior, kept for context; layered scope, resolution-time
+authorization and node delivery are still Phase 2 / 6a work.
 
 | Condition | Today | Target |
 |---|---|---|

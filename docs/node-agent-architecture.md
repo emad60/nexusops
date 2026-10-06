@@ -32,7 +32,8 @@ the design:
 
 **Node = the existing `Server` entity**, renamed at the API/UI layer only. Table
 `servers` is kept to avoid FK churn (domain-model.md §2.3); codenames and paths
-rename `server.*` → `node.*` in one migration (authorization.md §2).
+were renamed `server.*` → `node.*` in one migration (authorization.md §2), so the
+API surface is `/nodes` (with a temporary `/servers` alias).
 
 ### 2.1 Current shape (real)
 
@@ -87,7 +88,7 @@ Known gap from findings: ensure_docker_host's select-then-insert lacks a
 
 | Stage | Today | Evidence |
 |---|---|---|
-| Enroll | User creates `Server` row (POST /servers), then `POST /servers/{id}/agent-token` issues a per-server `nxa_` token (`token_urlsafe(30)`, only the SHA-256 hash stored, raw shown once) handed to `install.sh` by hand | `backend/app/api/v1/servers.py:170-192`, `backend/app/core/security.py:103-110` |
+| Enroll | User creates `Server` row (POST /nodes), then `POST /nodes/{id}/agent-token` issues a per-server `nxa_` token (`token_urlsafe(30)`, only the SHA-256 hash stored, raw shown once) handed to `install.sh` by hand | `backend/app/api/v1/servers.py:170-192`, `backend/app/core/security.py:103-110` |
 | Install | `install.sh --server URL --token nxa_...` copies agent to `/usr/local/lib/nexusops-agent`, writes `/etc/default/nexusops-agent` at 0600 **before** the token is written | `agent/install.sh:12-41` |
 | First contact | `POST /agent/hello` once at startup; server sets `agent_enrolled_at`, overwrites static facts, returns `AgentHelloOut{name, heartbeat_interval_seconds, offline_after_seconds}` | `agent/nexusops_agent.py:446-461`, `server_service.py:267-294`, `backend/app/schemas/agent.py:24-43` |
 | Steady state | Heartbeat every negotiated interval (default 30s); exponential backoff `interval * 2^min(failures,4)` capped 300s on failures | `agent/nexusops_agent.py:462-490` |
@@ -266,6 +267,20 @@ negotiation governs cadence and fields, never capability.
 
 ## 5. The Operations framework
 
+> **Status (2026-10-04): the control plane is shipped; the delivery path is not.**
+> The `operations` table, the CAS state machine (claim / result / cancel / expiry),
+> the whitelist registry, the per-type permissions and the audit rows below are
+> implemented and covered by `tests/integration/test_operations.py` and
+> `tests/unit/test_operation_registry.py`. Two parts of this section remain
+> unimplemented, deliberately: **per-node capability advertisement** (the target
+> §2.3/§5.2 gate — `servers` has no capabilities column yet; see §5.4 for the
+> fail-closed boundary that stands in for it), and **heartbeat delivery** of
+> pending op ids (§5.1 would change the heartbeat's 204 contract, and the agent
+> router is required to have no GET endpoints). Therefore the whitelisted types
+> have **no executing agent** — the reference agent does not poll or run
+> operations. The approved codenames are reused exactly as specified; no
+> `node.execute` grant was added.
+
 ### 5.1 Model and lifecycle
 
 One new table, `operations` (domain-model.md §2.3): org_id, node_id, type
@@ -364,8 +379,9 @@ Notes:
 
 - Codenames per authorization.md §2 — **`node.execute` is deliberately not added**;
   container ops reuse the existing `container.lifecycle`/`container.remove`/
-  `container.logs` codenames, nginx ops sit under `domain.manage`. Dispatch fails
-  fast when the node's `capabilities` lack the required capability (§2.3).
+  `container.logs` codenames, nginx ops sit under `domain.manage`. Until per-node
+  capabilities exist, dispatch refuses any type whose capability is not universal
+  (§5.4) — the target-state wording is §2.3.
 - nginx ops presuppose the routing subsystem (domain-routing.md, future); the
   agent validates configs with `nginx -t` before apply and keeps the previous
   config for rollback (ProxyProvider contract, domain-model.md §2.4). `nginx -t`
@@ -394,6 +410,61 @@ Notes:
   (system) — append-only, org-scoped (domain-model.md §2.6); agent ingestion of
   results runs under the **node's org scope** (multi-tenancy.md §4, §6), so a
   machine-triggered write stays tenant-correct.
+
+### 5.4 The boundary, as built (creation / claim+result / delivery)
+
+Three parties touch an operation, and each has exactly one authority. Keeping
+them separate is what stops the framework from becoming a privilege-escalation
+path: none of them can substitute for another, and the agent is never given a
+generic execution grant.
+
+| Stage | Who | Authority | Enforced by |
+|---|---|---|---|
+| **Creation** | a human operator | a **per-type permission** in the active organization (`container.lifecycle` / `container.remove` / `container.logs` — *not* a generic `node.execute`), on a node that exists in that org, is enrolled and is not OFFLINE | `api/v1/operations.py` (`_require_type_permission`), `operation_service.create_operation` |
+| **Claim / result** | a node agent | its `X-Agent-Token` only. The token resolves to exactly one `(node, org)`; claim and result carry **both** `node_id` and `org_id` in their CAS, so a token can never touch another node's work — even inside its own tenant | `api/v1/agent.py` (`require_server`), `operation_service.claim_operation` / `record_result` |
+| **Delivery** | nobody yet | *unimplemented* — see the status note. No path hands a pending id to an agent, and the agent router exposes no GET | — |
+
+**Why it cannot escalate.**
+
+- **No new grant, no widening.** The op surface reuses existing codenames; the
+  registry contract test (`tests/unit/test_operation_registry.py`) fails if a
+  type names an unknown codename, invents an `*.execute` grant, or ships without
+  a spec. Adding a type is a reviewed registry + migration change.
+- **Creation is org- and permission-scoped.** A user with `container.logs`
+  cannot create a lifecycle op, because the check is on the *type's* permission.
+  A `node_id` from another tenant is a 404 (guard + RLS), so dispatch is not an
+  existence oracle either.
+- **Params are closed per type** (`extra="forbid"`): a lifecycle op cannot carry
+  a log-tail or an arbitrary command, and there is no free-form field. The agent
+  is asked to do one of a fixed set of things, never to run a string.
+- **The agent cannot reach sideways.** Claim/result resolve the node from the
+  token and act inside that node's org scope; a foreign operation id is absent,
+  not forbidden. A token for node X cannot claim node Y's op in the same org,
+  nor an op in another org.
+- **Results are data, not authority.** A result is bounded and redacted before
+  storage, is never treated as proof of execution, and terminal states never
+  transition — a replayed claim or duplicate result is a no-op.
+- **RLS backs all of it.** `operations` carries `org_id` and the same two
+  policies as every tenant table, so the database refuses a cross-tenant read or
+  write even if the ORM guard were bypassed.
+
+**The capability boundary (Phase 2).** Dispatch cannot yet ask "does *this*
+node have capability C?". Rather than assume the answer, it refuses any type
+whose capability is not in `UNIVERSAL_CAPABILITIES` (`docker`, which enrollment
+itself guarantees) with `409 NODE_CAPABILITY_UNVERIFIED`. Every currently
+shipped type needs only `docker`, so none is affected; a future type needing
+`nginx`/`tls` is refused until the enrollment negotiation that advertises
+per-node capabilities exists. That is the boundary: **do not widen
+`UNIVERSAL_CAPABILITIES` without either the negotiation or a written argument
+that the capability is universal** — and the refused case is pinned by
+`test_dispatch_refuses_a_type_whose_capability_cannot_be_verified`.
+
+**Reserved types are not shipped.** `nginx.*`, `certificate.*` and
+`secret.env.apply` remain in §5.2 as reserved rows only; they are absent from the
+enum and the registry, so a dispatch of one is a 422 and a raw insert is rejected
+by the `ck_operations_type_valid` CHECK
+(`test_no_reserved_phase2_type_is_dispatchable`,
+`test_the_database_whitelist_rejects_an_unregistered_type`).
 
 ## 6. Agent security
 
@@ -492,10 +563,13 @@ a self-modifying exec surface.
 `nexusops_agent.py` to `/usr/local/lib/nexusops-agent`, writes the env file 0600
 **before** the token is written (no 0644 secret window), installs the hardened
 systemd unit with `enable --now`; non-systemd systems print the manual command.
-**Broken hint:** the API's `install_hint` tells users to set `NEXUSOPS_URL`
-(`backend/app/api/v1/servers.py:188-192`) — neither the agent (`NEXUSOPS_SERVER`,
-`agent:420-423`) nor install.sh reads `NEXUSOPS_URL`, so following the hint
-enrolls nothing. Fixed in v2 alongside the new flow.
+**~~Broken hint~~ — FIXED (Phase 0):** the API's `install_hint` used to tell
+users to set `NEXUSOPS_URL` (`backend/app/api/v1/servers.py`), which neither the
+agent (`NEXUSOPS_SERVER`, `agent/nexusops_agent.py`) nor install.sh reads, so
+following the hint enrolled nothing. It now prints the real install.sh
+invocation (`--server` / `--token`) and names the env vars it writes. The
+org-scoped single-use enrollment token and the no-argv one-liner (§8.2) remain
+the v2 target.
 
 ### 8.2 Target one-liner
 

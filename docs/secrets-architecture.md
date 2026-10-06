@@ -80,9 +80,18 @@ uppercase-start `SECRET_KEY_PATTERN` keys (`secret.py:25`): a lowercase ref like
 `.`/`-` pass the resolver grammar but are rejected at config save. One grammar
 should win (§5).
 
-### 1.5 SILENT DEGRADE BUG (must-fix)
+### 1.5 SILENT DEGRADE BUG — **FIXED (Phase 0)**
 
-Resolution failures today degrade silently; deploys proceed without credentials:
+> **Status:** the fail-closed policy in §5 shipped on 2026-09-22.
+> `resolve_secrets_for_environment` now raises `SecretResolutionError`, and
+> `deployment_engine._resolve_secrets_or_fail` fails the deployment before its
+> first step (all steps `SKIPPED`) with an audited `secret.resolve_failed` row;
+> a successful resolution writes one `secret.resolve` audit row per reference
+> (key + version only). The table below is the pre-Phase-0 behavior, kept for
+> context; **layered scope (§2), SecretVersion (§3), node delivery (§7) and
+> per-org keys (§6) are still open.**
+
+Resolution used to degrade silently; deploys proceeded without credentials:
 
 | Layer | Failure | Behavior today | Cite |
 |---|---|---|---|
@@ -103,7 +112,7 @@ env vars", `deployment_runner.py:210`) — no leak, but also no real consumption
 
 | Gap | Addressed in |
 |---|---|
-| Silent degrade: unresolved → `""`, engine catch-all → `{}` | §5 |
+| ~~Silent degrade: unresolved → `""`, engine catch-all → `{}`~~ **fixed in Phase 0** | §5 |
 | No value history; rotation is destructive | §3 |
 | Global secrets = one platform-wide namespace, resolve into every project | §2 |
 | Resolution has no org filter; no per-secret authorization beyond the deploy gate | §2.1, §4 |
@@ -255,20 +264,30 @@ which already carry only key names + versions (`secret_service.py:167-176,213-22
 
 ## 5. Fail-closed resolution policy
 
-| Failure | Today | Target |
+**Shipped in Phase 0**, including the explicit persisted step: `RESOLVE_CONFIG`
+is planned first at queue time (in the engine, ahead of the runner's
+`plan_steps`) and executed by the engine itself — a runner refuses it, so it can
+never silently "pass" unresolved. Failure marks the step FAILED and routes
+through the existing `_finalize_failed` path; success writes an output line and
+the resolution audit. The "Before" column is the pre-Phase-0 behavior. One
+deviation remains: deploy-chain authorization (§4) is still Phase 2, so today
+the trigger's `deployment.create` is the only gate.
+
+| Failure | Before (pre-Phase 0) | Now shipped |
 |---|---|---|
 | Ref names no secret at any scope level | `""` + warning | Deployment **FAILED** before any node work; failure_reason names the missing key(s) |
 | Decrypt fails | `""` + error log | Deployment **FAILED**; reason: "secret KEY undecryptable" |
 | Resolver exception (DB, bug) | Caught → `{}` → deploy proceeds | Deployment **FAILED** (worker retry policy per existing worker conventions); never proceed |
 
-Design:
-
-- Resolution becomes an explicit engine-owned step **`RESOLVE_CONFIG`**, persisted
-  in the step plan at queue time (the plan is persisted at queue time today,
-  engine.py), inserted before `PULL_REPO`. The engine executes it (no runner
-  involvement); failure marks the step FAILED and the deployment FAILED through
-  the existing `_finalize_failed` path — sweeper, cancel, and finalize semantics
-  unchanged. `failure_reason` names keys, never values.
+Design:- **`RESOLVE_CONFIG` is an explicit engine-owned step**
+  (`StepName.RESOLVE_CONFIG` / `ENGINE_STEPS` in
+  `backend/app/providers/deployment_runner.py`), persisted in the step plan at
+  queue time and inserted before `PULL_REPO`; the engine executes it with no
+  runner involvement. Failure marks the step FAILED and the deployment FAILED
+  through the existing `_finalize_failed` path — sweeper, cancel and finalize
+  semantics unchanged. `failure_reason` reads
+  `Step RESOLVE_CONFIG failed: unresolved secret reference(s) (missing: KEY)` —
+  keys only, never values.
 - The runner's `RunContext.secrets` then contains only fully-resolved values; the
   runner may assume presence.
 - No `allow_missing_secrets` escape hatch. If a real need appears it gets its own

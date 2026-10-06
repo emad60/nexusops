@@ -9,7 +9,7 @@ from __future__ import annotations
 import sys
 from functools import lru_cache
 from typing import Literal
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, unquote_plus
 
 from cryptography.fernet import Fernet
 from pydantic import Field, field_validator, model_validator
@@ -37,9 +37,20 @@ class Settings(BaseSettings):
     postgres_host: str = "127.0.0.1"
     postgres_port: int = 5433
     postgres_db: str = "nexusops"
+    #: The **owner** role: it owns every table and is the only role that runs
+    #: migrations. It bypasses RLS by virtue of ownership, which is exactly why
+    #: it never serves request traffic.
     postgres_user: str = "nexusops"
     postgres_password: str = "change-me-postgres"  # noqa: S105 - dev fallback, override via env
+    #: The **application** role: the only role the API/workers connect as. It
+    #: owns nothing, has no BYPASSRLS, and is filtered by the tenant policies.
+    postgres_app_user: str = "nexusops_app"
+    postgres_app_password: str | None = None
+    #: Explicit DSN overrides. ``database_url`` is the runtime (application
+    #: role) DSN; ``migration_database_url`` is used by Alembic and the container
+    #: entrypoint (owner role). When unset both are assembled from POSTGRES_*.
     database_url: str | None = None
+    migration_database_url: str | None = None
     db_pool_size: int = Field(default=10, ge=1, le=100)
     db_max_overflow: int = Field(default=20, ge=0, le=200)
     db_echo: bool = False
@@ -105,6 +116,35 @@ class Settings(BaseSettings):
         return self.environment == "test"
 
     @property
+    def rls_enforced(self) -> bool:
+        """Whether the runtime connection is the RLS-enforced application role.
+
+        False means the app is connected as the table owner, whose queries
+        bypass row security entirely: the ORM guard still applies, but the
+        database-level net is inert. Production refuses to start in that state
+        (see :func:`fail_on_bad_config`); development logs a warning.
+
+        The decision is made from the **user in the DSN**, not from the presence
+        of ``POSTGRES_APP_PASSWORD``: an explicit ``DATABASE_URL`` naming the
+        owner role would otherwise look enforced while every policy is inert —
+        exactly the silent degradation this property exists to catch.
+        """
+        user = self.database_user
+        return bool(user) and user != self.postgres_user
+
+    @property
+    def database_user(self) -> str | None:
+        """Username from :attr:`database_url`, or ``None`` if it is unparseable."""
+        if not self.database_url:
+            return None
+        _, _, remainder = self.database_url.partition("://")
+        userinfo, sep, _ = remainder.partition("@")
+        if not sep:  # no credentials embedded: libpq defaults apply (not our role)
+            return None
+        user = unquote_plus(userinfo.split(":", 1)[0])
+        return user or None
+
+    @property
     def access_token_ttl(self) -> int:
         return self.access_token_ttl_minutes * 60
 
@@ -155,16 +195,32 @@ class Settings(BaseSettings):
             raise ValueError(f"LOG_LEVEL must be one of {sorted(allowed)}")
         return upper
 
+    def _dsn(self, user: str, password: str) -> str:
+        return (
+            f"postgresql+psycopg://{quote_plus(user)}:{quote_plus(password)}"
+            f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
+        )
+
     @model_validator(mode="after")
     def _assemble_database_url(self) -> Settings:
+        if not self.migration_database_url:
+            self.migration_database_url = self._dsn(self.postgres_user, self.postgres_password)
         if not self.database_url:
-            pwd = quote_plus(self.postgres_password)
-            self.database_url = (
-                f"postgresql+psycopg://{quote_plus(self.postgres_user)}:{pwd}"
-                f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
+            # Prefer the RLS-enforced application role; fall back to the owner
+            # only when no application password is configured (development),
+            # which ``fail_on_bad_config`` refuses to allow in production.
+            if self.postgres_app_password:
+                self.database_url = self._dsn(self.postgres_app_user, self.postgres_app_password)
+            else:
+                self.database_url = self._dsn(self.postgres_user, self.postgres_password)
+        for url in (self.database_url, self.migration_database_url):
+            if not url.startswith(("postgresql+psycopg://", "postgresql://")):
+                raise ValueError("DATABASE_URL must be a PostgreSQL connection string")
+        if self.postgres_app_password and not self.postgres_app_user:
+            raise ValueError(
+                "POSTGRES_APP_USER must be set when POSTGRES_APP_PASSWORD is: "
+                "the runtime connects as that role so row-level security applies"
             )
-        if not self.database_url.startswith(("postgresql+psycopg://", "postgresql://")):
-            raise ValueError("DATABASE_URL must be a PostgreSQL connection string")
         return self
 
 
@@ -175,9 +231,20 @@ def get_settings() -> Settings:
 
 
 def fail_on_bad_config() -> None:
-    """Exit immediately with a readable message if configuration is invalid."""
+    """Exit immediately with a readable message if configuration is invalid.
+
+    Also refuses to start production without the RLS-enforced application role:
+    connecting as the owner makes every tenant policy inert, and a tenancy
+    guarantee that silently degrades is worse than one that is absent.
+    """
     try:
-        get_settings()
+        settings = get_settings()
+        if settings.is_production and not settings.rls_enforced:
+            raise ValueError(
+                "POSTGRES_APP_PASSWORD (or an explicit DATABASE_URL for the "
+                "application role) is required in production: connecting as the "
+                "table owner bypasses PostgreSQL row-level security"
+            )
     except Exception as exc:
         # pydantic ValidationError and friends; print a short, actionable message.
         lines = str(exc).splitlines()

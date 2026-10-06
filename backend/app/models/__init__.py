@@ -1,6 +1,6 @@
 """All ORM models. Importing this package registers every table on Base.metadata."""
 
-from app.models.base import Base
+from app.models.base import Base, OrgScoped
 from app.models.delivery import (
     Application,
     Deployment,
@@ -18,6 +18,7 @@ from app.models.identity import (
     User,
 )
 from app.models.infra import (
+    AgentCredential,
     Container,
     ContainerImage,
     DockerHost,
@@ -38,9 +39,12 @@ from app.models.observability import (
     MonitorCheck,
     SystemEvent,
 )
+from app.models.operations import Operation
 from app.models.secrets import Secret
+from app.models.tenancy import Membership, Organization
 
 __all__ = [
+    "AgentCredential",
     "Alert",
     "ApiKey",
     "Application",
@@ -55,11 +59,15 @@ __all__ = [
     "Incident",
     "IncidentEvent",
     "LogEntry",
+    "Membership",
     "MetricSnapshot",
     "Monitor",
     "MonitorCheck",
     "NotificationChannel",
     "NotificationDelivery",
+    "Operation",
+    "OrgScoped",
+    "Organization",
     "Permission",
     "Project",
     "RefreshToken",

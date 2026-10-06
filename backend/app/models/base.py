@@ -6,7 +6,7 @@ import enum
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import BigInteger, CheckConstraint, DateTime, Identity, Uuid, func
+from sqlalchemy import BigInteger, CheckConstraint, DateTime, ForeignKey, Identity, Uuid, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, declared_attr, mapped_column
 
@@ -44,6 +44,62 @@ def big_serial_pk() -> Mapped[int]:
 
 def _utcnow() -> datetime:
     return datetime.now(UTC)
+
+
+def org_id_column(*, nullable: bool = False, index: bool = True):
+    """A plain ``org_id`` column for the few tables that carry one without
+    taking part in the ORM tenant guard (see :class:`OrgScoped`).
+
+    Used by the pre-org credential/identity tables (``api_keys``, ``roles``)
+    whose rows must be findable *before* an organization is known — auth has to
+    locate the caller first. Those tables are RLS-exempt by design; the
+    exemption list and its rationale live in ``app.core.tenancy``.
+    """
+    return mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE"),
+        nullable=nullable,
+        index=index,
+    )
+
+
+class OrgScoped:
+    """Mixin marking a table as **organization-owned** (Phase 1 tenancy).
+
+    Set the plain class attribute ``org_id_nullable = True`` on a table where a
+    NULL ``org_id`` is meaningful — currently only ``audit_logs`` and
+    ``system_events``, which record events that happen before (or without) any
+    organization: a failed login for an address that has no account at all, or
+    instance bootstrap. Such rows are **invisible under organization scope**
+    (the guard and RLS both drop them) and readable only through
+    ``system_scope()``, which is exactly the boundary this mixin exists to
+    enforce. Every tenant security event carries its organization.
+
+    Two things follow from inheriting this mixin, and both matter:
+
+    1. The table gets an ``org_id`` column (NOT NULL unless the table opts into
+       nullable per above), so ownership is explicit in the schema rather than
+       implied by a chain of foreign keys.
+    2. The session guard in :mod:`app.core.tenancy` filters **every** ORM SELECT
+       that touches an ``OrgScoped`` mapper (SQLAlchemy applies
+       ``with_loader_criteria`` to all mapped classes inheriting this mixin).
+
+    The guard is one of three independent nets: the guard (SELECTs), explicit
+    ``org_id`` predicates in write paths (DML), and PostgreSQL RLS (the backstop
+    that catches bulk DML, Core statements, identity-map hits and raw SQL).
+
+    Tables that must be readable before an org is known (users, sessions,
+    api_keys, memberships, roles, and the agent credential-routing table) do
+    **not** inherit this mixin — they use :func:`org_id_column` or have no
+    ``org_id`` at all.
+    """
+
+    @declared_attr
+    def org_id(cls) -> Mapped[uuid.UUID]:
+        return mapped_column(
+            ForeignKey("organizations.id", ondelete="CASCADE"),
+            nullable=bool(getattr(cls, "org_id_nullable", False)),
+            index=True,
+        )
 
 
 class TimestampMixin:

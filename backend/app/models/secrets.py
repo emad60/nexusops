@@ -17,10 +17,10 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.models.base import Base, TimestampMixin, uuid_pk
+from app.models.base import Base, OrgScoped, TimestampMixin, uuid_pk
 
 
-class Secret(TimestampMixin, Base):
+class Secret(OrgScoped, TimestampMixin, Base):
     """An encrypted configuration value.
 
     The plaintext is never returned by the API after creation; consumers
@@ -30,10 +30,14 @@ class Secret(TimestampMixin, Base):
 
     __tablename__ = "secrets"
     __table_args__ = (
-        # Global secrets have NULL project_id — partial unique index covers them.
-        UniqueConstraint("project_id", "key", name="uq_secrets_project_key"),
+        # Key uniqueness is per organization: two tenants both naming a secret
+        # DATABASE_URL must not collide (the old instance-wide indexes made one
+        # org's key name both a creation failure and an existence oracle for
+        # the others). Global secrets still have a NULL project_id.
+        UniqueConstraint("org_id", "project_id", "key", name="uq_secrets_org_project_key"),
         Index(
-            "ux_secrets_global_key",
+            "ux_secrets_org_global_key",
+            "org_id",
             "key",
             unique=True,
             postgresql_where=text("project_id IS NULL"),

@@ -21,6 +21,19 @@ class UserStatus(StrEnum):
     DISABLED = "DISABLED"
 
 
+class OrganizationStatus(StrEnum):
+    ACTIVE = "ACTIVE"
+    SUSPENDED = "SUSPENDED"
+
+
+class MembershipStatus(StrEnum):
+    # No INVITED state in v1: onboarding is operator-issued (an administrator
+    # creates the account and its membership together), so a membership is
+    # active from the moment it exists. A real invite flow is its own phase.
+    ACTIVE = "ACTIVE"
+    SUSPENDED = "SUSPENDED"
+
+
 class ServerStatus(StrEnum):
     ONLINE = "ONLINE"
     OFFLINE = "OFFLINE"
@@ -79,6 +92,47 @@ class DeploymentTrigger(StrEnum):
     API = "API"
     ROLLBACK = "ROLLBACK"
     AUTO = "AUTO"
+
+
+class OperationStatus(StrEnum):
+    """Lifecycle of one node operation (node-agent-architecture.md §5.1).
+
+    ``SUCCEEDED``/``FAILED``/``EXPIRED``/``CANCELLED`` are terminal: once a row
+    reaches one of them it never transitions again. That immutability is what
+    makes a replayed claim or a late duplicate result a no-op instead of a
+    second execution.
+    """
+
+    PENDING = "PENDING"
+    CLAIMED = "CLAIMED"
+    RUNNING = "RUNNING"
+    SUCCEEDED = "SUCCEEDED"
+    FAILED = "FAILED"
+    EXPIRED = "EXPIRED"
+    CANCELLED = "CANCELLED"
+
+    @classmethod
+    def terminal(cls) -> frozenset[OperationStatus]:
+        return frozenset({cls.SUCCEEDED, cls.FAILED, cls.EXPIRED, cls.CANCELLED})
+
+
+class OperationType(StrEnum):
+    """The whitelist. Nothing outside this enum ships as an exec surface.
+
+    Each type maps to an existing permission codename plus a node capability
+    (see ``app.schemas.operation.OPERATION_SPECS``) — the architecture
+    deliberately does **not** add a generic ``node.execute`` codename, so a
+    container action reuses ``container.lifecycle`` rather than inventing a new
+    grant. Reserved types from the companion docs (``secret.env.apply``,
+    ``certificate.*``, the ``nginx.*`` family) are deliberately absent until the
+    subsystems they belong to ship, so no params pass-through can exist for them.
+    """
+
+    CONTAINER_START = "container.start"
+    CONTAINER_STOP = "container.stop"
+    CONTAINER_RESTART = "container.restart"
+    CONTAINER_REMOVE = "container.remove"
+    LOGS_TAIL = "logs.tail"
 
 
 class MonitorStatus(StrEnum):

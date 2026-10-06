@@ -25,6 +25,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import (
     Base,
+    OrgScoped,
     TimestampMixin,
     big_serial_pk,
     json_column,
@@ -47,7 +48,7 @@ from app.models.enums import (
 )
 
 
-class Monitor(TimestampMixin, Base):
+class Monitor(OrgScoped, TimestampMixin, Base):
     __tablename__ = "monitors"
     __table_args__ = (
         status_check("status", MonitorStatus),
@@ -90,7 +91,7 @@ class Monitor(TimestampMixin, Base):
     )
 
 
-class MonitorCheck(Base):
+class MonitorCheck(OrgScoped, Base):
     __tablename__ = "monitor_checks"
     __table_args__ = (
         Index("ix_checks_monitor_time", "monitor_id", "checked_at"),
@@ -108,7 +109,7 @@ class MonitorCheck(Base):
     error: Mapped[str] = mapped_column(String(500), default="", nullable=False)
 
 
-class Incident(TimestampMixin, Base):
+class Incident(OrgScoped, TimestampMixin, Base):
     __tablename__ = "incidents"
     __table_args__ = (
         status_check("status", IncidentStatus),
@@ -147,7 +148,7 @@ class Incident(TimestampMixin, Base):
     )
 
 
-class IncidentEvent(Base):
+class IncidentEvent(OrgScoped, Base):
     __tablename__ = "incident_events"
     __table_args__ = (Index("ix_incident_events_incident_time", "incident_id", "occurred_at"),)
 
@@ -166,7 +167,7 @@ class IncidentEvent(Base):
     incident: Mapped[Incident] = relationship(back_populates="timeline")
 
 
-class MetricSnapshot(Base):
+class MetricSnapshot(OrgScoped, Base):
     __tablename__ = "metric_snapshots"
     __table_args__ = (
         Index("ix_metrics_server_gran_time", "server_id", "granularity", "recorded_at"),
@@ -192,7 +193,7 @@ class MetricSnapshot(Base):
     extra: Mapped[dict[str, Any]] = json_column()
 
 
-class LogEntry(Base):
+class LogEntry(OrgScoped, Base):
     __tablename__ = "log_entries"
     __table_args__ = (
         Index("ix_logs_container_ts", "container_id", "ts"),
@@ -216,7 +217,11 @@ class LogEntry(Base):
     ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
-class SystemEvent(Base):
+class SystemEvent(OrgScoped, Base):
+    #: Pre-org events (a failed login for an unknown address) carry no org and
+    #: therefore notify nobody — the dispatcher matches channels by frame org.
+    org_id_nullable = True
+
     __tablename__ = "system_events"
     __table_args__ = (
         Index("ix_events_created_desc", "created_at"),
@@ -246,8 +251,17 @@ class SystemEvent(Base):
     dedup_key: Mapped[str | None] = mapped_column(String(160), nullable=True)
 
 
-class AuditLog(Base):
-    """Append-only audit trail. UPDATE/DELETE are blocked by a DB trigger."""
+class AuditLog(OrgScoped, Base):
+    org_id_nullable = True
+
+    """Append-only audit trail. UPDATE/DELETE are blocked by a DB trigger.
+
+    ``org_id`` is NULL for events that occur before any organization is known
+    (a failed login for an address with no account, instance bootstrap). Those
+    rows are invisible under organization scope — by the guard and by RLS alike
+    — and are read through ``system_scope()`` only. Every tenant security event
+    carries its organization.
+    """
 
     __tablename__ = "audit_logs"
     __table_args__ = (
@@ -278,7 +292,7 @@ class AuditLog(Base):
     )
 
 
-class Alert(TimestampMixin, Base):
+class Alert(OrgScoped, TimestampMixin, Base):
     __tablename__ = "alerts"
     __table_args__ = (
         status_check("severity", AlertSeverity),

@@ -18,15 +18,24 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.models.base import Base, TimestampMixin, json_column, status_check, uuid_pk
+from app.models.base import (
+    Base,
+    OrgScoped,
+    TimestampMixin,
+    json_column,
+    status_check,
+    uuid_pk,
+)
 from app.models.enums import DeploymentStatus, DeploymentTrigger, StepStatus
 
 
-class Project(TimestampMixin, Base):
+class Project(OrgScoped, TimestampMixin, Base):
     __tablename__ = "projects"
+    # Project names are unique within an organization, not across the instance.
+    __table_args__ = (UniqueConstraint("org_id", "name", name="uq_projects_org_name"),)
 
     id: Mapped[uuid.UUID] = uuid_pk()
-    name: Mapped[str] = mapped_column(String(120), unique=True, nullable=False)
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
     description: Mapped[str] = mapped_column(Text, default="", nullable=False)
     repository_url: Mapped[str] = mapped_column(String(500), default="", nullable=False)
     default_branch: Mapped[str] = mapped_column(String(120), default="main", nullable=False)
@@ -39,7 +48,7 @@ class Project(TimestampMixin, Base):
     )
 
 
-class Application(TimestampMixin, Base):
+class Application(OrgScoped, TimestampMixin, Base):
     __tablename__ = "applications"
     __table_args__ = (UniqueConstraint("project_id", "name", name="uq_applications_project_name"),)
 
@@ -65,7 +74,7 @@ class Application(TimestampMixin, Base):
     )
 
 
-class DeploymentEnvironment(TimestampMixin, Base):
+class DeploymentEnvironment(OrgScoped, TimestampMixin, Base):
     __tablename__ = "deployment_environments"
     __table_args__ = (UniqueConstraint("application_id", "name", name="uq_envs_application_name"),)
 
@@ -84,7 +93,7 @@ class DeploymentEnvironment(TimestampMixin, Base):
     config: Mapped[dict] = json_column()
 
 
-class Deployment(TimestampMixin, Base):
+class Deployment(OrgScoped, TimestampMixin, Base):
     __tablename__ = "deployments"
     __table_args__ = (
         UniqueConstraint("application_id", "number", name="uq_deployments_app_number"),
@@ -139,7 +148,7 @@ class Deployment(TimestampMixin, Base):
     )
 
 
-class DeploymentStep(TimestampMixin, Base):
+class DeploymentStep(OrgScoped, TimestampMixin, Base):
     __tablename__ = "deployment_steps"
     __table_args__ = (
         UniqueConstraint("deployment_id", "idx", name="uq_steps_deployment_idx"),

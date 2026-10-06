@@ -21,7 +21,15 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.models.base import Base, TimestampMixin, json_column, status_check, uuid_pk
+from app.models.base import (
+    Base,
+    OrgScoped,
+    TimestampMixin,
+    json_column,
+    org_id_column,
+    status_check,
+    uuid_pk,
+)
 from app.models.enums import (
     ContainerHealth,
     ContainerStatus,
@@ -31,24 +39,29 @@ from app.models.enums import (
 )
 
 
-class Tag(TimestampMixin, Base):
+class Tag(OrgScoped, TimestampMixin, Base):
     __tablename__ = "tags"
+    # Tag names are unique per organization, not per instance: two customers
+    # independently tagging a server "prod" must not collide (and the old
+    # instance-wide index made org B's tag name visible as a uniqueness error).
+    __table_args__ = (UniqueConstraint("org_id", "name", name="uq_tags_org_name"),)
 
     id: Mapped[uuid.UUID] = uuid_pk()
-    name: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    name: Mapped[str] = mapped_column(String(64), nullable=False)
     color: Mapped[str] = mapped_column(String(16), default="#64748b", nullable=False)
 
 
-class Server(TimestampMixin, Base):
+class Server(OrgScoped, TimestampMixin, Base):
     __tablename__ = "servers"
     __table_args__ = (
+        UniqueConstraint("org_id", "name", name="uq_servers_org_name"),
         status_check("status", ServerStatus),
         CheckConstraint("heartbeat_interval_seconds >= 5", name="heartbeat_interval_min"),
         Index("ix_servers_status_heartbeat", "status", "last_heartbeat_at"),
     )
 
     id: Mapped[uuid.UUID] = uuid_pk()
-    name: Mapped[str] = mapped_column(String(120), unique=True, nullable=False)
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
     hostname: Mapped[str] = mapped_column(String(255), nullable=False)
     ip_address: Mapped[str] = mapped_column(String(64), default="", nullable=False)
     os_name: Mapped[str] = mapped_column(String(96), default="", nullable=False)
@@ -67,7 +80,11 @@ class Server(TimestampMixin, Base):
     disk_total_gb: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
     agent_version: Mapped[str] = mapped_column(String(48), default="", nullable=False)
-    agent_token_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    # The agent's token hash lives in ``agent_credentials`` (one row per node),
+    # not here: the hash has to be resolvable BEFORE an organization is known
+    # (auth must identify the node first), and this table is RLS-enforced. The
+    # routing table carries no tenant payload beyond (node, org) ids, so it can
+    # stay outside RLS without weakening the boundary.
     agent_enrolled_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
@@ -87,7 +104,19 @@ class Server(TimestampMixin, Base):
     )
 
 
-class ServerTag(Base):
+class ServerTag(OrgScoped, Base):
+    """Join table between servers and tags.
+
+    Inheriting :class:`OrgScoped` supplies the ``org_id`` column, but the ORM
+    never writes it: the ``Server.tags`` secondary relationship emits only the two
+    key columns. A BEFORE INSERT/UPDATE trigger fills it from the referenced
+    server row — authoritatively, via a ``SECURITY DEFINER`` function owned by the
+    migration role, so the value cannot be spoofed by the caller's scope. A
+    cross-organization pair therefore fails the RLS ``WITH CHECK`` instead of
+    being created. (The table is also RLS-policied like any other tenant table,
+    so reads are filtered here too rather than inherited from the parents.)
+    """
+
     __tablename__ = "server_tags"
 
     server_id: Mapped[uuid.UUID] = mapped_column(
@@ -98,7 +127,37 @@ class ServerTag(Base):
     )
 
 
-class ServerCredential(TimestampMixin, Base):
+class AgentCredential(TimestampMixin, Base):
+    """Token hash → (node, organization) routing row — the pre-org lookup.
+
+    Deliberately outside :class:`OrgScoped` and outside RLS: an agent presents
+    its token with no ``X-Org-Id`` header and no member identity, so resolving
+    *which* organization and node the request belongs to is the very first thing
+    that has to happen. The row holds only what that lookup needs, and carries no
+    tenant payload — everything downstream (heartbeat, inventory, operations)
+    runs under ``org_scope(row.org_id)`` and is enforced by the guard and RLS.
+
+    One row per node: enrollment, rotation and revocation are updates to this
+    row, so a revoked node's token stops being accepted immediately while the
+    organization's other nodes are untouched.
+    """
+
+    __tablename__ = "agent_credentials"
+
+    server_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("servers.id", ondelete="CASCADE"), primary_key=True
+    )
+    org_id: Mapped[uuid.UUID] = org_id_column()
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    created_by_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    rotated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class ServerCredential(OrgScoped, TimestampMixin, Base):
     """SSH credential for a server. The secret part is Fernet-encrypted."""
 
     __tablename__ = "server_credentials"
@@ -119,7 +178,7 @@ class ServerCredential(TimestampMixin, Base):
     )
 
 
-class DockerHost(TimestampMixin, Base):
+class DockerHost(OrgScoped, TimestampMixin, Base):
     __tablename__ = "docker_hosts"
 
     id: Mapped[uuid.UUID] = uuid_pk()
@@ -138,7 +197,7 @@ class DockerHost(TimestampMixin, Base):
     server: Mapped[Server | None] = relationship(back_populates="docker_host")
 
 
-class Container(Base):
+class Container(OrgScoped, Base):
     """Observed container state mirrored from an agent or docker provider."""
 
     __tablename__ = "containers"
@@ -182,7 +241,7 @@ class Container(Base):
     simulated: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
 
-class ContainerImage(TimestampMixin, Base):
+class ContainerImage(OrgScoped, TimestampMixin, Base):
     __tablename__ = "container_images"
     __table_args__ = (UniqueConstraint("docker_host_id", "image_id", name="uq_images_host_iid"),)
 

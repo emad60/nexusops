@@ -31,12 +31,12 @@ PERMISSIONS: tuple[PermissionSpec, ...] = (
     PermissionSpec("role.read", "Access Control", "List roles and their permissions"),
     PermissionSpec("role.manage", "Access Control", "Create and modify roles"),
     PermissionSpec("audit.read", "Access Control", "View audit logs"),
-    # servers
-    PermissionSpec("server.read", "Servers", "List and view servers"),
-    PermissionSpec("server.create", "Servers", "Register servers"),
-    PermissionSpec("server.update", "Servers", "Edit servers"),
-    PermissionSpec("server.delete", "Servers", "Remove servers"),
-    PermissionSpec("credential.write", "Servers", "Store / rotate server credentials"),
+    # nodes (inventory & credentials)
+    PermissionSpec("node.read", "Nodes", "List and view nodes"),
+    PermissionSpec("node.create", "Nodes", "Register nodes"),
+    PermissionSpec("node.update", "Nodes", "Edit nodes"),
+    PermissionSpec("node.delete", "Nodes", "Remove nodes"),
+    PermissionSpec("node.credential.write", "Nodes", "Store / rotate node credentials"),
     # docker
     PermissionSpec("container.read", "Containers", "List containers, images, volumes, networks"),
     PermissionSpec("container.logs", "Containers", "Stream container logs"),
@@ -84,11 +84,11 @@ ROLE_MATRIX: dict[str, list[str]] = {
         "user.manage",
         "role.read",
         "audit.read",
-        "server.read",
-        "server.create",
-        "server.update",
-        "server.delete",
-        "credential.write",
+        "node.read",
+        "node.create",
+        "node.update",
+        "node.delete",
+        "node.credential.write",
         "container.read",
         "container.logs",
         "container.lifecycle",
@@ -113,11 +113,11 @@ ROLE_MATRIX: dict[str, list[str]] = {
     "Operator": _perms(
         "user.read",
         "audit.read",
-        "server.read",
-        "server.create",
-        "server.update",
-        "server.delete",
-        "credential.write",
+        "node.read",
+        "node.create",
+        "node.update",
+        "node.delete",
+        "node.credential.write",
         "container.read",
         "container.logs",
         "container.lifecycle",
@@ -138,7 +138,7 @@ ROLE_MATRIX: dict[str, list[str]] = {
         "secret.read",
     ),
     "Developer": _perms(
-        "server.read",
+        "node.read",
         "container.read",
         "container.logs",
         "project.read",
@@ -155,7 +155,7 @@ ROLE_MATRIX: dict[str, list[str]] = {
         "secret.read",
     ),
     "Viewer": _perms(
-        "server.read",
+        "node.read",
         "container.read",
         "container.logs",
         "project.read",
@@ -174,7 +174,7 @@ SYSTEM_ROLES: tuple[str, ...] = tuple(ROLE_MATRIX)
 def scope_matches(scopes: list[str], required: str) -> bool:
     """Check an API-key scope list against a required permission.
 
-    Supports exact match plus wildcards: ``*``, ``server.*``.
+    Supports exact match plus wildcards: ``*``, ``node.*``.
     """
     for scope in scopes:
         if scope == WILDCARD or scope == required:

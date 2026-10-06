@@ -8,7 +8,7 @@ from alembic import context
 from sqlalchemy import engine_from_config, pool
 
 from app.core.config import get_settings
-from app.core.db import sync_database_url
+from app.core.db import sync_migration_url
 from app.models import Base  # noqa: F401 - imports register every model table
 
 config = context.config
@@ -20,8 +20,14 @@ target_metadata = Base.metadata
 
 
 def _database_url() -> str:
+    """Migrations run as the table **owner**, never as the application role.
+
+    The owner is the only role that bypasses row-level security; a migration has
+    to add ``org_id`` columns, backfill them and create policies, which is not
+    expressible from inside the policies themselves.
+    """
     get_settings()  # fail fast on invalid configuration
-    return sync_database_url()
+    return sync_migration_url()
 
 
 def run_migrations_offline() -> None:

@@ -18,14 +18,27 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.models.base import Base, TimestampMixin, uuid_pk
+from app.models.base import Base, TimestampMixin, org_id_column, uuid_pk
 from app.models.enums import UserStatus
 
 
 class Role(TimestampMixin, Base):
+    """A named permission set.
+
+    ``org_id`` is NULL for every row in v1 — the five built-in roles are
+    instance-wide templates and a membership's ``role_id`` points at one of them.
+    Custom per-organization roles are Phase 7 work; when they arrive this column
+    starts carrying values and ``name`` uniqueness splits into a partial unique
+    index over ``org_id IS NULL`` (system templates) plus ``(org_id, name)`` for
+    organization-owned roles. A plain composite ``UNIQUE (org_id, name)`` would
+    be wrong here, because PostgreSQL treats NULLs as distinct and the system
+    role names would stop being unique.
+    """
+
     __tablename__ = "roles"
 
     id: Mapped[uuid.UUID] = uuid_pk()
+    org_id: Mapped[uuid.UUID | None] = org_id_column(nullable=True)
     name: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
     description: Mapped[str] = mapped_column(Text, default="", nullable=False)
     is_system: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
@@ -131,7 +144,13 @@ class RefreshToken(TimestampMixin, Base):
 
 
 class ApiKey(TimestampMixin, Base):
-    """Machine credential. Raw key shown once at creation; hash stored."""
+    """Machine credential. Raw key shown once at creation; hash stored.
+
+    A key is bound to **one organization** at creation (the creator must hold an
+    active membership in it): machine callers present no ``X-Org-Id`` header, so
+    the key's own ``org_id`` is the tenancy boundary. The header is ignored for
+    key auth, and a key can never be widened to another org afterwards.
+    """
 
     __tablename__ = "api_keys"
 
@@ -139,6 +158,7 @@ class ApiKey(TimestampMixin, Base):
     user_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
     )
+    org_id: Mapped[uuid.UUID] = org_id_column()
     name: Mapped[str] = mapped_column(String(120), nullable=False)
     key_prefix: Mapped[str] = mapped_column(String(24), nullable=False)
     key_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)

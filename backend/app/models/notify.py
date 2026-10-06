@@ -20,11 +20,11 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.models.base import Base, TimestampMixin, status_check, uuid_pk
+from app.models.base import Base, OrgScoped, TimestampMixin, status_check, uuid_pk
 from app.models.enums import ChannelType, DeliveryStatus
 
 
-class NotificationChannel(TimestampMixin, Base):
+class NotificationChannel(OrgScoped, TimestampMixin, Base):
     """A delivery target (email address / webhook endpoint).
 
     ``config_ciphertext`` holds the Fernet-encrypted provider configuration
@@ -48,7 +48,7 @@ class NotificationChannel(TimestampMixin, Base):
     )
 
 
-class NotificationDelivery(Base):
+class NotificationDelivery(OrgScoped, Base):
     __tablename__ = "notification_deliveries"
     __table_args__ = (
         status_check("status", DeliveryStatus),

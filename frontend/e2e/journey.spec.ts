@@ -6,12 +6,15 @@
  *   → deployment succeeds → deployment fails → audit trail shows everything
  *
  * Runs against the composed stack (`make up`): nginx edge on :8080, mailpit on
- * :8025, SIMULATION_MODE=true. The seeded database provides fleet + channels;
- * this spec creates its own user, server, monitors and deployments.
+ * :8025, SIMULATION_MODE=true. Both are overridable via E2E_BASE_URL /
+ * E2E_MAILPIT_URL so `make e2e` can use its own ports. The seeded database
+ * provides fleet + channels; this spec creates its own user, server, monitors
+ * and deployments.
  */
 
 import { expect } from "@playwright/test";
 import { test } from "./fixtures";
+import { EDGE } from "./env";
 
 const UNIQUE = Date.now(); // keeps the journey idempotent against a used DB
 
@@ -55,6 +58,31 @@ async function formLogin(page: import("@playwright/test").Page): Promise<void> {
  * the server-side grace window (fixtures.ts) — the guard must therefore run
  * AFTER the navigation, not before it: sign in through the form and retry.
  */
+/**
+ * Count `subscribed` acks received by the app's *global-channel* socket.
+ *
+ * Registering before navigation makes the WebSocket handshake explicit: a
+ * `subscribed` frame only arrives after the upgrade, the auth frame and the
+ * subscribe were all accepted. A rejected handshake (the pre-upgrade 403 this
+ * harness hit) then fails fast and specifically, instead of surfacing minutes
+ * later as a generic "element not found" timeout on a live-event assertion.
+ */
+function trackGlobalSubscribeAcks(page: import("@playwright/test").Page) {
+  let acks = 0;
+  page.on("websocket", (ws) => {
+    if (!ws.url().includes("/api/v1/ws")) return;
+    ws.on("framereceived", (frame) => {
+      try {
+        const parsed = JSON.parse(frame.payload) as { type?: string; channel?: string };
+        if (parsed.type === "subscribed" && parsed.channel === "global") acks += 1;
+      } catch {
+        // Binary/log frames are not control frames.
+      }
+    });
+  });
+  return { count: () => acks };
+}
+
 async function uiGoto(page: import("@playwright/test").Page, path: string): Promise<void> {
   for (let attempt = 0; attempt < 2; attempt++) {
     await page.goto(path);
@@ -73,7 +101,7 @@ test.describe.serial("NexusOps end-to-end journey", () => {
     // The ONLY auth-flow test, so it gets its own clean, unauthenticated
     // context — its sign-outs must not revoke the shared admin session the
     // other tests rely on (fixtures.ts).
-    const context = await browser.newContext({ baseURL: "http://127.0.0.1:8080" });
+    const context = await browser.newContext({ baseURL: EDGE });
     const page = await context.newPage();
     try {
       await page.goto("/");
@@ -96,7 +124,7 @@ test.describe.serial("NexusOps end-to-end journey", () => {
         // path instead — create a user as admin, take its one-time password,
         // sign out, then register-login as the new user.
         await page.getByLabel("Email").fill(ADMIN.email);
-        await page.getByLabel("Password").fill(ADMIN.password);
+        await page.getByLabel("Password", { exact: true }).fill(ADMIN.password);
         await page.getByRole("button", { name: /sign in/i }).click();
         await expect(page).toHaveURL("/");
 
@@ -108,7 +136,11 @@ test.describe.serial("NexusOps end-to-end journey", () => {
         // role before "Send invite" enables; an explicit password skips the
         // one-time secret display, so the login below can reuse it.
         await page.getByLabel("Initial password").fill("e2e-password-123");
-        await page.getByLabel("Role", { exact: true }).selectOption({ label: "Operator" });
+        // By id, not by label text: the field is `required`, so its label text
+        // reads "Role *" (see form.tsx), and the users table behind the modal
+        // has aria-labelled "Role for <email>" selects that a loose label match
+        // would hit as well.
+        await page.locator("#invite-role").selectOption({ label: "Operator" });
         await page.getByRole("button", { name: /send invite/i }).click();
 
         await page.getByRole("button", { name: /sign out/i }).click();
@@ -147,13 +179,13 @@ test.describe.serial("NexusOps end-to-end journey", () => {
     request,
   }) => {
     const name = `e2e-node-${UNIQUE}`;
-    await uiGoto(page, "/servers");
-    await page.getByRole("button", { name: /add server|new server/i }).click();
+    await uiGoto(page, "/nodes");
+    await page.getByRole("button", { name: /add node|new node/i }).click();
     // The register dialog renders required labels as "Name *" / "Hostname *"
-    // and its submit is "Register server".
+    // and its submit is "Register node".
     await page.getByLabel(/^name\b/i).fill(name);
     await page.getByLabel(/^hostname\b/i).fill(`${name}.test`);
-    await page.getByRole("button", { name: /register server/i }).click();
+    await page.getByRole("button", { name: /register node/i }).click();
     await expect(page.getByText(name).first()).toBeVisible();
 
     // Enrollment token is revealed exactly once on the detail view.
@@ -190,7 +222,9 @@ test.describe.serial("NexusOps end-to-end journey", () => {
     expect(beat.status()).toBe(204);
 
     await expect(page.getByText("ONLINE").first()).toBeVisible({ timeout: 30_000 });
-    await expect(page.getByText("demo-web")).toBeVisible();
+    // The containers table refetches on a 10s poll (rows arrive out-of-band
+    // via the heartbeat), so allow more than one full poll interval here.
+    await expect(page.getByText("demo-web")).toBeVisible({ timeout: 20_000 });
   });
 
   test("uptime monitor fails → incident opens → email lands in mailpit", async ({ page }) => {
@@ -200,7 +234,9 @@ test.describe.serial("NexusOps end-to-end journey", () => {
     const monitorName = `e2e-monitor-${UNIQUE}`;
     await uiGoto(page, "/monitors");
     await page.getByRole("button", { name: /new monitor|add monitor/i }).click();
-    await page.getByLabel(/^name$/i).fill(monitorName);
+    // Required fields render their label as "Name *" (form.tsx), so this is
+    // anchored on the word rather than the whole string.
+    await page.getByLabel(/^name\b/i).fill(monitorName);
     await page.getByLabel(/url/i).fill("sim://probe/always-down");
     // Short interval: the incident only opens after failure_threshold (3)
     // consecutive failing checks, and the default 60s cadence would stretch
@@ -222,12 +258,27 @@ test.describe.serial("NexusOps end-to-end journey", () => {
   test("notification delivery reached the mailpit sink", async ({ api, mailpit }) => {
     // The seeded EMAIL channel subscribes to MONITOR_DOWN; the previous step
     // opened an incident, so at least one delivery must have been rendered.
-    const deliveries = await api.get("/api/v1/notification-channels/deliveries?limit=20");
-    expect(deliveries.ok()).toBeTruthy();
-    const body = (await deliveries.json()) as { items: Array<{ event_type: string }> };
-    expect(
-      body.items.some((d) => ["MONITOR_DOWN", "INCIDENT_OPENED"].includes(d.event_type)),
-    ).toBeTruthy();
+    //
+    // Polled, not sampled once: the delivery row is written when the incident
+    // opens, which trails the previous step's `.badge.OPEN` assertion by up to
+    // a dispatcher cycle. A single read here is a race that only passes when the
+    // previous step happened to run slow. (The mailpit check below polls for the
+    // same reason — this assertion was the one that didn't.)
+    await expect
+      .poll(
+        async () => {
+          const response = await api.get("/api/v1/notification-channels/deliveries?limit=20");
+          if (!response.ok()) return -1;
+          const body = (await response.json()) as {
+            items: Array<{ event_type: string }>;
+          };
+          return body.items.filter((d) =>
+            ["MONITOR_DOWN", "INCIDENT_OPENED"].includes(d.event_type),
+          ).length;
+        },
+        { timeout: 60_000, interval: 5_000 },
+      )
+      .toBeGreaterThan(0);
 
     // And the actual SMTP message exists in mailpit.
     await expect
@@ -306,7 +357,7 @@ test.describe.serial("NexusOps end-to-end journey", () => {
     // filter matches equality (`AuditLog.action == action`), and the toolbar
     // form submits on Enter.
     const actionInput = page.getByLabel("Action");
-    for (const action of ["server.create", "monitor.create", "user.create"]) {
+    for (const action of ["node.create", "monitor.create", "user.create"]) {
       await actionInput.fill(action);
       await actionInput.press("Enter");
       await expect(page.getByText(action).first()).toBeVisible();
@@ -314,8 +365,18 @@ test.describe.serial("NexusOps end-to-end journey", () => {
   });
 
   test("live event stream updates without reload", async ({ page, api }) => {
+    const acks = trackGlobalSubscribeAcks(page);
     await uiGoto(page, "/events");
     await expect(page.locator("table.data tbody tr").first()).toBeVisible();
+    // Deterministic liveness gate BEFORE triggering the event: the socket must
+    // have upgraded, authenticated and subscribed, or the event can never
+    // arrive regardless of how long the assertion below waits.
+    await expect
+      .poll(acks.count, {
+        timeout: 15_000,
+        message: "the global WebSocket never subscribed (handshake or auth rejected)",
+      })
+      .toBeGreaterThanOrEqual(1);
 
     // Trigger an event that ALWAYS fires: renaming a monitor emits
     // MONITOR_UPDATED. (`check-now` on an UP monitor emits nothing — events
@@ -345,5 +406,59 @@ test.describe.serial("NexusOps end-to-end journey", () => {
 
     // Only the WS live-prepend can surface this row — no reload happens.
     await expect(page.getByText(newName).first()).toBeVisible({ timeout: 45_000 });
+  });
+
+  test("live event stream reconnects after the socket drops", async ({ page, api }) => {
+    test.setTimeout(120_000);
+    // Expose the page's WebSocket instances so the test can drop the live
+    // connection exactly as a network blip / server restart would (an
+    // `onclose`) - without a reload. `context.setOffline` deliberately does
+    // NOT close established sockets, so it cannot exercise reconnect.
+    await page.addInitScript(() => {
+      const Native = window.WebSocket;
+      (window as unknown as { __sockets: WebSocket[] }).__sockets = [];
+      window.WebSocket = class extends Native {
+        constructor(url: string | URL, protocols?: string | string[]) {
+          super(url, protocols);
+          (window as unknown as { __sockets: WebSocket[] }).__sockets.push(this);
+        }
+      } as typeof WebSocket;
+    });
+
+    const acks = trackGlobalSubscribeAcks(page);
+    await uiGoto(page, "/events");
+    await expect(page.locator("table.data tbody tr").first()).toBeVisible();
+    await expect.poll(acks.count, { timeout: 15_000 }).toBeGreaterThanOrEqual(1);
+
+    // Drop every live socket the app holds; nothing else signals the page. The
+    // SPA must notice and reconnect on its own or a live view goes dark.
+    const dropped = await page.evaluate(() => {
+      const sockets = (window as unknown as { __sockets?: WebSocket[] }).__sockets ?? [];
+      for (const socket of sockets) socket.close();
+      return sockets.length;
+    });
+    expect(dropped, "no WebSocket was exposed to drop").toBeGreaterThan(0);
+
+    // A fresh socket upgraded, re-authenticated and re-subscribed.
+    await expect
+      .poll(acks.count, { timeout: 30_000, message: "the socket never reconnected after the drop" })
+      .toBeGreaterThanOrEqual(2);
+
+    // And it is live again: an event published after the reconnect still
+    // reaches the page through the socket.
+    const list = (await (await api.fetch("/api/v1/monitors?limit=100")).json()) as {
+      items: Array<{ id: string; name: string }>;
+    };
+    const monitor = list.items.find((m) => m.name === `e2e-monitor-${UNIQUE}`) ?? list.items[0];
+    const reconnectedName = `${monitor.name}-reconnect`;
+    const patched = await api.fetch(`/api/v1/monitors/${monitor.id}`, {
+      method: "PATCH",
+      data: { name: reconnectedName },
+    });
+    expect(
+      patched.status(),
+      `monitor PATCH failed: ${patched.status()} ${await patched.text()}`,
+    ).toBeLessThan(300);
+    await expect(page.getByText(reconnectedName).first()).toBeVisible({ timeout: 45_000 });
   });
 });

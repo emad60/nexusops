@@ -1,0 +1,30 @@
+# E2E overlay — throwaway stack for the Playwright journey (`make e2e`).
+#
+# Layered on top of docker-compose.yml. `make e2e` supplies an isolated project
+# name and its own host ports, so this never disturbs the dev stack.
+#
+# Why ENVIRONMENT=test is the whole point: it is what makes the seed's admin
+# password deterministic (backend/scripts/seed.py `_seed_credentials` returns
+# `nexusops-admin` only when `settings.is_testing`). Otherwise the seed prints a
+# random one-time password and the journey — which signs in as that admin —
+# cannot bootstrap.
+#
+# Nothing else about `test` weakens the run: the login rate limiter, the
+# security-header middleware and the docs toggle are all keyed off
+# `is_production`, not `is_testing`, so the journey still exercises the real
+# edge. The only behavioural difference is JSON log formatting.
+services:
+  api:
+    environment:
+      ENVIRONMENT: test
+      SIMULATION_MODE: "true"
+
+  worker:
+    environment:
+      ENVIRONMENT: test
+      SIMULATION_MODE: "true"
+
+  scheduler:
+    environment:
+      ENVIRONMENT: test
+      SIMULATION_MODE: "true"

@@ -1,6 +1,8 @@
 import { test as base, expect } from "@playwright/test";
 import type { APIRequestContext, BrowserContext, Page } from "@playwright/test";
 
+import { EDGE, MAILPIT } from "./env";
+
 /**
  * Shared fixtures for the E2E journey.
  *
@@ -26,7 +28,6 @@ import type { APIRequestContext, BrowserContext, Page } from "@playwright/test";
  * inside the 10/min login rate limit that per-test logins exhausted by test 7.
  */
 
-const EDGE = "http://127.0.0.1:8080";
 const ADMIN = { email: "admin@nexusops.example.com", password: "nexusops-admin", full_name: "E2E Admin" };
 
 export interface Bootstrap {
@@ -59,7 +60,7 @@ export const test = base.extend<{
   auth: Bootstrap;
   adminSession: { context: BrowserContext; bootstrap: Bootstrap };
   journeyPage: Page;
-  apiToken: string;
+  apiToken: { token: string; orgId: string };
   api: APIRequestContext;
   mailpit: APIRequestContext;
 }>({
@@ -104,6 +105,9 @@ export const test = base.extend<{
   // shared jar's cookie, that sign-out revokes whichever session the page
   // currently carries — which must never be the one the `api` fixture calls
   // with. This login's token is held here and used by nothing else.
+  // The login response's active_organization_id also yields the tenant header:
+  // since Phase 1 tenancy, every org-scoped endpoint rejects requests without
+  // X-Org-Id (ORGANIZATION_HEADER_REQUIRED).
   apiToken: [
     async ({ playwright }, use) => {
       const ctx = await playwright.request.newContext({ baseURL: EDGE });
@@ -112,7 +116,12 @@ export const test = base.extend<{
           data: { email: ADMIN.email, password: ADMIN.password },
         });
         expect(login.ok(), `api-token bootstrap login failed: ${login.status()}`).toBeTruthy();
-        await use(((await login.json()) as { access_token: string }).access_token);
+        const body = (await login.json()) as { access_token: string; active_organization_id: string | null };
+        expect(
+          body.active_organization_id,
+          "login returned no active organization — cannot scope API calls",
+        ).toBeTruthy();
+        await use({ token: body.access_token, orgId: body.active_organization_id as string });
       } finally {
         await ctx.dispose();
       }
@@ -123,14 +132,16 @@ export const test = base.extend<{
   api: async ({ playwright, apiToken }, use) => {
     const api = await playwright.request.newContext({
       baseURL: EDGE,
-      extraHTTPHeaders: { Authorization: `Bearer ${apiToken}` },
+      extraHTTPHeaders: {
+        Authorization: `Bearer ${apiToken.token}`,
+        "X-Org-Id": apiToken.orgId,
+      },
     });
     await use(api);
     await api.dispose();
   },
 
-  mailpit: async ({ playwright }, use) => {
-    const mailpit = await playwright.request.newContext({ baseURL: "http://127.0.0.1:8025" });
+  mailpit: async ({ playwright }, use) => {      const mailpit = await playwright.request.newContext({ baseURL: MAILPIT });
     await use(mailpit);
     await mailpit.dispose();
   },

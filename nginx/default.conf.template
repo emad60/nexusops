@@ -19,6 +19,19 @@ map $http_x_forwarded_proto $nx_fwd_proto {
     default $http_x_forwarded_proto;
 }
 
+# Preserve the public authority (host AND any non-default port) when proxying.
+# nginx's $host is the bare hostname — it drops the port — and the API's
+# WebSocket origin check compares the browser's Origin against this Host
+# (app/ws/hub.py `_is_same_origin`). Origin "http://host:8090" can never equal
+# Host "host", so every handshake was rejected with a pre-upgrade 403 and the
+# SPA reconnect-looped forever. Fall back to $host only when no Host header was
+# sent at all (HTTP/1.0), so $http_host (the client's own authority) wins whenever
+# it exists.
+map $http_host $nx_host_header {
+    ''      $host;
+    default $http_host;
+}
+
 # Docker's embedded DNS. Upstreams are resolved at REQUEST time (valid=10s
 # cache): a static hostname in proxy_pass is resolved once at config load and
 # cached forever, so any `compose up -d` that recreates api/frontend hands out
@@ -47,7 +60,7 @@ server {
         set $api_host ${API_UPSTREAM};
         proxy_pass http://$api_host;
         proxy_http_version 1.1;
-        proxy_set_header Host $host;
+        proxy_set_header Host $nx_host_header;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $nx_fwd_proto;
         proxy_set_header Upgrade $http_upgrade;
@@ -66,7 +79,7 @@ server {
         set $web_host ${WEB_UPSTREAM};
         proxy_pass http://$web_host;
         proxy_http_version 1.1;
-        proxy_set_header Host $host;
+        proxy_set_header Host $nx_host_header;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $nx_fwd_proto;
         # Upgrade headers here too: vite's HMR websocket rides this route in dev.
@@ -99,7 +112,7 @@ server {
 #         set $web_host ${WEB_UPSTREAM};
 #         proxy_pass http://$web_host;
 #         proxy_http_version 1.1;
-#         proxy_set_header Host $host;
+#         proxy_set_header Host $nx_host_header;
 #         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
 #         proxy_set_header X-Forwarded-Proto https;
 #         proxy_set_header Upgrade $http_upgrade;

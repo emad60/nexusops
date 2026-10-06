@@ -1,13 +1,20 @@
 /**
  * Live event subscription over the NexusOps WebSocket hub.
  *
- * - Authenticates with the in-memory access token on connect.
+ * - Authenticates with the in-memory access token **and the active organization**
+ *   on connect: a socket is bound to one organization for its lifetime, and the
+ *   hub refuses an auth frame without a valid `org_id` (close 4401) — omitting it
+ *   produces a silent reconnect loop that looks like a server outage.
  * - Reconnects with capped exponential backoff (1s → 15s).
  * - Re-authenticates + resubscribes automatically after reconnects.
+ * - Sends a `ping` every 30s once authenticated, so the hub's idle watchdog
+ *   (which reaps a socket quiet for 120s) cannot drop a healthy but quiet
+ *   stream — a dropped socket means events published during the reconnect gap
+ *   are lost, since there is no replay.
  */
 
 import { useEffect, useRef } from "react";
-import { getAccessToken, refreshToken } from "../api/client";
+import { getAccessToken, getActiveOrgId, onActiveOrgChange, refreshToken } from "../api/client";
 
 export type WsChannel =
   | "global"
@@ -32,6 +39,12 @@ interface Subscription {
 
 const WS_URL = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/api/v1/ws`;
 
+/**
+ * Keepalive cadence. Must stay well under the hub's ``IDLE_TIMEOUT_SECONDS``
+ * (120s in ``app/ws/hub.py``) so a quiet socket is never reaped.
+ */
+const HEARTBEAT_INTERVAL_MS = 30_000;
+
 export function useEventStream(
   subscriptions: Array<{ channel: WsChannel; params?: Record<string, string> }>,
   onFrame: (frame: WsFrame) => void,
@@ -53,6 +66,15 @@ export function useEventStream(
     let closed = false;
     let attempt = 0;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+    let stopWaitingForOrg: (() => void) | null = null;
+
+    const stopHeartbeat = () => {
+      if (heartbeatTimer) {
+        clearInterval(heartbeatTimer);
+        heartbeatTimer = null;
+      }
+    };
 
     const send = (payload: Record<string, unknown>) => {
       if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(payload));
@@ -92,17 +114,41 @@ export function useEventStream(
         // every open also covers reconnects).
         const authenticate = () => {
           const token = getAccessToken();
-          if (!token) return false;
-          send({ action: "auth", token });
+          const orgId = getActiveOrgId();
+          // Both are required: the hub binds the socket to `org_id` and closes
+          // it otherwise, so an auth frame without one would just loop.
+          if (!token || !orgId) return false;
+          send({ action: "auth", token, org_id: orgId });
           subscribeAll();
+          // The server counts any inbound frame as liveness; without a
+          // keepalive a quiet stream is closed after 120s and any event
+          // published during the reconnect gap is lost (there is no replay).
+          if (!heartbeatTimer) {
+            heartbeatTimer = setInterval(() => send({ action: "ping" }), HEARTBEAT_INTERVAL_MS);
+          }
           return true;
         };
         if (authenticate()) return;
-        // No token yet (e.g. page reloaded); renew silently then auth + subscribe.
-        void refreshToken().then((ok) => {
-          if (!ok) return;
-          authenticate();
-        });
+
+        // Half the handshake can still be settling after a fresh page load: the
+        // token (renew silently) and the organization (the AuthProvider's first
+        // `/organizations` call). Both are *waited* for on this socket rather
+        // than retried by reconnecting — the hub closes an unauthenticated
+        // socket after 10s, and reconnecting until the value arrives would turn
+        // a momentary gap into a burst of refused connections.
+        if (!getActiveOrgId()) {
+          stopWaitingForOrg = onActiveOrgChange((orgId) => {
+            if (orgId && authenticate()) {
+              stopWaitingForOrg?.();
+              stopWaitingForOrg = null;
+            }
+          });
+        }
+        if (!getAccessToken()) {
+          void refreshToken().then((ok) => {
+            if (ok) authenticate();
+          });
+        }
       };
 
       socket.onmessage = (message) => {
@@ -114,6 +160,9 @@ export function useEventStream(
       };
 
       socket.onclose = () => {
+        stopHeartbeat();
+        stopWaitingForOrg?.();
+        stopWaitingForOrg = null;
         if (closed) return;
         attempt += 1;
         const delay = Math.min(1000 * 2 ** Math.min(attempt, 4), 15000);
@@ -127,6 +176,9 @@ export function useEventStream(
 
     return () => {
       closed = true;
+      stopHeartbeat();
+      stopWaitingForOrg?.();
+      stopWaitingForOrg = null;
       if (reconnectTimer) clearTimeout(reconnectTimer);
       socket?.close();
     };

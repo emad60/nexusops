@@ -26,6 +26,7 @@ from app.core.logging import get_logger
 from app.core.pagination import PageParams, paginate
 from app.core.redis_client import get_redis
 from app.models import (
+    AgentCredential,
     Alert,
     Container,
     DockerHost,
@@ -252,13 +253,38 @@ async def delete_server(
     return snapshot
 
 
-async def rotate_agent_token(db: AsyncSession, *, server_id: uuid.UUID) -> tuple[str, Server]:
-    """Regenerate the enrollment token. The previous token stops working."""
+async def rotate_agent_token(
+    db: AsyncSession, *, server_id: uuid.UUID, ctx: AuthContext | None = None
+) -> tuple[str, Server]:
+    """Regenerate the enrollment token. The previous token stops working.
+
+    The hash lives in ``agent_credentials`` (the pre-org routing table), not on
+    the node row: agent authentication has to resolve *which* organization a
+    node belongs to before any tenant scope exists, and the node table is under
+    RLS. One row per node means replacing the hash revokes the old token
+    immediately — there is no window in which two tokens are valid.
+    """
     from app.core.security import generate_agent_token
 
     server = await get_server(db, server_id)
     raw, _prefix, token_hash = generate_agent_token()
-    server.agent_token_hash = token_hash
+    now = datetime.now(UTC)
+    credential = await db.get(AgentCredential, server.id)
+    if credential is None:
+        db.add(
+            AgentCredential(
+                server_id=server.id,
+                org_id=server.org_id,
+                token_hash=token_hash,
+                created_by_id=ctx.user_id if ctx is not None else None,
+            )
+        )
+    else:
+        # Re-enrollment clears a previous revocation rather than stacking rows:
+        # the row *is* the node's single credential.
+        credential.token_hash = token_hash
+        credential.rotated_at = now
+        credential.revoked_at = None
     server.agent_enrolled_at = None
     await db.flush()
     return raw, server
@@ -395,7 +421,9 @@ async def mark_stale_servers(db: AsyncSession) -> list[dict[str, str]]:
             Server.last_heartbeat_at < func.now() - grace,
         )
         .values(status=ServerStatus.OFFLINE)
-        .returning(Server.id, Server.name)
+        # org_id comes back so the alert below can carry the tenant explicitly:
+        # under the sweep's system scope nothing stamps it automatically.
+        .returning(Server.id, Server.name, Server.org_id)
         .execution_options(synchronize_session=False)
     )
     went_offline = stale.all()
@@ -415,37 +443,42 @@ async def mark_stale_servers(db: AsyncSession) -> list[dict[str, str]]:
 
     transitions: list[dict[str, str]] = []
     today = _utc_today()
-    for row in went_offline:
-        transitions.append({"server_id": str(row.id), "to": "OFFLINE"})
+    for offline_row in went_offline:
+        transitions.append({"server_id": str(offline_row.id), "to": "OFFLINE"})
         await publish(
             db,
             type="SERVER_OFFLINE",
             level=EventLevel.WARNING,
-            message=f"{row.name} went offline",
+            message=f"{offline_row.name} went offline",
             resource_type="server",
-            resource_id=str(row.id),
-            dedup_key=f"srv-offline:{row.id}:{today}",
+            resource_id=str(offline_row.id),
+            dedup_key=f"srv-offline:{offline_row.id}:{today}",
         )
         db.add(
             Alert(
+                # The sweep runs under the system scope where no ambient org
+                # exists; the alert must carry the server's tenant explicitly
+                # or the INSERT violates alerts.org_id NOT NULL (and a NULL
+                # would hide the alert from the tenant anyway).
+                org_id=offline_row.org_id,
                 severity=AlertSeverity.CRITICAL,
-                title=f"{row.name} went offline",
+                title=f"{offline_row.name} went offline",
                 body="No heartbeat was received within the configured offline threshold.",
                 event_type="SERVER_OFFLINE",
                 source="server",
                 resource_type="server",
-                resource_id=str(row.id),
+                resource_id=str(offline_row.id),
             )
         )
-    for row in came_online:
-        transitions.append({"server_id": str(row.id), "to": "ONLINE"})
+    for online_row in came_online:
+        transitions.append({"server_id": str(online_row.id), "to": "ONLINE"})
         await publish(
             db,
             type="SERVER_ONLINE",
-            message=f"{row.name} came online",
+            message=f"{online_row.name} came online",
             resource_type="server",
-            resource_id=str(row.id),
-            dedup_key=f"srv-online:{row.id}:{today}",
+            resource_id=str(online_row.id),
+            dedup_key=f"srv-online:{online_row.id}:{today}",
         )
 
     if transitions:
@@ -457,7 +490,14 @@ async def mark_stale_servers(db: AsyncSession) -> list[dict[str, str]]:
 
 
 async def ensure_docker_host(db: AsyncSession, *, server: Server) -> DockerHost:
-    """Return the agent-backed Docker host for a server, creating it if needed."""
+    """Return the agent-backed Docker host for a server, creating it if needed.
+
+    The host is stamped with the **server's** organization rather than whatever
+    scope happens to be active: this runs from the agent heartbeat (org scope)
+    and from the maintenance sweep (system scope), and in the latter there is no
+    ambient answer to copy — a row without an owner would be rejected by the
+    RLS ``WITH CHECK`` anyway, but only after a confusing NOT NULL error.
+    """
     host = (
         await db.execute(select(DockerHost).where(DockerHost.server_id == server.id))
     ).scalar_one_or_none()
@@ -465,6 +505,7 @@ async def ensure_docker_host(db: AsyncSession, *, server: Server) -> DockerHost:
         return host
     host = DockerHost(
         server_id=server.id,
+        org_id=server.org_id,
         name=f"agent-{server.name}",
         endpoint_url=f"agent://{server.name}",
         status=DockerHostStatus.UNKNOWN,
@@ -532,6 +573,7 @@ async def upsert_containers(
             row = Container(
                 docker_host_id=host.id,
                 server_id=server.id,
+                org_id=server.org_id,
                 container_id=entry.container_id,
                 ports=[],
                 env_keys=[],

@@ -5,12 +5,19 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, Request, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import AuthContext, CurrentUser, DbSessionDep, resolve_auth
+from app.api.deps import (
+    AuthContext,
+    DbSessionDep,
+    IdentityUser,
+    active_memberships,
+    resolve_auth,
+)
 from app.core.config import get_settings
 from app.core.errors import Unauthorized
 from app.core.rate_limit import auth_limiter, client_ip, register_limiter, token_refresh_limiter
 from app.schemas.auth import (
     LoginRequest,
+    MembershipOut,
     MeOut,
     PasswordChangeRequest,
     RefreshRequest,
@@ -18,6 +25,7 @@ from app.schemas.auth import (
     TokenOut,
     UserEnvelope,
 )
+from app.schemas.organization import OrganizationOut
 from app.schemas.user import UserOut
 from app.services import auth_service, role_service
 
@@ -120,6 +128,8 @@ async def login(
         access_token=issued.access_token,
         expires_in=issued.expires_in,
         user=UserOut.from_user(issued.user),
+        organizations=[MembershipOut.from_membership(m) for m in issued.memberships],
+        active_organization_id=issued.active_organization_id,
     )
 
 
@@ -139,31 +149,58 @@ async def refresh(
         access_token=issued.access_token,
         expires_in=issued.expires_in,
         user=UserOut.from_user(issued.user),
+        organizations=[MembershipOut.from_membership(m) for m in issued.memberships],
+        active_organization_id=issued.active_organization_id,
     )
 
 
 @router.post("/logout", status_code=204)
-async def logout(ctx: CurrentUser, db: DbSessionDep, response: Response, request: Request) -> None:
-    """Revoke the current session and clear the refresh cookie."""
+async def logout(ctx: IdentityUser, db: DbSessionDep, response: Response, request: Request) -> None:
+    """Revoke the current session and clear the refresh cookie.
+
+    Identity-only on purpose: an account must always be able to end its own
+    session, even if it currently belongs to no organization.
+    """
     await auth_service.logout(db, ctx=ctx, request=request)
     _clear_refresh_cookie(request, response)
 
 
 @router.get("/me", response_model=MeOut)
-async def me(ctx: CurrentUser) -> MeOut:
-    """The caller's identity, role name and effective permission list."""
-    role = ctx.user.role
+async def me(ctx: IdentityUser, db: DbSessionDep) -> MeOut:
+    """The caller's identity, organizations, and authority in the active one.
+
+    Deliberately usable without ``X-Org-Id``: this is how a client learns which
+    organizations it may act in. When the header *is* sent and valid, the
+    response also reports the resolved organization and the permissions it
+    grants.
+    """
+    memberships = await active_memberships(db, ctx.user_id)
+    active_id = ctx.org_id
+    if active_id is None and len(memberships) == 1:
+        active_id = memberships[0].org_id
+
+    role_name = ctx.role_name
+    permissions: list[str] = []
+    if ctx.membership is not None:
+        permissions = role_service.permissions_for_role(ctx.membership.role)
+    elif len(memberships) == 1 and memberships[0].role is not None:
+        role_name = memberships[0].role.name
+        permissions = role_service.permissions_for_role(memberships[0].role)
+
     return MeOut(
         user=UserOut.from_user(ctx.user),
-        role=role.name if role else None,
-        permissions=role_service.effective_permissions(ctx.user),
+        role=role_name,
+        permissions=permissions,
         superadmin=ctx.user.is_superadmin,
+        organizations=[MembershipOut.from_membership(m) for m in memberships],
+        active_organization_id=active_id,
+        active_organization=OrganizationOut.from_org(ctx.org) if ctx.org else None,
     )
 
 
 @router.post("/password", response_model=UserEnvelope)
 async def change_password(
-    body: PasswordChangeRequest, ctx: CurrentUser, db: DbSessionDep, request: Request
+    body: PasswordChangeRequest, ctx: IdentityUser, db: DbSessionDep, request: Request
 ) -> UserEnvelope:
     """Change own password; other sessions are revoked, current one survives."""
     user = await auth_service.change_own_password(

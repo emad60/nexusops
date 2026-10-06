@@ -33,6 +33,7 @@ from app.core.pagination import CursorParams
 from app.core.redis_client import get_redis
 from app.core.security import decrypt_str, encrypt_str
 from app.core.ssrf import assert_safe_url_async
+from app.core.tenancy import apply_scope_to_session, org_scope, system_scope
 from app.models import NotificationChannel, NotificationDelivery
 from app.models.enums import AlertSeverity, ChannelType, DeliveryStatus, EventLevel
 from app.providers.notification_sender import NotificationError, send_email, send_webhook
@@ -309,8 +310,27 @@ async def _invoke_sender(
         return DeliveryStatus.FAILED, f"unexpected {exc.__class__.__name__}"
 
 
-async def send_delivery(db: AsyncSession, delivery_id: uuid.UUID) -> None:
-    """Attempt one delivery and record the outcome. Commits; never raises."""
+async def send_delivery(
+    db: AsyncSession, delivery_id: uuid.UUID, *, org_id: uuid.UUID | None = None
+) -> None:
+    """Attempt one delivery and record the outcome. Commits; never raises.
+
+    ``org_id`` is the organization the delivery belongs to. Callers that reach
+    this row from a cross-tenant context (the retry sweep, the Redis frame
+    dispatcher) pass it so the work is performed **inside that tenant's scope**:
+    without it the guard refuses the read, and with the wrong one RLS returns
+    nothing rather than sending somebody else's notification.
+    """
+    if org_id is not None:
+        with org_scope(org_id):
+            await apply_scope_to_session(db)
+            await _attempt_delivery(db, delivery_id)
+        return
+    await _attempt_delivery(db, delivery_id)
+
+
+async def _attempt_delivery(db: AsyncSession, delivery_id: uuid.UUID) -> None:
+    """One send attempt; assumes the correct organization scope is active."""
     try:
         delivery = (
             await db.execute(
@@ -383,11 +403,17 @@ async def send_delivery(db: AsyncSession, delivery_id: uuid.UUID) -> None:
 
 
 async def retry_due_deliveries(db: AsyncSession, limit: int = 50) -> int:
-    """Send every due PENDING / retryable-FAILED delivery. Returns count attempted."""
-    due_ids = (
-        (
+    """Send every due PENDING / retryable-FAILED delivery. Returns count attempted.
+
+    A sweep over every tenant's queue, so the *claim* runs under the system
+    scope while each individual send re-enters the row's own organization: the
+    selection is deliberately cross-tenant, and nothing downstream of it is.
+    """
+    with system_scope("notification.retry_due_deliveries"):
+        await apply_scope_to_session(db)
+        due_rows = (
             await db.execute(
-                select(NotificationDelivery.id)
+                select(NotificationDelivery.id, NotificationDelivery.org_id)
                 .where(
                     or_(
                         NotificationDelivery.status == DeliveryStatus.PENDING,
@@ -402,14 +428,11 @@ async def retry_due_deliveries(db: AsyncSession, limit: int = 50) -> int:
                 .order_by(NotificationDelivery.next_retry_at)
                 .limit(limit)
             )
-        )
-        .scalars()
-        .all()
-    )
+        ).all()
 
     attempted = 0
-    for delivery_id in due_ids:
-        await send_delivery(db, delivery_id)
+    for delivery_id, org_id in due_rows:
+        await send_delivery(db, delivery_id, org_id=org_id)
         attempted += 1
     return attempted
 
@@ -425,64 +448,86 @@ async def dispatch_event_frame(frame: dict[str, Any]) -> int:
     """Queue an event frame to every subscribed enabled channel; send immediately.
 
     Returns how many deliveries were queued.
+
+    Frames arrive on one broadcast channel from every tenant, so this runs under
+    the system scope and then narrows itself to the frame's organization: the
+    channel lookup is filtered by ``org_id`` explicitly, and each delivery row is
+    born with that organization. A frame without an organization has no tenant
+    to notify — channels are organization-owned — and is dropped rather than
+    fanned out to everyone.
     """
     event_type = str(frame.get("type", "")).upper()[:64]
     if not event_type:
         return 0
+    frame_org = _as_uuid(frame.get("org_id"))
+    if frame_org is None:
+        log.debug("dispatch_skipped_orgless_frame", event_type=event_type)
+        return 0
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as db:
-        channels = (
-            (
-                await db.execute(
-                    select(NotificationChannel).where(
-                        NotificationChannel.enabled.is_(True),
-                        or_(
-                            func.jsonb_array_length(NotificationChannel.events) == 0,
-                            NotificationChannel.events.contains([event_type]),
-                        ),
+        # The whole database section runs under the system scope: the lookup is
+        # cross-tenant by construction, and the queued rows are written with an
+        # explicit organization (never an ambient one).
+        with system_scope("notification.dispatch_event_frame"):
+            await apply_scope_to_session(db)
+            channels = (
+                (
+                    await db.execute(
+                        select(NotificationChannel).where(
+                            NotificationChannel.org_id == frame_org,
+                            NotificationChannel.enabled.is_(True),
+                            or_(
+                                func.jsonb_array_length(NotificationChannel.events) == 0,
+                                NotificationChannel.events.contains([event_type]),
+                            ),
+                        )
                     )
                 )
+                .scalars()
+                .all()
             )
-            .scalars()
-            .all()
-        )
-        if not channels:
-            return 0
-        subject, body = render_frame(frame)
-        # Idempotent insert: every API worker runs this dispatcher and pubsub
-        # broadcasts each frame to all of them — without ON CONFLICT each
-        # worker queued (and emailed) its own delivery for the same
-        # (channel, event). The unique constraint is the arbiter; only the
-        # first inserter proceeds to send, and the frame's own workers see an
-        # empty RETURNING. Manual/test sends carry NULL event_id and are
-        # exempt (Postgres treats NULLs as distinct).
-        event_id = _as_uuid(frame.get("id"))
-        incident_id = _as_uuid((frame.get("data") or {}).get("incident_id"))
-        stmt = (
-            pg_insert(NotificationDelivery)
-            .values(
-                [
-                    {
-                        "channel_id": channel.id,
-                        "event_id": event_id,
-                        "incident_id": incident_id,
-                        "event_type": event_type,
-                        "subject": subject,
-                        "body": body,
-                        "status": DeliveryStatus.PENDING.value,
-                        "attempts": 0,
-                        "next_retry_at": _now(),
-                    }
-                    for channel in channels
-                ]
+            if not channels:
+                return 0
+            subject, body = render_frame(frame)
+            # Idempotent insert: every API worker runs this dispatcher and
+            # pubsub broadcasts each frame to all of them — without ON CONFLICT
+            # each worker queued (and emailed) its own delivery for the same
+            # (channel, event). The unique constraint is the arbiter; only the
+            # first inserter proceeds to send, and the frame's own workers see
+            # an empty RETURNING. Manual/test sends carry NULL event_id and are
+            # exempt (Postgres treats NULLs as distinct).
+            event_id = _as_uuid(frame.get("id"))
+            incident_id = _as_uuid((frame.get("data") or {}).get("incident_id"))
+            stmt = (
+                pg_insert(NotificationDelivery)
+                .values(
+                    [
+                        {
+                            "channel_id": channel.id,
+                            "org_id": frame_org,
+                            "event_id": event_id,
+                            "incident_id": incident_id,
+                            "event_type": event_type,
+                            "subject": subject,
+                            "body": body,
+                            "status": DeliveryStatus.PENDING.value,
+                            "attempts": 0,
+                            "next_retry_at": _now(),
+                        }
+                        for channel in channels
+                    ]
+                )
+                .on_conflict_do_nothing(constraint="uq_deliveries_channel_event")
+                .returning(NotificationDelivery.id)
             )
-            .on_conflict_do_nothing(constraint="uq_deliveries_channel_event")
-            .returning(NotificationDelivery.id)
-        )
-        delivery_ids = list((await db.execute(stmt)).scalars().all())
-        await db.commit()
-        if not delivery_ids:
-            return 0
+            # Core INSERT bypasses the ORM's org stamping, so ``org_id`` is
+            # written here by hand — and the system-scope connection can write
+            # any tenant's row, which is exactly why the value is the frame's
+            # own organization rather than anything ambient.
+            delivery_ids = list((await db.execute(stmt)).scalars().all())
+            await db.commit()
+            if not delivery_ids:
+                return 0
 
     semaphore = asyncio.Semaphore(SEND_CONCURRENCY)
 
@@ -490,7 +535,7 @@ async def dispatch_event_frame(frame: dict[str, Any]) -> int:
         async with semaphore:
             try:
                 async with sessionmaker() as db:
-                    await send_delivery(db, delivery_id)
+                    await send_delivery(db, delivery_id, org_id=frame_org)
             except Exception as exc:  # isolation: one bad channel never blocks others
                 log.warning("dispatch_send_failed", reason=exc.__class__.__name__)
 

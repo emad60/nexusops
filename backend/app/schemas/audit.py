@@ -14,8 +14,18 @@ from app.schemas.base import OutModel
 
 
 class AuditOut(OutModel):
-    """One audit trail entry (no write routes ever exist for this resource)."""
+    """One audit trail entry (no write routes ever exist for this resource).
 
+    ``org_id`` is reported explicitly. The listing is already filtered to the
+    caller's organization, so it is not how isolation is achieved — it is how a
+    security event identifies *which* tenant it belongs to when the trail is
+    exported, correlated or handed to an auditor. It is ``None`` only for the
+    genuinely instance-level events (a failed login for an address with no
+    account), which are written under the system scope and are invisible to
+    every tenant.
+    """
+
+    org_id: UUID | None = None
     actor_id: UUID | None = None
     actor_email: str
     action: str

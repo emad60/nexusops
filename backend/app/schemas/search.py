@@ -26,7 +26,7 @@ class SearchResultOut(APIModel):
     the object uniformly.
     """
 
-    servers: list[SearchHit] = Field(default_factory=list)
+    nodes: list[SearchHit] = Field(default_factory=list)
     containers: list[SearchHit] = Field(default_factory=list)
     deployments: list[SearchHit] = Field(default_factory=list)
     projects: list[SearchHit] = Field(default_factory=list)

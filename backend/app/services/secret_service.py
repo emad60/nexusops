@@ -4,11 +4,18 @@ Plaintext exists only transiently in memory: it is accepted on create/rotate,
 Fernet-encrypted at rest and never returned by any read path. Deployment
 resolution happens server-side via :func:`resolve_secrets_for_environment`,
 which is INTERNAL USE ONLY and must never be exposed through an API route.
+
+Resolution is **fail-closed**: a ``${secret:KEY}`` reference that names no row
+or whose ciphertext cannot be decrypted raises :class:`SecretResolutionError`
+rather than resolving to ``""``. A deployment must never proceed without the
+credentials its configuration names.
 """
 
 from __future__ import annotations
 
 import uuid
+from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -262,6 +269,43 @@ async def delete_secret(
 # --- Deployment-time resolution (INTERNAL ONLY) ---------------------------------
 
 
+class SecretResolutionError(Exception):
+    """A ``${secret:KEY}`` reference could not be resolved. Fail-closed.
+
+    Carries secret **key names** and failure reasons only — never a value, a
+    ciphertext or a digest. The deployment engine renders ``reason`` into the
+    deployment's ``failure_reason`` and audits the key lists.
+    """
+
+    def __init__(self, *, missing: Sequence[str], undecryptable: Sequence[str]) -> None:
+        self.missing: tuple[str, ...] = tuple(sorted(missing))
+        self.undecryptable: tuple[str, ...] = tuple(sorted(undecryptable))
+        parts: list[str] = []
+        if self.missing:
+            parts.append("missing: " + ", ".join(self.missing))
+        if self.undecryptable:
+            parts.append("undecryptable: " + ", ".join(self.undecryptable))
+        self.reason = "; ".join(parts)
+        super().__init__(f"unresolved secret reference(s) ({self.reason})")
+
+
+@dataclass(frozen=True, slots=True)
+class SecretReference:
+    """One successfully resolved reference: metadata for audit, no value."""
+
+    key: str
+    secret_id: uuid.UUID
+    version: int
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedSecrets:
+    """Outcome of resolving an environment's config references."""
+
+    values: dict[str, str]
+    references: tuple[SecretReference, ...] = ()
+
+
 def _collect_refs(node: Any, refs: set[str]) -> None:
     """Recursively collect ``${secret:KEY}`` references from config values."""
     if isinstance(node, dict):
@@ -276,18 +320,23 @@ def _collect_refs(node: Any, refs: set[str]) -> None:
 
 async def resolve_secrets_for_environment(
     db: AsyncSession, environment: DeploymentEnvironment
-) -> dict[str, str]:
+) -> ResolvedSecrets:
     """Resolve every ``${secret:KEY}`` reference in an environment's config.
 
-    INTERNAL USE ONLY — invoked by the deployment engine while executing steps.
+    INTERNAL USE ONLY — invoked by the deployment engine before it runs a step.
     NEVER expose resolved values through any API endpoint, WS frame or log line.
-    Project-scoped keys win over global ones; unresolved or undecryptable
-    references resolve to "" with a warning so deploys degrade instead of crash.
+    Project-scoped keys win over the global fallback.
+
+    **Fail-closed.** Every reference must resolve: a key with no row at any
+    scope, or a ciphertext this ``ENCRYPTION_KEY`` cannot decrypt, raises
+    :class:`SecretResolutionError` and the caller aborts the deployment before
+    any step executes. The old degrade-to-``""`` behavior let a deploy ship
+    without its credentials and is deliberately gone.
     """
     refs: set[str] = set()
     _collect_refs(environment.config or {}, refs)
     if not refs:
-        return {}
+        return ResolvedSecrets(values={})
 
     project_id = await db.scalar(
         select(Application.project_id).where(Application.id == environment.application_id)
@@ -310,16 +359,32 @@ async def resolve_secrets_for_environment(
         ):
             best[secret.key] = secret
 
-    resolved: dict[str, str] = {}
+    values: dict[str, str] = {}
+    references: list[SecretReference] = []
+    missing: list[str] = []
+    undecryptable: list[str] = []
+
     for key in sorted(refs):
         found = best.get(key)
         if found is None:
-            log.warning("secret_reference_missing", key=key, environment=environment.slug)
-            resolved[key] = ""
+            missing.append(key)
             continue
         try:
-            resolved[key] = decrypt_str(found.ciphertext)
+            values[key] = decrypt_str(found.ciphertext)
         except ValueError:
             log.error("secret_decrypt_failed", key=key, version=found.version)
-            resolved[key] = ""
-    return resolved
+            undecryptable.append(key)
+            continue
+        references.append(SecretReference(key=key, secret_id=found.id, version=found.version))
+
+    if missing or undecryptable:
+        # Key names + reasons only; values and ciphertext never touch the log.
+        log.error(
+            "secret_resolution_failed",
+            environment=environment.slug,
+            missing=missing,
+            undecryptable=undecryptable,
+        )
+        raise SecretResolutionError(missing=missing, undecryptable=undecryptable)
+
+    return ResolvedSecrets(values=values, references=tuple(references))

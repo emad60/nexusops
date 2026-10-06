@@ -9,6 +9,11 @@ Frames are published only AFTER their transaction commits: both consumers
 (the WS hub and the notification dispatcher) dereference the event id, so a
 frame that outruns its row breaks them — and an event whose transaction rolls
 back must never be announced at all.
+
+Every event carries its organization. Request paths inherit it from the tenancy
+scope; sweeps and workers pass it explicitly (there is no ambient answer once a
+worker acts across tenants); and the genuinely org-less events that remain are
+written under the system scope, which is also why no tenant can read them.
 """
 
 from __future__ import annotations
@@ -26,6 +31,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.channels import CHANNEL_EVENTS
 from app.core.logging import get_logger
 from app.core.redis_client import get_redis
+from app.core.tenancy import TenancyScopeError, current_org, system_write_scope
 from app.models import SystemEvent
 from app.models.enums import ActorType, EventLevel
 
@@ -88,8 +94,18 @@ async def publish(
     data: dict[str, Any] | None = None,
     dedup_key: str | None = None,
     commit: bool = False,
+    org_id: uuid.UUID | None = None,
 ) -> SystemEvent | None:
-    """Persist an event and fan it out to Redis. Returns None when deduplicated."""
+    """Persist an event and fan it out to Redis. Returns None when deduplicated.
+
+    The organization defaults to the active tenancy scope, which is correct for
+    every request-scoped publish and most worker publishes. Sweeps that run
+    under ``system_scope()`` and act on rows belonging to different tenants must
+    pass ``org_id`` explicitly: there is no ambient answer, and the dispatcher
+    matches notification channels by the frame's organization, so an event
+    published to the wrong org is a cross-tenant notification.
+    """
+    resolved_org = org_id if org_id is not None else current_org()
     if dedup_key is not None:
         existing = (
             await db.execute(select(SystemEvent.id).where(SystemEvent.dedup_key == dedup_key))
@@ -97,7 +113,16 @@ async def publish(
         if existing is not None:
             return None
 
+    if resolved_org is None and actor_type is not ActorType.SYSTEM:
+        # A named actor (user or machine) always belongs somewhere; publishing
+        # without an organization would file the event under no tenant at all.
+        raise TenancyScopeError(
+            f"event {type!r} has an actor but no organization: pass org_id= or "
+            f"run inside org_scope(...)"
+        )
+
     event = SystemEvent(
+        org_id=resolved_org,
         type=type,
         level=level,
         message=message[:500],
@@ -108,11 +133,23 @@ async def publish(
         data=data or {},
         dedup_key=dedup_key,
     )
-    db.add(event)
-    await db.flush()
+    if resolved_org is None:
+        # An event with no organization (a system-actor, instance-level record:
+        # bootstrap, a failed login for an address with no account) can only be
+        # written under the system scope. The tenant policy requires
+        # ``org_id = current org`` and a NULL never matches it; the system policy
+        # is the one that admits org-less rows — and, symmetrically, keeps them
+        # invisible to every tenant afterwards.
+        async with system_write_scope(db, "event_bus.orgless_event"):
+            db.add(event)
+            await db.flush()
+    else:
+        db.add(event)
+        await db.flush()
 
     frame = {
         "id": str(event.id),
+        "org_id": str(resolved_org) if resolved_org else None,
         "type": type,
         "level": level.value,
         "message": message[:500],
@@ -146,6 +183,7 @@ def event_frame_from_row(event: SystemEvent) -> dict[str, Any]:
     """Serialize a persisted event for WS delivery (used on replay/backfill)."""
     return {
         "id": str(event.id),
+        "org_id": str(event.org_id) if event.org_id else None,
         "type": event.type,
         "level": event.level.value,
         "message": event.message,

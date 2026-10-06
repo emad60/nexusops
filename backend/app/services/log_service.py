@@ -8,6 +8,7 @@ by the worker beat via :func:`trim_container_logs` / :func:`trim_deployment_logs
 from __future__ import annotations
 
 import re
+import uuid
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Any, cast
@@ -20,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.channels import container_log_channel
 from app.core.logging import get_logger
 from app.core.redis_client import get_redis
+from app.core.tenancy import TenancyScopeError, current_org
 from app.models import Container, LogEntry
 from app.models.enums import LogLevel, LogSource
 from app.providers.base import LogLine
@@ -76,6 +78,7 @@ def _entry_values(
     line: LogLine,
     *,
     source: LogSource,
+    org_id: uuid.UUID,
     container_id: Any = None,
     deployment_id: Any = None,
     server_id: Any = None,
@@ -86,6 +89,10 @@ def _entry_values(
         else (line.ts.replace(tzinfo=UTC) if line.ts else datetime.now(UTC))
     )
     return {
+        # ``org_id`` is written explicitly because these rows go in through a
+        # Core bulk insert: the ORM's stamping never sees them, and the RLS
+        # ``WITH CHECK`` would reject a row with no owner.
+        "org_id": org_id,
         "source": source.value,
         "container_id": container_id,
         "deployment_id": deployment_id,
@@ -105,12 +112,25 @@ async def append_lines(
     deployment_id=None,
     server_id=None,
     lines: Sequence[LogLine],
+    org_id: uuid.UUID | None = None,
 ) -> int:
-    """Bulk-insert log lines in chunks of at most 500 rows. Returns count."""
+    """Bulk-insert log lines in chunks of at most 500 rows. Returns count.
+
+    The owning organization defaults to the active scope and may be passed
+    explicitly by callers that run cross-tenant (the maintenance sweep walks
+    hosts of every organization). A row with no organization is refused rather
+    than inserted ownerless.
+    """
+    owner_org = org_id or current_org()
+    if owner_org is None:
+        raise TenancyScopeError(
+            "log lines must carry an organization: pass org_id= or run inside org_scope(...)"
+        )
     values = [
         _entry_values(
             line,
             source=source,
+            org_id=owner_org,
             container_id=container_id,
             deployment_id=deployment_id,
             server_id=server_id,
@@ -192,6 +212,7 @@ async def ingest_provider_lines(
         container_id=container_row.id,
         server_id=container_row.server_id,
         lines=lines,
+        org_id=container_row.org_id,
     )
     cid = str(container_row.id)
     for line in lines:

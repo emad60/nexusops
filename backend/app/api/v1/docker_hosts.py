@@ -2,9 +2,9 @@
 
 Permission mapping (documented per the platform RBAC registry):
   * list / get / ping / images / volumes / networks -> ``container.read``
-  * create  -> ``server.create``  (hosts attach to servers)
-  * update  -> ``server.update``
-  * delete  -> ``server.delete``
+  * create  -> ``node.create``  (hosts attach to nodes)
+  * update  -> ``node.update``
+  * delete  -> ``node.delete``
 """
 
 from __future__ import annotations
@@ -33,9 +33,9 @@ from app.services import docker_host_service
 hosts_router = APIRouter(prefix="/docker-hosts", tags=["docker"])
 
 _ReadPerm = Annotated[AuthContext, Depends(require_permission("container.read"))]
-_CreatePerm = Annotated[AuthContext, Depends(require_permission("server.create"))]
-_UpdatePerm = Annotated[AuthContext, Depends(require_permission("server.update"))]
-_DeletePerm = Annotated[AuthContext, Depends(require_permission("server.delete"))]
+_CreatePerm = Annotated[AuthContext, Depends(require_permission("node.create"))]
+_UpdatePerm = Annotated[AuthContext, Depends(require_permission("node.update"))]
+_DeletePerm = Annotated[AuthContext, Depends(require_permission("node.delete"))]
 
 
 @hosts_router.get("", response_model=Page[DockerHostOut], summary="List docker hosts")

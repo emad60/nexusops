@@ -4,6 +4,10 @@ Run via ``make seed`` (or ``uv run python scripts/seed.py``). Safe to run
 repeatedly and across replicas: everything is guarded by a Postgres advisory
 lock and exits early when an admin already exists.
 
+Everything it creates is owned by one provisional organization named after the
+seeded admin (never after the vendor), and both seeded users are members of it,
+so the demo data is reachable through the same tenant path a real user takes.
+
 Opt-in outside the ``test`` environment (``NEXUSOPS_ALLOW_SEED=1``): a seed
 superadmin with a publicly-known password would be a standing full-platform
 backdoor. Outside ``test`` the admin password is generated randomly, printed
@@ -16,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import secrets
 import sys
 from datetime import UTC, datetime, timedelta
@@ -36,6 +41,7 @@ from app.core.security import (
     hash_password,
     hash_token,
 )
+from app.core.tenancy import apply_scope_to_session, org_scope
 from app.models import (
     Alert,
     ApiKey,
@@ -47,8 +53,10 @@ from app.models import (
     Incident,
     IncidentEvent,
     LogEntry,
+    Membership,
     Monitor,
     NotificationChannel,
+    Organization,
     Permission,
     Project,
     Role,
@@ -61,7 +69,9 @@ from app.models.enums import (
     DeploymentStatus,
     IncidentSeverity,
     IncidentStatus,
+    MembershipStatus,
     MonitorStatus,
+    OrganizationStatus,
     ServerStatus,
     StepStatus,
     UserStatus,
@@ -75,12 +85,30 @@ DEV_ADMIN_PASSWORD = "nexusops-admin"  # noqa: S105 - test-only seed credential
 DEV_VIEWER_PASSWORD = "nexusops-dev-123"  # noqa: S105 - test-only seed credential
 SEED_API_KEY_RAW = "nxo_" + "seed-demo-key-do-not-use"
 
+_SLUG_UNSAFE = re.compile(r"[^a-z0-9]+")
+
 
 def _seed_credentials(settings) -> tuple[str, str]:  # type: ignore[no-untyped-def]
     """(admin_password, viewer_password): deterministic in test, random otherwise."""
     if settings.is_testing:
         return DEV_ADMIN_PASSWORD, DEV_VIEWER_PASSWORD
     return secrets.token_urlsafe(16), secrets.token_urlsafe(16)
+
+
+def _organization_name(owner_name: str) -> str:
+    """Name the demo tenant after the seeded admin.
+
+    Same rule as the migration's bootstrap organization: named after the person
+    who owns the instance, flagged ``is_provisional``, and never after the
+    vendor — a tenant called "NexusOps" would read as a platform-owned tenant
+    and would be the thing every fork keeps by accident.
+    """
+    return f"{owner_name}'s Organization"[:120]
+
+
+def _organization_slug(owner_name: str) -> str:
+    slug = _SLUG_UNSAFE.sub("-", owner_name.lower()).strip("-")
+    return (slug or "organization")[:140]
 
 
 SERVERS = [
@@ -163,37 +191,85 @@ async def seed() -> int:
             db.add_all([admin, viewer])
             await db.flush()
 
-            admin_session = Session(
-                user_id=admin.id,
-                ip_address="127.0.0.1",
-                user_agent="seed-script",
-                device_label="workstation",
-                expires_at=now + timedelta(days=7),
-                last_seen_at=now - timedelta(minutes=5),
+            # --- Tenancy -------------------------------------------------
+            # Everything the demo creates belongs to one organization, and the
+            # seed says so explicitly rather than relying on a default: the ORM
+            # stamper fills org_id from the active scope, so an unscoped insert
+            # would be a silent NULL instead of an error.
+            org = Organization(
+                name=_organization_name(admin.full_name),
+                slug=_organization_slug(admin.full_name),
+                description=(
+                    "Demo tenant created by the seed. Rename it (or create your own "
+                    "organization) before this instance holds real work."
+                ),
+                status=OrganizationStatus.ACTIVE,
+                is_provisional=True,
+                created_by_id=admin.id,
             )
-            db.add(admin_session)
-            # A seeded API key with a value derivable from source is a standing
-            # credential; only ever create it inside the throwaway test env.
-            if settings.is_testing:
-                db.add(
-                    ApiKey(
+            db.add(org)
+            await db.flush()
+            db.add_all(
+                [
+                    Membership(
+                        org_id=org.id,
                         user_id=admin.id,
-                        name="seed CI key",
-                        key_prefix=SEED_API_KEY_RAW[:12],
-                        key_hash=hash_token(SEED_API_KEY_RAW),
-                        scopes=["server.read", "deployment.read"],
-                    )
+                        role_id=owner_role.id,
+                        status=MembershipStatus.ACTIVE,
+                        created_by_id=admin.id,
+                    ),
+                    Membership(
+                        org_id=org.id,
+                        user_id=viewer.id,
+                        role_id=operator_role.id,
+                        status=MembershipStatus.ACTIVE,
+                        created_by_id=admin.id,
+                    ),
+                ]
+            )
+            await db.flush()
+
+            with org_scope(org.id):
+                # The session already began its transaction for the advisory
+                # lock, so the GUC has to be pushed explicitly; every later
+                # transaction picks it up from after_begin.
+                await apply_scope_to_session(db)
+                admin_session = Session(
+                    user_id=admin.id,
+                    ip_address="127.0.0.1",
+                    user_agent="seed-script",
+                    device_label="workstation",
+                    expires_at=now + timedelta(days=7),
+                    last_seen_at=now - timedelta(minutes=5),
                 )
+                db.add(admin_session)
+                # A seeded API key with a value derivable from source is a standing
+                # credential; only ever create it inside the throwaway test env.
+                if settings.is_testing:
+                    db.add(
+                        ApiKey(
+                            user_id=admin.id,
+                            # Not OrgScoped (a key is looked up before an org is
+                            # known), so its owner is set here explicitly.
+                            org_id=org.id,
+                            name="seed CI key",
+                            key_prefix=SEED_API_KEY_RAW[:12],
+                            key_hash=hash_token(SEED_API_KEY_RAW),
+                            scopes=["node.read", "deployment.read"],
+                        )
+                    )
 
-            servers = await _seed_fleet(db, now)
-            await _seed_monitors(db, admin, now)
-            project = await _seed_delivery(db, admin, servers, now)
-            await _seed_history(db, admin, servers, project, now)
+                servers = await _seed_fleet(db, now)
+                await _seed_monitors(db, admin, now)
+                project = await _seed_delivery(db, admin, servers, now)
+                await _seed_history(db, admin, servers, project, now)
 
-            await db.commit()
+                await db.commit()
             logger.info(
                 "seed_done",
                 admin_email=ADMIN_EMAIL,
+                organization=org.name,
+                organization_id=str(org.id),
                 simulated_servers=len(servers),
                 simulation_mode=settings.simulation_mode,
             )

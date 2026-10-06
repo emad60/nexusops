@@ -57,12 +57,19 @@ async def create_api_key(
     expires_in_days: int | None = None,
     request: Request | None = None,
 ) -> tuple[ApiKey, str]:
-    """Create a key for *user_id*. Returns ``(row, raw_key)`` — raw shown once."""
+    """Create a key for *user_id*. Returns ``(row, raw_key)`` — raw shown once.
+
+    The key is bound to the organization the caller is acting in: that binding,
+    not the ``X-Org-Id`` header, is what limits a machine credential to one
+    tenant (the header is ignored when a key authenticates, so a key can never
+    be reinterpreted as belonging somewhere else).
+    """
     clean_scopes = validate_scopes(scopes)
     raw_key, key_prefix, key_hash = generate_api_key()
     now = datetime.now(UTC)
     key = ApiKey(
         user_id=user_id,
+        org_id=actor.org_id,
         name=name.strip()[:120],
         key_prefix=key_prefix,
         key_hash=key_hash,

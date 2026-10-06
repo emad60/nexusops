@@ -1,4 +1,9 @@
-"""Server endpoints: CRUD, tags, agent enrollment tokens."""
+"""Node endpoints: CRUD, tags, agent enrollment tokens.
+
+The domain entity is the existing ``servers`` table (kept; domain-model.md
+§2.2), renamed at the surface to **Node**. Routes are served under ``/nodes``
+with a temporary ``/servers`` alias.
+"""
 
 from __future__ import annotations
 
@@ -23,12 +28,14 @@ from app.schemas.server import (
 from app.schemas.tag import TagOut, TagUpsertIn
 from app.services import audit_service, server_service
 
-router = APIRouter(prefix="/servers", tags=["servers"])
+#: Prefix-less inner router: the paths below are declared once and mounted under
+#: both the canonical ``/nodes`` surface and the temporary ``/servers`` alias.
+_router = APIRouter()
 
-ReadCtx = Annotated[AuthContext, Depends(require_permission("server.read"))]
-CreateCtx = Annotated[AuthContext, Depends(require_permission("server.create"))]
-UpdateCtx = Annotated[AuthContext, Depends(require_permission("server.update"))]
-DeleteCtx = Annotated[AuthContext, Depends(require_permission("server.delete"))]
+ReadCtx = Annotated[AuthContext, Depends(require_permission("node.read"))]
+CreateCtx = Annotated[AuthContext, Depends(require_permission("node.create"))]
+UpdateCtx = Annotated[AuthContext, Depends(require_permission("node.update"))]
+DeleteCtx = Annotated[AuthContext, Depends(require_permission("node.delete"))]
 
 DbDep = Annotated[AsyncSession, Depends(get_session)]
 
@@ -44,7 +51,7 @@ async def _detail(db: AsyncSession, server_id: uuid.UUID) -> ServerDetail:
     return detail
 
 
-@router.get("", response_model=Page[ServerOut])
+@_router.get("", response_model=Page[ServerOut])
 async def list_servers(
     db: DbDep,
     ctx: ReadCtx,
@@ -75,18 +82,18 @@ async def list_servers(
     )
 
 
-@router.post("", response_model=ServerOut, status_code=status.HTTP_201_CREATED)
+@_router.post("", response_model=ServerOut, status_code=status.HTTP_201_CREATED)
 async def create_server(
     data: ServerCreate, request: Request, db: DbDep, ctx: CreateCtx
 ) -> ServerOut:
-    """Register a server. Returns the row without an enrollment token —
-    generate one via ``POST /servers/{id}/agent-token``."""
+    """Register a node. Returns the row without an enrollment token —
+    generate one via ``POST /nodes/{id}/agent-token``."""
     server = await server_service.create_server(db, payload=data, ctx=ctx)
     await audit_service.record(
         db,
         ctx,
-        action="server.create",
-        resource_type="server",
+        action="node.create",
+        resource_type="node",
         resource_id=server.id,
         metadata={"name": server.name, "environment": server.environment},
         request=request,
@@ -94,7 +101,7 @@ async def create_server(
     return ServerOut.model_validate(server)
 
 
-@router.get("/tags", response_model=list[TagOut])
+@_router.get("/tags", response_model=list[TagOut])
 async def list_tags(db: DbDep, ctx: ReadCtx) -> list[TagOut]:
     """All tags with their server usage counts."""
     pairs = await server_service.list_tags_with_usage(db)
@@ -110,7 +117,7 @@ async def list_tags(db: DbDep, ctx: ReadCtx) -> list[TagOut]:
     ]
 
 
-@router.post("/tags", response_model=TagOut, status_code=status.HTTP_201_CREATED)
+@_router.post("/tags", response_model=TagOut, status_code=status.HTTP_201_CREATED)
 async def upsert_tag(db: DbDep, ctx: UpdateCtx, data: TagUpsertIn) -> TagOut:
     """Create a tag or update its colour (idempotent on name)."""
     tag = await server_service.upsert_tag(db, name=data.name, color=data.color)
@@ -124,13 +131,13 @@ async def upsert_tag(db: DbDep, ctx: UpdateCtx, data: TagUpsertIn) -> TagOut:
     )
 
 
-@router.get("/{server_id}", response_model=ServerDetail)
+@_router.get("/{server_id}", response_model=ServerDetail)
 async def get_server(db: DbDep, ctx: ReadCtx, server_id: uuid.UUID) -> ServerDetail:
     """Full server view with recent timeline events and container counts."""
     return await _detail(db, server_id)
 
 
-@router.patch("/{server_id}", response_model=ServerDetail)
+@_router.patch("/{server_id}", response_model=ServerDetail)
 async def update_server(
     server_id: uuid.UUID,
     data: ServerUpdate,
@@ -143,8 +150,8 @@ async def update_server(
     await audit_service.record(
         db,
         ctx,
-        action="server.update",
-        resource_type="server",
+        action="node.update",
+        resource_type="node",
         resource_id=server_id,
         metadata={"fields": sorted(data.model_dump(exclude_unset=True))},
         request=request,
@@ -152,22 +159,22 @@ async def update_server(
     return await _detail(db, server_id)
 
 
-@router.delete("/{server_id}", status_code=status.HTTP_204_NO_CONTENT)
+@_router.delete("/{server_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_server(server_id: uuid.UUID, request: Request, db: DbDep, ctx: DeleteCtx) -> None:
     """Hard-delete a server and all of its children (cascades)."""
     snapshot = await server_service.delete_server(db, server_id=server_id, ctx=ctx)
     await audit_service.record(
         db,
         ctx,
-        action="server.delete",
-        resource_type="server",
+        action="node.delete",
+        resource_type="node",
         resource_id=server_id,
         metadata=snapshot,
         request=request,
     )
 
 
-@router.post("/{server_id}/agent-token", response_model=EnrollTokenOut)
+@_router.post("/{server_id}/agent-token", response_model=EnrollTokenOut)
 async def rotate_agent_token(
     server_id: uuid.UUID, request: Request, db: DbDep, ctx: UpdateCtx
 ) -> EnrollTokenOut:
@@ -175,18 +182,32 @@ async def rotate_agent_token(
 
     The raw token is shown exactly once and only ever stored hashed.
     """
-    raw, _server = await server_service.rotate_agent_token(db, server_id=server_id)
+    raw, _server = await server_service.rotate_agent_token(db, server_id=server_id, ctx=ctx)
     await audit_service.record(
         db,
         ctx,
-        action="server.rotate_token",
-        resource_type="server",
+        action="node.rotate_token",
+        resource_type="node",
         resource_id=server_id,
         metadata={"name": _server.name},
         request=request,
     )
+    # The hint must name the variables the agent and installer actually read.
+    # It used to advertise NEXUSOPS_URL, which neither of them consults —
+    # following it produced an agent that never enrolled. install.sh writes
+    # NEXUSOPS_SERVER/NEXUSOPS_TOKEN/NEXUSOPS_INTERVAL into its env file.
     install_hint = (
-        "bash agent/install.sh   # from the NexusOps repository, with env: "
-        f"NEXUSOPS_URL=<platform-url> NEXUSOPS_TOKEN={raw}"
+        "sudo bash agent/install.sh --server <platform-url> "
+        f"--token {raw}   # or set NEXUSOPS_SERVER / NEXUSOPS_TOKEN"
     )
     return EnrollTokenOut(agent_token=raw, install_hint=install_hint)
+
+
+# Canonical surface. New clients discover only ``/nodes`` (see the package docs).
+router = APIRouter()
+router.include_router(_router, prefix="/nodes", tags=["nodes"])
+
+# Temporary compatibility alias for pre-rename clients. Hidden from the OpenAPI
+# schema so it is not advertised; remove in the Phase 2 cleanup.
+servers_router = APIRouter()
+servers_router.include_router(_router, prefix="/servers", tags=["servers"], include_in_schema=False)

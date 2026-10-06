@@ -2,13 +2,24 @@
 
 Channels: ``global`` (all events, ``event.read``), ``incidents``
 (``INCIDENT_*``/``MONITOR_*`` only, ``monitor.read``), ``server-metrics``
-(``nx:metrics:<server_id>``, ``metric.read``+``server.read``),
+(``nx:metrics:<server_id>``, ``metric.read``+``node.read``),
 ``container-logs`` (``nx:logs:<container_id>``, ``container.logs``) and
 ``deployment-logs`` (``nx:deploy:<deployment_id>``, ``deployment.read``).
 
-Permissions are re-checked on every subscribe frame; entity existence is
-validated against the database. This module depends only on models, core and
-the :class:`~app.api.deps.AuthContext` dataclass — no FastAPI request stack.
+A socket is bound to exactly one organization. The auth frame carries the same
+``org_id`` the client sends as ``X-Org-Id`` over HTTP (an API key ignores it and
+uses the key's own organization), it is validated against the caller's active
+memberships, and it then governs everything the socket can see:
+
+* permissions come from the membership's role *in that organization*, not from
+  the user's default role;
+* entity existence checks for scoped subscriptions run inside that organization's
+  scope, so another tenant's id is indistinguishable from one that never existed;
+* event frames carry their organization and are dropped for every socket that
+  does not match — a broadcast channel is not a tenant boundary.
+
+This module depends only on models, core and the
+:class:`~app.api.deps.AuthContext` dataclass — no FastAPI request stack.
 """
 
 from __future__ import annotations
@@ -28,7 +39,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
-from app.api.deps import AuthContext
+from app.api.deps import AuthContext, membership_for_org
 from app.core.channels import (
     CHANNEL_EVENTS,
     WS_CHANNEL_CONTAINER_LOGS,
@@ -44,8 +55,10 @@ from app.core.logging import get_logger
 from app.core.permissions import WILDCARD
 from app.core.redis_client import get_redis
 from app.core.security import decode_access_token, hash_token
-from app.models import ApiKey, Container, Deployment, Server, User
+from app.core.tenancy import apply_scope_to_session, org_scope
+from app.models import ApiKey, Container, Deployment, Organization, Server, User
 from app.models import Session as DbSession
+from app.models.enums import OrganizationStatus
 from app.services.event_registry import INCIDENT_CHANNEL_PREFIXES
 
 log = get_logger("nexusops.ws")
@@ -111,20 +124,68 @@ def _is_same_origin(origin: str, host: str | None) -> bool:
     return urlparse(origin).netloc.rstrip("/") == host.rstrip("/")
 
 
-async def _load_permissions(db: AsyncSession, user: User) -> set[str]:
-    """Resolve a user's permission codenames exactly like the HTTP path."""
-    if user.is_superadmin:
+async def _load_permissions(db: AsyncSession, ctx: AuthContext) -> set[str]:
+    """Resolve the socket's permission codenames exactly like the HTTP path.
+
+    The authority is the **membership's** role in the bound organization, never
+    ``User.role``: a user may be an Admin in one tenant and a Viewer in another,
+    and the single ``User.role_id`` cannot express that.
+    """
+    del db  # relationships are selectin-loaded; no IO is needed here
+    if ctx.user.is_superadmin:
         return {WILDCARD}
-    # User.role and Role.permissions are both lazy="selectin", so after any
-    # query-loaded user these attributes are already in memory — no IO needed
-    # (mirrors deps._load_permissions; User's Base has no AsyncAttrs mixin).
-    role = user.role
+    role = ctx.membership.role if ctx.membership is not None else None
     if role is None:
         return set()
     return {p.codename for p in role.permissions}
 
 
-async def _authenticate_jwt(db: AsyncSession, token: str) -> AuthContext:
+def _org_id_from_frame(frame: dict[str, Any]) -> uuid.UUID | None:
+    """The organization the client asked this socket to act in, if well formed."""
+    raw = frame.get("org_id")
+    if not raw:
+        return None
+    try:
+        return uuid.UUID(str(raw))
+    except ValueError as exc:
+        raise AppError("Malformed org_id", code="UNAUTHORIZED") from exc
+
+
+async def _bind_organization(
+    ctx: AuthContext, db: AsyncSession, requested: uuid.UUID | None
+) -> None:
+    """Attach the socket's organization, or refuse the connection.
+
+    Machine credentials carry their own organization and ignore the frame's
+    value — a key cannot be reinterpreted as belonging to another tenant. Human
+    callers must name one, exactly as they must send ``X-Org-Id`` on every
+    HTTP request: the JWT identifies a user, never a tenant, and a socket that
+    guessed would be a live stream of somebody else's data.
+    """
+    if ctx.api_key is not None:
+        org_id = ctx.api_key.org_id
+        if org_id is None:
+            raise AppError("API key has no organization", code="UNAUTHORIZED")
+    elif requested is None:
+        raise AppError("org_id is required to open a stream", code="UNAUTHORIZED")
+    else:
+        org_id = requested
+
+    membership = await membership_for_org(db, ctx.user_id, org_id)
+    if membership is None:
+        raise AppError("Not a member of that organization", code="UNAUTHORIZED")
+    organization = await db.get(Organization, org_id)
+    if organization is None or organization.status != OrganizationStatus.ACTIVE:
+        raise AppError("Organization is not available", code="UNAUTHORIZED")
+    ctx.org = organization
+    ctx.membership = membership
+    # Permissions come from the membership, like everywhere else.
+    ctx._permission_set = await _load_permissions(db, ctx)
+
+
+async def _authenticate_jwt(
+    db: AsyncSession, token: str, requested_org: uuid.UUID | None
+) -> AuthContext:
     """Bearer-JWT auth mirroring ``deps.resolve_auth`` without Request."""
     payload = decode_access_token(token)  # raises Unauthorized on any problem
     try:
@@ -148,12 +209,14 @@ async def _authenticate_jwt(db: AsyncSession, token: str) -> AuthContext:
     sess.last_seen_at = now
 
     ctx = AuthContext(user=user, actor_type="USER", session_id=session_id)
-    ctx._permission_set = await _load_permissions(db, user)
+    await _bind_organization(ctx, db, requested_org)
     await db.commit()
     return ctx
 
 
-async def _authenticate_api_key(db: AsyncSession, raw_key: str) -> AuthContext:
+async def _authenticate_api_key(
+    db: AsyncSession, raw_key: str, requested_org: uuid.UUID | None
+) -> AuthContext:
     """X-API-Key auth mirroring ``deps.resolve_auth``."""
     row = (
         await db.execute(select(ApiKey).where(ApiKey.key_hash == hash_token(raw_key)))
@@ -167,17 +230,27 @@ async def _authenticate_api_key(db: AsyncSession, raw_key: str) -> AuthContext:
     if user is None or not user.is_active:
         raise AppError("API key owner is inactive", code="UNAUTHORIZED")
     ctx = AuthContext(user=user, actor_type="API_KEY", api_key=row)
-    ctx._permission_set = await _load_permissions(db, user)
+    await _bind_organization(ctx, db, requested_org)
     if row.last_used_at is None or (now - row.last_used_at).total_seconds() > 60:
         row.last_used_at = now
         await db.commit()
     return ctx
 
 
-async def _entity_exists(db: AsyncSession, model: type[Any], id_: Any) -> bool:
-    return (
-        await db.execute(select(model.id).where(model.id == id_))
-    ).scalar_one_or_none() is not None
+async def _entity_exists(
+    db: AsyncSession, model: type[Any], id_: Any, *, org_id: uuid.UUID
+) -> bool:
+    """Whether *id_* exists **for this organization**.
+
+    Runs inside the socket's organization scope, so the guard's loader criteria
+    (and RLS behind it) reduce a cross-tenant id to a plain miss — the subscribe
+    frame answers ``NOT_FOUND`` and leaks nothing about whether the row exists.
+    """
+    with org_scope(org_id):
+        await apply_scope_to_session(db)
+        return (
+            await db.execute(select(model.id).where(model.id == id_))
+        ).scalar_one_or_none() is not None
 
 
 class Hub:
@@ -275,10 +348,11 @@ class Hub:
         if not isinstance(frame, dict):
             return None
         action = frame.get("action")
+        requested_org = _org_id_from_frame(frame)
         if action == "auth" and isinstance(frame.get("token"), str):
-            return await _authenticate_jwt(db, frame["token"])
+            return await _authenticate_jwt(db, frame["token"], requested_org)
         if action == "auth_apikey" and isinstance(frame.get("key"), str):
-            return await _authenticate_api_key(db, frame["key"])
+            return await _authenticate_api_key(db, frame["key"], requested_org)
         return None
 
     # --- inbound frames -------------------------------------------------------
@@ -330,7 +404,12 @@ class Hub:
                 return
             async with get_sessionmaker()() as db:
                 # model is always set when param_name is (see _requirement_for)
-                exists = await _entity_exists(db, cast(type[Any], model), entity_id)
+                exists = await _entity_exists(
+                    db,
+                    cast(type[Any], model),
+                    entity_id,
+                    org_id=conn.auth.require_org_id(),
+                )
             if not exists:
                 self.enqueue(conn, {"type": "error", "code": "NOT_FOUND"})
                 return
@@ -353,7 +432,7 @@ class Hub:
         if channel == WS_CHANNEL_INCIDENTS:
             return (("monitor.read",), None, None)
         if channel == WS_CHANNEL_SERVER_METRICS:
-            return (("metric.read", "server.read"), "server_id", Server)
+            return (("metric.read", "node.read"), "server_id", Server)
         if channel == WS_CHANNEL_CONTAINER_LOGS:
             return (("container.logs",), "container_id", Container)
         if channel == WS_CHANNEL_DEPLOYMENT_LOGS:
@@ -467,7 +546,14 @@ class Hub:
         if channel == CHANNEL_EVENTS:
             event_type = str(payload.get("type", "")) if isinstance(payload, dict) else ""
             incidentish = event_type.startswith(INCIDENT_CHANNEL_PREFIXES)
+            frame_org = _frame_org(payload)
             for conn in list(self._connections):
+                # ``nx:events`` is one broadcast channel for every tenant, so the
+                # organization on the frame is what keeps a live stream inside
+                # its own tenant. A frame with no organization (a platform-level
+                # event) is delivered to nobody: there is no tenant it belongs to.
+                if frame_org is None or frame_org != conn.auth.org_id:
+                    continue
                 if (WS_CHANNEL_GLOBAL, "") in conn.subscriptions:
                     self._push_event(conn, WS_CHANNEL_GLOBAL, {}, payload)
                 if (WS_CHANNEL_INCIDENTS, "") in conn.subscriptions and incidentish:
@@ -487,6 +573,19 @@ class Hub:
                     if wanted in conn.subscriptions:
                         self._push_event(conn, ws_channel, {param_name: entity_id}, payload)
                 return
+
+
+def _frame_org(payload: Any) -> uuid.UUID | None:
+    """The organization an event frame belongs to, or ``None`` when it has none."""
+    if not isinstance(payload, dict):
+        return None
+    raw = payload.get("org_id")
+    if not raw:
+        return None
+    try:
+        return uuid.UUID(str(raw))
+    except ValueError:
+        return None
 
 
 def _parse_payload(raw: Any) -> Any:

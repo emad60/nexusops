@@ -75,6 +75,13 @@ app.conf.beat_schedule = {
         "schedule": 600.0,
         "options": {"expires": 500},
     },
+    # Operations expire on a short cadence: the shortest per-type timeout is 30s,
+    # so a minute keeps `expired` meaningful rather than a formality.
+    "expire-operations": {
+        "task": "nx.expire_operations",
+        "schedule": 60.0,
+        "options": {"expires": 50},
+    },
     "aggregate-metrics": {
         "task": "nx.aggregate_metrics",
         "schedule": settings.metrics_aggregation_interval_seconds,

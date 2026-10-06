@@ -214,6 +214,13 @@ async def _rollup(
     Deletes pre-existing target rows covering affected buckets, then performs a
     set-based INSERT SELECT (avg into primary columns, min/max into the JSONB
     extra map). No row loops; caller commits.
+
+    Everything here is a **Core** statement, so neither the ORM guard nor the
+    org stamping touches it: the aggregation is partitioned by ``org_id`` —
+    selected from the source rows and grouped alongside the server — so one
+    organization's rollup can never be written from (or deleted because of)
+    another's raw data. The sweep runs under the system scope, which is what
+    lets it see all tenants in the first place.
     """
     src = MetricSnapshot
     bucket = func.date_trunc(unit, src.recorded_at)
@@ -223,24 +230,27 @@ async def _rollup(
         src.recorded_at >= horizon,
     )
 
+    affected_orgs = select(src.org_id).where(*source_where)
     affected_buckets = select(bucket.label("b")).where(*source_where)
     deleted_res = await db.execute(
         delete(MetricSnapshot).where(
             MetricSnapshot.granularity == target.value,
+            MetricSnapshot.org_id.in_(affected_orgs),
             MetricSnapshot.recorded_at.in_(affected_buckets),
         )
     )
 
     select_columns: list[Any] = [
         src.server_id,
+        src.org_id,
         literal(target.value, String),
         bucket,
         *(func.avg(getattr(src, m)) for m in METRIC_COLUMNS),
         _extra_object(),
     ]
     insert_stmt = pg_insert(MetricSnapshot).from_select(
-        ["server_id", "granularity", "recorded_at", *METRIC_COLUMNS, "extra"],
-        select(*select_columns).where(*source_where).group_by(src.server_id, bucket),
+        ["server_id", "org_id", "granularity", "recorded_at", *METRIC_COLUMNS, "extra"],
+        select(*select_columns).where(*source_where).group_by(src.server_id, src.org_id, bucket),
     )
     inserted_res = await db.execute(insert_stmt)
     return {

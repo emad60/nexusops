@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from app.core.logging import get_logger
-from app.tasks._util import run_async, task_session
+from app.tasks._util import run_async, sweep_session
 from app.tasks.celery_app import app
 
 logger = get_logger(__name__)
@@ -16,14 +16,17 @@ def sweep_servers() -> dict[str, int]:
     async def _run() -> list[dict[str, str]]:
         from app.services import server_service
 
-        async with task_session() as db:
+        # Staleness is a platform-wide observation over every tenant's nodes;
+        # each transition it reports carries the node's own organization.
+        async with sweep_session("task.sweep_servers") as db:
             return await server_service.mark_stale_servers(db)
 
     transitions = run_async(_run())
     counts: dict[str, int] = {}
-    for server_name, new_status in transitions:
+    for transition in transitions:
+        new_status = transition["to"]
         counts[new_status] = counts.get(new_status, 0) + 1
-        logger.info("server_status_transition", server=server_name, status=new_status)
+        logger.info("server_status_transition", server=transition["server_id"], status=new_status)
     if transitions:
         logger.info("sweep_servers_done", transitions=len(transitions), **counts)
     return {"transitions": len(transitions), **counts}

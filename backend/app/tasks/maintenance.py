@@ -8,7 +8,7 @@ from typing import cast
 from sqlalchemy import Table, delete, select
 
 from app.core.logging import get_logger
-from app.tasks._util import run_async, task_session
+from app.tasks._util import org_for, org_session, run_async, sweep_session
 from app.tasks.celery_app import app
 
 logger = get_logger(__name__)
@@ -30,7 +30,9 @@ def aggregate_metrics() -> dict[str, int]:
     async def _run() -> dict[str, int]:
         from app.services.metrics_service import aggregate_rollups
 
-        async with task_session() as db:
+        # Cross-tenant by construction: rollups are partitioned by org_id inside
+        # the statement itself.
+        async with sweep_session("task.aggregate_metrics") as db:
             return await aggregate_rollups(db)
 
     counts = run_async(_run())
@@ -49,7 +51,8 @@ def trim_logs() -> dict[str, int]:
         from app.models import LogEntry
 
         deleted_total: dict[str, int] = {}
-        async with task_session() as db:
+        # Retention is a platform policy applied to every tenant's rows.
+        async with sweep_session("task.trim_logs") as db:
             now = datetime.now(UTC)
             for source, retention in LOG_RETENTION.items():
                 cutoff = now - retention
@@ -93,7 +96,9 @@ def retry_notifications() -> dict[str, int]:
     async def _run() -> int:
         from app.services.notification_service import retry_due_deliveries
 
-        async with task_session() as db:
+        # retry_due_deliveries claims across tenants and re-enters each row's
+        # own organization before sending.
+        async with sweep_session("task.retry_notifications") as db:
             return await retry_due_deliveries(db, limit=50)
 
     retried = run_async(_run())
@@ -111,7 +116,9 @@ def expire_sessions() -> dict[str, int]:
 
         now = datetime.now(UTC)
         counts = {}
-        async with task_session() as db:
+        # Sessions and tokens are credentials, not tenant data: every user's
+        # expired session is swept in one pass.
+        async with sweep_session("task.expire_sessions") as db:
             expired = (
                 (
                     await db.execute(
@@ -149,6 +156,66 @@ def expire_sessions() -> dict[str, int]:
     return run_async(_run())
 
 
+@app.task(name="nx.expire_operations", soft_time_limit=120, time_limit=150)
+def expire_operations() -> dict[str, int]:
+    """Expire node operations past their deadline — pending and claimed alike.
+
+    A claimed op whose agent died mid-execution must not stay live forever, and
+    the architecture's choice is to expire it rather than re-queue a possibly
+    already-executed action (re-delivering a non-idempotent op is the worse
+    failure). The claim itself is the only cross-tenant step; every transition
+    and its audit row run inside the owning organization.
+    """
+
+    async def _run() -> dict[str, int]:
+        from app.models import Operation
+        from app.models.enums import OperationStatus
+        from app.services import audit_service, operation_service
+
+        now = datetime.now(UTC)
+        # Claim across tenants; the answer is what defines each row's scope.
+        async with sweep_session("task.expire_operations") as db:
+            due = (
+                await db.execute(
+                    select(Operation.id, Operation.org_id)
+                    .where(
+                        Operation.status.in_(
+                            (
+                                OperationStatus.PENDING,
+                                OperationStatus.CLAIMED,
+                                OperationStatus.RUNNING,
+                            )
+                        ),
+                        Operation.expires_at <= now,
+                    )
+                    .limit(500)
+                )
+            ).all()
+
+        expired = 0
+        for operation_id, org_id in due:
+            # A fresh session per row: one session must never span two scopes.
+            async with org_session(org_id) as db:
+                if not await operation_service.expire_one(db, operation_id):
+                    # A claimant won the race between the sweep and this row.
+                    continue
+                await audit_service.record(
+                    db,
+                    None,
+                    action="operation.expire",
+                    resource_type="operation",
+                    resource_id=operation_id,
+                    org_id=org_id,
+                )
+                expired += 1
+        return {"expired": expired}
+
+    counts = run_async(_run())
+    if counts["expired"]:
+        logger.info("operations_expired", count=counts["expired"])
+    return counts
+
+
 @app.task(name="nx.sync_docker_hosts", soft_time_limit=300, time_limit=330)
 def sync_docker_hosts() -> dict[str, int]:
     """Reconcile every registered Docker host; pull recent logs from real ones."""
@@ -157,7 +224,9 @@ def sync_docker_hosts() -> dict[str, int]:
         from app.models import DockerHost
 
         totals = {"hosts": 0, "errors": 0}
-        async with task_session() as db:
+        # Hosts belong to every tenant; each one is then synced inside its own
+        # organization (see _sync_one / _collect_logs).
+        async with sweep_session("task.sync_docker_hosts") as db:
             hosts = (await db.execute(select(DockerHost))).scalars().all()
 
         for host in hosts:
@@ -196,9 +265,13 @@ def sync_docker_hosts() -> dict[str, int]:
 
 
 async def _sync_one(host_id) -> dict:
+    from app.models import DockerHost
     from app.services.container_service import sync_host_state
 
-    async with task_session() as db:
+    org_id = await org_for(DockerHost, host_id)
+    if org_id is None:
+        return {}
+    async with org_session(org_id) as db:
         return await sync_host_state(db, host_id)
 
 
@@ -206,7 +279,10 @@ async def _collect_logs(host_id) -> None:
     from app.models import DockerHost
     from app.services.container_service import collect_recent_logs
 
-    async with task_session() as db:
+    org_id = await org_for(DockerHost, host_id)
+    if org_id is None:
+        return
+    async with org_session(org_id) as db:
         host = await db.get(DockerHost, host_id)
         if host is not None:
             await collect_recent_logs(db, host, max_containers=LOG_COLLECT_MAX_CONTAINERS)

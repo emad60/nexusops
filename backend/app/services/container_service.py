@@ -292,22 +292,27 @@ async def sync_host_state(db: AsyncSession, host_id: uuid.UUID) -> dict[str, Any
         raise NotFound("Docker host not found")
 
     summary: dict[str, Any] = {"seen": 0, "added": 0, "updated": 0, "removed": 0}
-    now = datetime.now(UTC)
-
-    try:
-        provider = provider_for(host)
-        infos = await asyncio.to_thread(provider.list_containers, True)
-    except DockerProviderError as exc:
-        return await _mark_host_unavailable(db, host, summary, exc)
-
-    simulated = is_simulated(provider)
+    now = datetime.now(
+        UTC
+    )  # The simulated provider is stateless: its state IS these DB rows, so they
+    # must be registered BEFORE list_containers() — otherwise the listing comes
+    # back empty, the reconciliation below reads every row as "disappeared",
+    # and one sweep cycle deletes all inventory on the host (agent-reported
+    # mirrors included). Real providers ignore the registration.
     existing = list(
         (await db.execute(select(Container).where(Container.docker_host_id == host.id)))
         .scalars()
         .all()
     )
-    if simulated:
-        cast(SimulatedDockerProvider, provider).register_containers(existing)
+    try:
+        provider = provider_for(host)
+        simulated = is_simulated(provider)
+        if simulated:
+            cast(SimulatedDockerProvider, provider).register_containers(existing)
+        infos = await asyncio.to_thread(provider.list_containers, True)
+    except DockerProviderError as exc:
+        return await _mark_host_unavailable(db, host, summary, exc)
+
     by_cid = {row.container_id: row for row in existing}
 
     seen_cids: set[str] = set()

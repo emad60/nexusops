@@ -35,6 +35,10 @@ def _pace(position: int) -> float:
 class StepName:
     """Canonical step identifiers stored on :class:`DeploymentStep` rows."""
 
+    #: Engine-owned: the deployment engine executes this one itself — it is never
+    #: dispatched to a runner — so fail-closed `${secret:KEY}` resolution attaches
+    #: to a persisted step row an operator can see (secrets-architecture.md §5).
+    RESOLVE_CONFIG = "RESOLVE_CONFIG"
     PULL_REPO = "PULL_REPO"
     CHECKOUT = "CHECKOUT"
     BUILD_IMAGE = "BUILD_IMAGE"
@@ -54,6 +58,11 @@ STEP_ORDER: tuple[str, ...] = (
     StepName.HEALTH_CHECK,
     StepName.FINALIZE,
 )
+
+#: Steps the deployment engine executes itself, ahead of any runner step. A
+#: runner is never asked for these — :meth:`execute_step` refuses them loudly
+#: rather than silently producing a step that does nothing.
+ENGINE_STEPS: frozenset[str] = frozenset({StepName.RESOLVE_CONFIG})
 
 
 @dataclass(slots=True)
@@ -111,6 +120,11 @@ class SimulatedDeploymentRunner:
         return list(STEP_ORDER)
 
     async def execute_step(self, step_name: str, ctx: RunContext) -> AsyncIterator[StepLine]:
+        if step_name in ENGINE_STEPS:
+            # Guards the seam: RESOLVE_CONFIG is planned like any other step but
+            # resolved by the engine. Dispatching it here would silently "pass"
+            # a step that never resolved anything.
+            raise StepFailure(f"{step_name} is engine-owned and must not be dispatched to a runner")
         handlers = {
             StepName.PULL_REPO: self._pull_repo,
             StepName.CHECKOUT: self._checkout,

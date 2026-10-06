@@ -16,7 +16,9 @@ from sqlalchemy import String, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import CurrentUser, DbSessionDep
-from app.models import Container, Deployment, Incident, Monitor, Project, Server, User
+from app.core.tenancy import require_org
+from app.models import Container, Deployment, Incident, Membership, Monitor, Project, Server, User
+from app.models.enums import MembershipStatus
 from app.schemas.search import SearchHit, SearchResultOut
 
 search_router = APIRouter(prefix="/search", tags=["search"])
@@ -52,7 +54,7 @@ async def _search_servers(db: AsyncSession, q: str, limit: int) -> list[SearchHi
         )
     ).scalars()
     return [
-        _hit("servers", s.id, s.name, f"{s.hostname} · {s.environment}", f"/servers/{s.id}")
+        _hit("nodes", s.id, s.name, f"{s.hostname} · {s.environment}", f"/nodes/{s.id}")
         for s in rows
     ]
 
@@ -148,11 +150,23 @@ async def _search_incidents(db: AsyncSession, q: str, limit: int) -> list[Search
 
 
 async def _search_users(db: AsyncSession, q: str, limit: int) -> list[SearchHit]:
+    """Search this organization's members — never the instance's accounts.
+
+    ``users`` is an instance-level table (a person can belong to several
+    organizations), so the tenancy boundary here is the membership join. Without
+    it a command-palette search would return every account on the instance —
+    emails and names of other tenants' users — which is the "global user search
+    silently becomes a global resource search" failure this endpoint exists to
+    avoid.
+    """
     pattern = f"%{q}%"
     rows = (
         await db.execute(
             select(User)
+            .join(Membership, Membership.user_id == User.id)
             .where(
+                Membership.org_id == require_org(),
+                Membership.status == MembershipStatus.ACTIVE,
                 or_(
                     User.email.ilike(pattern),
                     User.full_name.ilike(pattern),
@@ -176,7 +190,7 @@ async def search(
 ) -> SearchResultOut:
     """Permission-filtered multi-entity search for the command palette."""
     sections: tuple[tuple[str, str, SearchFunc], ...] = (
-        ("servers", "server.read", _search_servers),
+        ("nodes", "node.read", _search_servers),
         ("containers", "container.read", _search_containers),
         ("deployments", "deployment.read", _search_deployments),
         ("projects", "project.read", _search_projects),

@@ -1,8 +1,8 @@
 """Docker host management: CRUD, ping, provider-backed inventory reads.
 
-Permission mapping note: docker hosts attach to servers, so mutating this
-resource requires the ``server.*`` permissions (server.create / server.update /
-server.delete); reads use ``container.read``.
+Permission mapping note: docker hosts attach to nodes, so mutating this
+resource requires the ``node.*`` permissions (node.create / node.update /
+node.delete); reads use ``container.read``.
 """
 
 from __future__ import annotations

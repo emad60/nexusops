@@ -17,7 +17,7 @@ from typing import Any
 from sqlalchemy import select
 
 from app.core.logging import get_logger
-from app.tasks._util import run_async, task_session
+from app.tasks._util import org_session, run_async, sweep_session
 from app.tasks.celery_app import app
 
 logger = get_logger(__name__)
@@ -85,43 +85,48 @@ def simulation_tick() -> dict[str, int]:
         minute = time.gmtime(now).tm_min
         now_bucket = int(now // 20)
 
-        async with task_session() as db:
+        # Simulated nodes exist in every tenant, and a heartbeat writes tenant
+        # data, so the fleet is selected once under the system scope and each
+        # node is then beaten inside its own organization.
+        async with sweep_session("task.simulation_tick.select") as db:
             servers = (
                 (await db.execute(select(Server).where(Server.simulated.is_(True)))).scalars().all()
             )
-            beat_count = 0
-            for server in servers:
-                # The designated flaky node goes silent briefly each hour so
-                # offline detection + recovery are demonstrable without tooling.
-                silent_window = server.name.endswith("-flaky") and minute in (7, 8)
-                if silent_window:
-                    continue
 
-                uptime = int(server.uptime_seconds or 3600) + 20
-                payload_data = {
-                    "cpu_percent": _wave(str(server.id), 420, 28, 34),
-                    "mem_used_mb": _wave(str(server.id) + "m", 900, 900, 2400),
-                    "mem_percent": _wave(str(server.id) + "mp", 900, 12, 55),
-                    "disk_used_gb": _wave(str(server.id) + "d", 86400, 2, 38),
-                    "disk_percent": _wave(str(server.id) + "dp", 86400, 3, 52),
-                    "net_rx_kb_s": _wave(str(server.id) + "rx", 180, 400, 650),
-                    "net_tx_kb_s": _wave(str(server.id) + "tx", 210, 350, 480),
-                    "load1": _wave(str(server.id) + "l", 600, 0.8, 1.2),
-                    "uptime_seconds": uptime,
-                    "containers": _containers_for(str(server.id), server.name, now_bucket),
-                }
-                # Deliberately duck-typed: SimpleNamespace fallback for the
-                # (unreachable) case where the agent schema fails to import.
-                payload: Any = (
-                    PayloadModel(**payload_data)
-                    if PayloadModel is not None
-                    else SimpleNamespace(**payload_data)
-                )
+        beat_count = 0
+        for server in servers:
+            # The designated flaky node goes silent briefly each hour so
+            # offline detection + recovery are demonstrable without tooling.
+            silent_window = server.name.endswith("-flaky") and minute in (7, 8)
+            if silent_window:
+                continue
+
+            uptime = int(server.uptime_seconds or 3600) + 20
+            payload_data = {
+                "cpu_percent": _wave(str(server.id), 420, 28, 34),
+                "mem_used_mb": _wave(str(server.id) + "m", 900, 900, 2400),
+                "mem_percent": _wave(str(server.id) + "mp", 900, 12, 55),
+                "disk_used_gb": _wave(str(server.id) + "d", 86400, 2, 38),
+                "disk_percent": _wave(str(server.id) + "dp", 86400, 3, 52),
+                "net_rx_kb_s": _wave(str(server.id) + "rx", 180, 400, 650),
+                "net_tx_kb_s": _wave(str(server.id) + "tx", 210, 350, 480),
+                "load1": _wave(str(server.id) + "l", 600, 0.8, 1.2),
+                "uptime_seconds": uptime,
+                "containers": _containers_for(str(server.id), server.name, now_bucket),
+            }
+            # Deliberately duck-typed: SimpleNamespace fallback for the
+            # (unreachable) case where the agent schema fails to import.
+            payload: Any = (
+                PayloadModel(**payload_data)
+                if PayloadModel is not None
+                else SimpleNamespace(**payload_data)
+            )
+            async with org_session(server.org_id) as db:
                 await process_heartbeat(
                     db, server=server, payload=payload, agent_version=AGENT_VERSION
                 )
-                beat_count += 1
-            return beat_count
+            beat_count += 1
+        return beat_count
 
     beats = run_async(_run())
     if beats:

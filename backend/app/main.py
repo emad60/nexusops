@@ -147,6 +147,8 @@ def _include_routers(application: FastAPI, settings: Settings) -> None:
         meta,
         metrics,
         monitors,
+        operations,
+        organizations,
         projects,
         roles,
         search,
@@ -165,6 +167,7 @@ def _include_routers(application: FastAPI, settings: Settings) -> None:
         health,  # /api/v1/health /api/v1/ready /api/v1/liveness aliases
         meta,
         auth,
+        organizations,
         users,
         roles,
         sessions,
@@ -184,6 +187,7 @@ def _include_routers(application: FastAPI, settings: Settings) -> None:
         incidents,
         projects,
         deployments,
+        operations,
     ):
         for name in (
             "router",
@@ -193,6 +197,7 @@ def _include_routers(application: FastAPI, settings: Settings) -> None:
             "meta_router",
             "testkit_router",
             "hosts_router",
+            "servers_router",
             "events_router",
             "audit_router",
             "secrets_router",

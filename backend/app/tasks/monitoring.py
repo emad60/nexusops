@@ -5,7 +5,8 @@ from __future__ import annotations
 import uuid
 
 from app.core.logging import get_logger
-from app.tasks._util import run_async, task_session
+from app.models import Monitor
+from app.tasks._util import org_for, org_session, run_async, sweep_session
 from app.tasks.celery_app import app
 
 logger = get_logger(__name__)
@@ -24,16 +25,22 @@ def run_due_monitors() -> dict[str, int]:
     async def _run() -> int:
         from app.services import monitor_service
 
-        async with task_session() as db:
+        # Due monitors span every tenant, so the claim runs under the system
+        # scope — and each check then runs inside the organization that owns the
+        # monitor, because a check writes results, incidents and events for it.
+        async with sweep_session("task.run_due_monitors.claim") as db:
             monitor_ids: list[uuid.UUID] = await monitor_service.claim_due_monitors(
                 db, limit=CLAIM_BATCH
             )
 
         ran = 0
         for mid in monitor_ids:
+            org_id = await org_for(Monitor, mid)
+            if org_id is None:
+                continue
             # A fresh short transaction per check keeps one slow endpoint from
             # holding locks over the whole batch.
-            async with task_session() as db:
+            async with org_session(org_id) as db:
                 outcome = await monitor_service.run_check(db, mid)
             if outcome is not None:
                 ran += 1

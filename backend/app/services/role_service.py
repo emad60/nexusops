@@ -25,14 +25,31 @@ def permission_registry() -> list[dict[str, str]]:
     ]
 
 
-def effective_permissions(user: User) -> list[str]:
-    """Sorted explicit permission codenames for a user; ``*`` expands to the registry."""
-    if user.is_superadmin:
-        return sorted(ALL_CODENAMES)
-    codes = {p.codename for p in (user.role.permissions if user.role else [])}
+def permissions_for_role(role: Role | None) -> list[str]:
+    """Sorted permission codenames a role grants; ``*`` expands to the registry.
+
+    Authority is a property of a **membership**, so this takes a role rather than
+    a user: the same account is an Admin in one organization and a Viewer in
+    another, and ``User.role`` cannot express that.
+    """
+    if role is None:
+        return []
+    codes = {p.codename for p in role.permissions}
     if WILDCARD in codes:
         codes = set(ALL_CODENAMES)
     return sorted(codes)
+
+
+def effective_permissions(user: User) -> list[str]:
+    """Instance-level permissions for a user (legacy default-role view).
+
+    Deliberately not the authorization path any more — org-scoped checks read
+    the membership's role. This remains for the bootstrap/superadmin view where
+    no organization has been chosen yet.
+    """
+    if user.is_superadmin:
+        return sorted(ALL_CODENAMES)
+    return permissions_for_role(user.role)
 
 
 async def list_roles(db: AsyncSession) -> list[Role]:

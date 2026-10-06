@@ -5,6 +5,12 @@ never holds a row lock while streaming output: it claims the QUEUED row with
 ``SELECT ... FOR UPDATE``, commits, then polls ``cancel_requested`` between
 steps so a cancel request from the API is never blocked.
 
+The plan always begins with the engine-owned ``RESOLVE_CONFIG`` step
+(``providers/deployment_runner.py``), which the engine executes itself: it
+resolves every ``${secret:KEY}`` reference in the environment's config and fails
+the run closed when one is missing or undecryptable, before any runner step runs
+(secrets-architecture.md §5).
+
 Cross-module integrations (task queue, log persistence, secret resolution,
 alerting) are late-imported inside functions because those modules live in
 sibling domains owned by other services.
@@ -16,7 +22,7 @@ import asyncio
 import re
 import uuid
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import orjson
 from sqlalchemy import event as sa_event
@@ -30,6 +36,7 @@ from app.core.db import get_sessionmaker
 from app.core.errors import Conflict, NotFound, UnprocessableEntity
 from app.core.logging import get_logger
 from app.core.redis_client import get_redis
+from app.core.tenancy import require_org
 from app.models import (
     Alert,
     Application,
@@ -43,6 +50,7 @@ from app.models import (
 from app.models.enums import (
     ActorType,
     AlertSeverity,
+    AuditResult,
     DeploymentStatus,
     DeploymentTrigger,
     EventLevel,
@@ -51,13 +59,22 @@ from app.models.enums import (
 )
 from app.providers.base import LogLine
 from app.providers.deployment_runner import (
+    ENGINE_STEPS,
     RunContext,
     SimulatedDeploymentRunner,
     StepFailure,
     StepLine,
+    StepName,
 )
 from app.services import audit_service, event_bus
 from app.services.project_service import actor_of
+
+# The exception TYPE must be importable at module load to appear in an `except`
+# clause — unlike the resolution call itself, which stays late-imported.
+from app.services.secret_service import SecretResolutionError
+
+if TYPE_CHECKING:
+    from app.services.secret_service import ResolvedSecrets
 
 log = get_logger("nexusops.deployments")
 
@@ -209,7 +226,10 @@ async def queue_deployment(
     )
     db.add(deployment)
     await db.flush()
-    for idx, name in enumerate(runner.plan_steps(run_ctx)):
+    # The engine-owned RESOLVE_CONFIG step is planned like every other step so a
+    # resolution failure has a row to fail on (secrets-architecture.md §5); the
+    # engine executes it itself and never hands it to the runner.
+    for idx, name in enumerate([StepName.RESOLVE_CONFIG, *runner.plan_steps(run_ctx)]):
         db.add(DeploymentStep(deployment_id=deployment.id, idx=idx, name=name))
     await db.flush()
 
@@ -318,15 +338,22 @@ async def _run(db: AsyncSession, factory: Any, deployment_id: uuid.UUID) -> None
     await db.commit()  # release the row lock before any slow work
 
     server_name = await _server_name(db, environment.server_id)
-    run_ctx = RunContext(
-        project_name=getattr(await db.get(Project, application.project_id), "name", ""),
-        application_name=application.name,
-        environment_name=environment.name,
-        version=claimed.version,
-        git_commit=claimed.git_commit,
-        server_name=server_name,
-        secrets=await _resolve_secrets(db, environment),
-    )
+    project_name = getattr(await db.get(Project, application.project_id), "name", "")
+    # Secrets are only known once RESOLVE_CONFIG has run, so the runner's context
+    # is built per step rather than once up front.
+    resolved_secrets: dict[str, str] = {}
+
+    def _build_ctx() -> RunContext:
+        return RunContext(
+            project_name=project_name,
+            application_name=application.name,
+            environment_name=environment.name,
+            version=claimed.version,
+            git_commit=claimed.git_commit,
+            server_name=server_name,
+            secrets=dict(resolved_secrets),
+        )
+
     steps = list(
         (
             await db.execute(
@@ -347,11 +374,20 @@ async def _run(db: AsyncSession, factory: Any, deployment_id: uuid.UUID) -> None
         if await _cancel_requested(db, claimed.id):
             cancelled = True
             break
+        if step.name in ENGINE_STEPS:
+            # Engine-owned (currently only RESOLVE_CONFIG): resolve here, fail
+            # closed, and let the shared terminal path below report it.
+            try:
+                resolved_secrets = await _run_config_resolution(db, claimed, environment, step)
+            except SecretResolutionError as exc:
+                failure_step, failure_error = step, str(exc)
+                break
+            continue
         step.status = StepStatus.RUNNING
         step.started_at = _utcnow()
         await db.commit()
         try:
-            await _stream_step(db, claimed, step, runner, run_ctx)
+            await _stream_step(db, claimed, step, runner, _build_ctx())
         except StepFailure as exc:
             failure_step, failure_error = step, str(exc)
             break
@@ -371,20 +407,117 @@ async def _server_name(db: AsyncSession, server_id: uuid.UUID | None) -> str | N
     return server.name if server else None
 
 
-async def _resolve_secrets(db: AsyncSession, environment: DeploymentEnvironment) -> dict[str, str]:
-    """Resolve config references via the secrets domain; failures degrade to {}."""
-    try:
-        from app.services import secret_service
+async def _run_config_resolution(
+    db: AsyncSession,
+    deployment: Deployment,
+    environment: DeploymentEnvironment,
+    step: DeploymentStep,
+) -> dict[str, str]:
+    """Execute the engine-owned ``RESOLVE_CONFIG`` step. Fail-closed.
 
-        resolved = await secret_service.resolve_secrets_for_environment(db, environment)
-        return {str(key): str(value) for key, value in dict(resolved).items()}
-    except Exception as exc:
-        log.warning(
+    Returns the resolved ``{KEY: value}`` map for the runner. On any unresolvable
+    reference the step is left FAILED and :class:`SecretResolutionError` is
+    re-raised, so the caller routes through the standard ``_finalize_failed``
+    path — events, alerts, audit and the sweeper behave exactly as for a failed
+    runner step. Unlike the old wrapper this never swallows the failure into an
+    empty dict: deploying without referenced credentials is the bug, not the
+    fallback. ``secret_service`` stays late-imported (sibling domain).
+    """
+    from app.services import secret_service
+
+    step.status = StepStatus.RUNNING
+    step.started_at = _utcnow()
+    await db.commit()
+
+    try:
+        resolution = await secret_service.resolve_secrets_for_environment(db, environment)
+    except SecretResolutionError as exc:
+        step.status = StepStatus.FAILED
+        step.finished_at = _utcnow()
+        # `str(exc)` names the offending KEYS only — the exception is built from
+        # key names and reasons, never a value or a ciphertext.
+        step.error = str(exc)[:2000]
+        await _audit_resolution_failed(db, deployment, environment, exc)
+        await db.commit()
+        log.error(
             "deployment_secret_resolution_failed",
+            deployment_id=str(deployment.id),
             environment_id=str(environment.id),
-            error=str(exc),
+            missing=list(exc.missing),
+            undecryptable=list(exc.undecryptable),
         )
-        return {}
+        raise
+
+    await _audit_secret_resolution(db, deployment, environment, resolution)
+    count = len(resolution.references)
+    output = (
+        f"resolved {count} secret reference(s) for {environment.name}"
+        if count
+        else "no ${secret:KEY} references in this environment's config"
+    )
+    step.status = StepStatus.SUCCESS
+    step.finished_at = _utcnow()
+    # Same persistence + broadcast path as any runner step: LogEntry rows, capped
+    # step output and Redis log frames (this call commits).
+    await _flush_buffer(db, deployment, step, [StepLine(output)])
+    return dict(resolution.values)
+
+
+async def _audit_secret_resolution(
+    db: AsyncSession,
+    deployment: Deployment,
+    environment: DeploymentEnvironment,
+    resolution: ResolvedSecrets,
+) -> None:
+    """Audit every resolved reference before any step executes.
+
+    One row per secret, carrying the key NAME and the resolved version only.
+    Values never enter the audit trail (the redactor would catch a literal
+    ``value``/``secret`` field anyway, but the field names here are chosen so
+    the metadata survives redaction intact and stays useful).
+    """
+    for reference in resolution.references:
+        await audit_service.record(
+            db,
+            None,
+            action="secret.resolve",
+            resource_type="secret",
+            resource_id=reference.secret_id,
+            metadata={
+                "deployment_id": str(deployment.id),
+                "environment_id": str(environment.id),
+                "key": reference.key,
+                "version": reference.version,
+            },
+        )
+
+
+async def _audit_resolution_failed(
+    db: AsyncSession,
+    deployment: Deployment,
+    environment: DeploymentEnvironment,
+    exc: SecretResolutionError,
+) -> None:
+    """Audit a failed resolution — key names and reasons only, never values.
+
+    The deployment's own FAILED transition, event and alert come from the shared
+    ``_finalize_failed`` path; this only records *why* the resolution failed.
+    """
+    await audit_service.record(
+        db,
+        None,
+        action="secret.resolve_failed",
+        resource_type="deployment",
+        resource_id=deployment.id,
+        result=AuditResult.DENIED,
+        metadata={
+            "deployment_id": str(deployment.id),
+            "environment_id": str(environment.id),
+            "environment": environment.slug,
+            "missing": list(exc.missing),
+            "undecryptable": list(exc.undecryptable),
+        },
+    )
 
 
 async def _cancel_requested(db: AsyncSession, deployment_id: uuid.UUID) -> bool:
@@ -461,6 +594,7 @@ async def _persist_log_lines(
             source=LogSource.DEPLOYMENT,
             deployment_id=deployment_id,
             lines=log_lines,
+            org_id=require_org(),
         )
         return
     except Exception as exc:
@@ -472,6 +606,7 @@ async def _persist_log_lines(
             log.debug("deployment_rollback_failed", error=str(rb_exc))
     db.add_all(
         LogEntry(
+            org_id=require_org(),
             source=LogSource.DEPLOYMENT,
             deployment_id=deployment_id,
             stream="stdout",

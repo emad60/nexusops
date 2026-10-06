@@ -7,9 +7,16 @@ imports from this module — never the reverse.
 
 Object-level guards enforced here (never trusting router checks alone):
   * a caller cannot deactivate their own account;
-  * the last active superadmin can neither be deactivated nor moved off the
-    superadmin flag by a role change;
+  * the last active member of an organization cannot be suspended;
   * revoking another user's session requires ``user.manage``.
+
+Tenancy: ``users`` is an **instance-level identity** — a person can be a member
+of several organizations — so the tenancy boundary of every user-facing
+operation is the ``memberships`` row, not the user. Every read and write below
+therefore takes the active ``org_id`` and joins it: without that join the
+directory is an instance-wide dump of names and emails, and a role change or
+removal silently reconfigures a user's access in *another* tenant. Role and
+membership status in the directory are the membership's, never the account's.
 """
 
 from __future__ import annotations
@@ -28,9 +35,9 @@ from app.api.deps import AuthContext
 from app.core.errors import BadRequest, Conflict, Forbidden, NotFound
 from app.core.pagination import PageParams, paginate
 from app.core.security import hash_password
-from app.models import RefreshToken, Role, User
+from app.models import Membership, RefreshToken, Role, User
 from app.models import Session as DbSession
-from app.models.enums import ActorType, EventLevel, UserStatus
+from app.models.enums import ActorType, EventLevel, MembershipStatus, UserStatus
 from app.services import api_key_service, audit_service, event_bus
 
 PASSWORD_POLICY_MESSAGE = (
@@ -65,29 +72,78 @@ async def get_by_email(db: AsyncSession, email: str) -> User | None:
     ).scalar_one_or_none()
 
 
+def _membership_join(org_id: UUID):
+    """Inner join restricting a ``users`` query to one organization's members.
+
+    Inner (not outer) on purpose: a user with no membership in the active
+    organization is not addressable through the directory at all, so the join is
+    both the filter and the authorization boundary. It is also what makes
+    :func:`get_member` return *not found* — rather than *forbidden* — for a user
+    the caller knows the id of but shares no tenant with, which keeps the
+    endpoint from confirming the existence of foreign accounts.
+    """
+    return select(User, Membership).join(
+        Membership, (Membership.user_id == User.id) & (Membership.org_id == org_id)
+    )
+
+
 async def list_users(
     db: AsyncSession,
     *,
+    org_id: UUID,
     params: PageParams,
     q: str | None = None,
     is_active: bool | None = None,
     role_id: UUID | None = None,
     sort: str = "created_at",
     order: str = "desc",
-) -> tuple[list[User], int]:
-    """Paginated user listing with optional text/status/role filters."""
-    stmt = select(User)
+) -> tuple[list[tuple[User, Membership]], int]:
+    """Paginated directory of *this organization's* members, newest first.
+
+    ``is_active``/``role_id`` filter the **membership** (suspended or active in
+    this org; the role held in this org), not the account: the same user can be
+    suspended in one tenant and active in another, and the two filters must
+    agree with the representation they were applied to.
+
+    The rows are ``(User, Membership)`` pairs rather than bare users so the
+    caller serialises the membership's role, and pagination is spelled out here
+    because :func:`~app.core.pagination.paginate` returns a single entity per
+    row and would drop the membership.
+    """
+    stmt = _membership_join(org_id)
     if q:
         pattern = f"%{q}%"
         stmt = stmt.where(or_(User.email.ilike(pattern), User.full_name.ilike(pattern)))
     if is_active is not None:
-        stmt = stmt.where(User.is_active.is_(is_active))
+        stmt = stmt.where(
+            Membership.status
+            == (MembershipStatus.ACTIVE if is_active else MembershipStatus.SUSPENDED)
+        )
     if role_id is not None:
-        stmt = stmt.where(User.role_id == role_id)
+        stmt = stmt.where(Membership.role_id == role_id)
 
+    total = int(
+        (
+            await db.execute(select(func.count()).select_from(stmt.order_by(None).subquery()))
+        ).scalar_one()
+    )
     sort_column: Any = {"created_at": User.created_at, "email": User.email}[sort]
     stmt = stmt.order_by(sort_column.desc() if order == "desc" else sort_column.asc())
-    return await paginate(db, stmt, params)
+    rows = (await db.execute(stmt.limit(params.limit).offset(params.offset))).all()
+    return [(user, membership) for user, membership in rows], total
+
+
+async def get_member(db: AsyncSession, *, user_id: UUID, org_id: UUID) -> tuple[User, Membership]:
+    """Fetch a member of *org_id* or raise NotFound.
+
+    A user outside the active organization is indistinguishable from a
+    non-existent one: the joiner returns nothing for both, so a caller cannot
+    probe for accounts in other tenants by id.
+    """
+    row = (await db.execute(_membership_join(org_id).where(User.id == user_id))).one_or_none()
+    if row is None:
+        raise NotFound("User not found", code="USER_NOT_FOUND")
+    return row[0], row[1]
 
 
 async def create_user(
@@ -136,6 +192,25 @@ async def create_user(
     db.add(user)
     await db.flush()
 
+    # An invited account is invited *into the organization the inviter is acting
+    # in*. Without the membership the account could authenticate but act nowhere:
+    # the login response would list no organizations and every org-scoped call
+    # would be refused. The role belongs to the membership, so the same person
+    # can hold a different role in another tenant.
+    if actor.org_id is not None:
+        db.add(
+            Membership(
+                org_id=actor.org_id,
+                user_id=user.id,
+                role_id=role.id,
+                status=MembershipStatus.ACTIVE,
+                created_by_id=actor.user_id,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        await db.flush()
+
     await audit_service.record(
         db,
         actor,
@@ -166,47 +241,72 @@ async def update_user(
     db: AsyncSession,
     *,
     actor: AuthContext,
+    org_id: UUID,
     user_id: UUID,
     full_name: str | None = None,
     role_id: UUID | None = None,
     is_active: bool | None = None,
     request: Request | None = None,
-) -> User:
-    """Apply partial updates guarded against self-deactivation and last-superadmin lockout."""
-    user = await get_user(db, user_id)
+) -> tuple[User, Membership]:
+    """Update a member **of the active organization**, guarded against self-suspension.
 
-    deactivating = bool(is_active is False and user.is_active)
-    if deactivating:
+    Everything authority-bearing is written to the membership, not the account:
+
+    * ``role_id`` changes the role the user holds *here*. Writing it to
+      ``User.role_id`` (as the single-tenant version did) would silently
+      re-grant access in every other organization the person belongs to — one
+      tenant editing another tenant's privileges.
+    * ``is_active=False`` suspends this membership. It deliberately does **not**
+      disable the account or revoke its sessions and API keys: those are
+      instance-wide credentials, and a tenant administrator revoking them would
+      be a cross-tenant denial of service. Account deactivation is an
+      operator action, not a member-management one.
+    * ``full_name`` stays on the account — a display name is a property of the
+      person, identical wherever they appear.
+    """
+    user, membership = await get_member(db, user_id=user_id, org_id=org_id)
+
+    suspending = bool(is_active is False and membership.status == MembershipStatus.ACTIVE)
+    if suspending:
         if user.id == actor.user_id:
-            raise BadRequest("You cannot deactivate your own account", code="SELF_DEACTIVATION")
-        await _assert_not_last_active_superadmin(db, user)
+            raise BadRequest("You cannot suspend your own membership", code="SELF_DEACTIVATION")
+        await _assert_not_last_active_member(db, org_id=org_id, membership=membership)
 
-    changing_role = role_id is not None and role_id != user.role_id
+    changing_role = role_id is not None and role_id != membership.role_id
     new_role: Role | None = None
     if changing_role:
-        await _assert_not_last_active_superadmin(db, user)
         new_role = await db.get(Role, role_id)
         if new_role is None:
             raise NotFound("Role not found", code="ROLE_NOT_FOUND")
 
     changes: dict[str, Any] = {}
     if changing_role and new_role is not None:
-        changes["role"] = {"from": user.role.name if user.role else None, "to": new_role.name}
-        user.role_id = new_role.id
-        user.role = new_role  # keep the selectin-loaded relationship consistent
+        changes["role"] = {
+            "from": membership.role.name if membership.role else None,
+            "to": new_role.name,
+        }
+        membership.role_id = new_role.id
+        membership.role = new_role  # keep the selectin-loaded relationship consistent
     if full_name is not None and full_name != user.full_name:
         changes["full_name"] = True
         user.full_name = full_name.strip()[:160]
-    if deactivating:
-        changes["is_active"] = {"from": True, "to": False}
+    if suspending:
+        changes["membership_status"] = {
+            "from": MembershipStatus.ACTIVE.value,
+            "to": MembershipStatus.SUSPENDED.value,
+        }
+        membership.status = MembershipStatus.SUSPENDED
+    elif is_active is True and membership.status == MembershipStatus.SUSPENDED:
+        changes["membership_status"] = {
+            "from": MembershipStatus.SUSPENDED.value,
+            "to": MembershipStatus.ACTIVE.value,
+        }
+        membership.status = MembershipStatus.ACTIVE
 
     if not changes:
-        return user
+        return user, membership
 
-    if deactivating:
-        await _apply_deactivation(db, user)
-    else:
-        await db.flush()
+    await db.flush()
 
     if changing_role:
         await event_bus.publish(
@@ -229,49 +329,99 @@ async def update_user(
         metadata={"changes": changes},
         request=request,
     )
-    return user
+    return user, membership
 
 
 async def deactivate_user(
     db: AsyncSession,
     *,
     actor: AuthContext,
+    org_id: UUID,
     user_id: UUID,
     request: Request | None = None,
-) -> User:
-    """Deactivate a user: revoke sessions + API keys. Never a hard delete."""
-    user = await get_user(db, user_id)
-    if user.id == actor.user_id:
-        raise BadRequest("You cannot deactivate your own account", code="SELF_DEACTIVATION")
-    await _assert_not_last_active_superadmin(db, user)
-    if not user.is_active:
-        return user
+) -> tuple[User, Membership]:
+    """Remove a member from the active organization (soft: membership suspended).
 
-    await _apply_deactivation(db, user)
+    Scoped to the membership for the same reason as :func:`update_user`: the
+    account and its credentials are shared across tenants, so a tenant
+    administrator may end someone's access *here* and nowhere else. The row is
+    kept — a removal is part of the organization's history, and re-adding the
+    person should not have to recreate their audit trail.
+    """
+    user, membership = await get_member(db, user_id=user_id, org_id=org_id)
+    if user.id == actor.user_id:
+        raise BadRequest("You cannot remove your own membership", code="SELF_DEACTIVATION")
+    if membership.status != MembershipStatus.ACTIVE:
+        return user, membership
+    await _assert_not_last_active_member(db, org_id=org_id, membership=membership)
+
+    membership.status = MembershipStatus.SUSPENDED
+    await db.flush()
     await audit_service.record(
         db,
         actor,
         action="user.deactivate",
         resource_type="user",
         resource_id=user.id,
-        metadata={"at": datetime.now(UTC).isoformat()},
+        metadata={
+            "at": datetime.now(UTC).isoformat(),
+            "scope": "membership",
+            "org_id": str(org_id),
+        },
         request=request,
     )
     await event_bus.publish(
         db,
         type="USER_DEACTIVATED",
-        message=f"User {user.email} deactivated",
+        message=f"User {user.email} removed from the organization",
         level=EventLevel.WARNING,
         actor_id=actor.user_id,
         actor_type=ActorType.USER,
         resource_type="user",
         resource_id=str(user.id),
     )
-    return user
+    return user, membership
+
+
+async def _assert_not_last_active_member(
+    db: AsyncSession, *, org_id: UUID, membership: Membership
+) -> None:
+    """Conflict when *membership* is the last active member of its organization.
+
+    The multi-tenant successor to the last-superadmin guard: an organization
+    whose last member is removed becomes administratively unreachable — nobody
+    left to invite anyone — so the final removal is refused rather than
+    silently orphaning the tenant.
+    """
+    if membership.status != MembershipStatus.ACTIVE:
+        return
+    active = int(
+        (
+            await db.execute(
+                select(func.count())
+                .select_from(Membership)
+                .where(
+                    Membership.org_id == org_id,
+                    Membership.status == MembershipStatus.ACTIVE,
+                )
+            )
+        ).scalar_one()
+    )
+    if active <= 1:
+        raise Conflict(
+            "Cannot remove the last active member of the organization",
+            code="LAST_MEMBER_PROTECTED",
+        )
 
 
 async def _apply_deactivation(db: AsyncSession, user: User) -> None:
-    """Flip status and revoke every live credential belonging to the user."""
+    """Disable an account and revoke every live credential it owns.
+
+    Instance-level only (a whole-account action) and therefore unreachable from
+    the tenant-scoped member endpoints; kept for operator tooling and future
+    account management, and used by tests to assert that tenant suspension does
+    *not* reach it.
+    """
     user.is_active = False
     user.status = UserStatus.DISABLED
     await revoke_all_user_sessions(db, user.id, reason="user_deactivated")
@@ -279,7 +429,13 @@ async def _apply_deactivation(db: AsyncSession, user: User) -> None:
 
 
 async def _assert_not_last_active_superadmin(db: AsyncSession, target: User) -> None:
-    """Conflict when *target* is the only active superadmin left."""
+    """Conflict when *target* is the only active superadmin left.
+
+    Instance-level guard, kept beside the account-level operations it protects
+    (``_apply_deactivation`` and operator tooling). Tenant-scoped member changes
+    use :func:`_assert_not_last_active_member` instead, because a membership
+    change cannot lock the instance out.
+    """
     if not target.is_superadmin or not target.is_active:
         return
     active_superadmins = int(
@@ -302,14 +458,27 @@ async def _assert_not_last_active_superadmin(db: AsyncSession, target: User) -> 
 
 
 async def list_sessions(
-    db: AsyncSession, *, user_id: UUID, params: PageParams
+    db: AsyncSession, *, org_id: UUID, params: PageParams, user_id: UUID | None = None
 ) -> tuple[list[DbSession], int]:
-    """Active sessions for a user (not revoked, not expired), newest activity first."""
+    """Active sessions belonging to **members of the active organization**.
+
+    Sessions are credentials of the *account*, so ``sessions`` carries no tenant
+    column and cannot be filtered directly. The boundary is the owner: a session
+    is visible here only if its user holds a membership in the active
+    organization. Without that join, ``?all=true`` — which any ``user.manage``
+    holder can ask for — becomes an instance-wide feed of IP addresses, device
+    labels and user agents.
+
+    *user_id* narrows to one member (the caller having verified they are one);
+    ``None`` means every member.
+    """
     stmt = select(DbSession).where(
-        DbSession.user_id == user_id,
+        DbSession.user_id.in_(select(Membership.user_id).where(Membership.org_id == org_id)),
         DbSession.revoked_at.is_(None),
         DbSession.expires_at > datetime.now(UTC),
     )
+    if user_id is not None:
+        stmt = stmt.where(DbSession.user_id == user_id)
     stmt = stmt.order_by(DbSession.last_seen_at.desc().nulls_last(), DbSession.created_at.desc())
     return await paginate(db, stmt, params)
 
@@ -366,13 +535,24 @@ async def revoke_all_user_sessions(
 async def revoke_session_as(
     db: AsyncSession, *, ctx: AuthContext, session_id: UUID, request: Request | None = None
 ) -> None:
-    """Revoke with object-level authorization: own always; another user's needs user.manage."""
+    """Revoke with object-level authorization: own always; another user's needs user.manage.
+
+    Both conditions are tenant-bound. ``user.manage`` is a permission *inside the
+    active organization*, so it authorizes revoking a session of a member of
+    that organization and nothing else: the target's membership is looked up
+    first, and a session belonging to someone outside the tenant is reported as
+    not found (a foreign session id is indistinguishable from a bogus one).
+    Revoking it would otherwise be a cross-tenant denial of service available to
+    any organization administrator.
+    """
     session = await db.get(DbSession, session_id)
     if session is None:
         raise NotFound("Session not found", code="SESSION_NOT_FOUND")
     is_owner = session.user_id == ctx.user_id
     if not is_owner and not ctx.has_permission("user.manage"):
         raise Forbidden("You may only revoke your own sessions", code="PERMISSION_DENIED")
+    if not is_owner:
+        await get_member(db, user_id=session.user_id, org_id=ctx.require_org_id())
     await revoke_session(db, session_id, reason="revoked_by_user")
     await audit_service.record(
         db,

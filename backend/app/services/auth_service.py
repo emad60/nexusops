@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import math
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
@@ -20,7 +20,7 @@ from fastapi import Request
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import AuthContext
+from app.api.deps import AuthContext, active_memberships
 from app.core.config import Settings, get_settings
 from app.core.errors import Conflict, Forbidden, Unauthorized
 from app.core.security import (
@@ -30,10 +30,18 @@ from app.core.security import (
     hash_token,
     verify_password,
 )
-from app.models import RefreshToken, Role, User
+from app.core.tenancy import apply_scope_to_session, org_scope, system_write_scope
+from app.models import Membership, Organization, RefreshToken, Role, User
 from app.models import Session as DbSession
-from app.models.enums import ActorType, AuditResult, EventLevel, UserStatus
-from app.services import audit_service, event_bus, user_service
+from app.models.enums import (
+    ActorType,
+    AuditResult,
+    EventLevel,
+    MembershipStatus,
+    OrganizationStatus,
+    UserStatus,
+)
+from app.services import audit_service, event_bus, organization_service, user_service
 from app.services.user_service import revoke_all_user_sessions, revoke_session
 
 REFRESH_COOKIE_NAME = "nxo_rt"
@@ -52,6 +60,7 @@ async def _audit(
     result: AuditResult = AuditResult.SUCCESS,
     meta: dict[str, Any] | None = None,
     request: Request | None = None,
+    org_id: UUID | None = None,
 ) -> None:
     """Thin audit_service.record wrapper keeping call sites readable."""
     await audit_service.record(
@@ -63,6 +72,7 @@ async def _audit(
         result=result,
         metadata=meta,
         request=request,
+        org_id=org_id,
     )
 
 
@@ -77,6 +87,7 @@ async def _event(
     res: str | None = None,
     rid: str | None = None,
     data: dict[str, Any] | None = None,
+    org_id: UUID | None = None,
 ) -> None:
     """Thin event_bus.publish wrapper keeping call sites readable."""
     await event_bus.publish(
@@ -89,7 +100,25 @@ async def _event(
         resource_type=res,
         resource_id=rid,
         data=data,
+        org_id=org_id,
     )
+
+
+async def primary_org_for(db: AsyncSession, user_id: UUID) -> UUID | None:
+    """The organization that unambiguously owns a pre-org action.
+
+    Login and refresh happen before an organization is chosen. When the account
+    belongs to exactly one organization, the security event can be attributed to
+    it; when it belongs to several there is no honest answer, so the row is
+    filed at instance level (``org_id IS NULL``) where no tenant can read it.
+    """
+    memberships = await active_memberships(db, user_id)
+    return primary_org_of(memberships)
+
+
+def primary_org_of(memberships: list[Membership]) -> UUID | None:
+    """Single-membership organization, or None when the answer is ambiguous."""
+    return memberships[0].org_id if len(memberships) == 1 else None
 
 
 def validate_password_policy(password: str) -> None:
@@ -113,13 +142,26 @@ __all__ = [  # public surface consumed by routers/other services
 
 @dataclass(slots=True)
 class IssuedTokens:
-    """Everything a token endpoint needs to render its response."""
+    """Everything a token endpoint needs to render its response.
+
+    ``memberships`` and ``active_organization_id`` are part of the token
+    response on purpose: the SPA learns which organization to send in
+    ``X-Org-Id`` from here, so a caller never has to guess or probe.
+    ``active_organization_id`` is only set when the choice is unambiguous (a
+    single active membership); otherwise the client must pick from
+    ``memberships``.
+    """
 
     user: User
     session: DbSession
     access_token: str
     expires_in: int
     refresh_token: str
+    memberships: list[Membership] = field(default_factory=list)
+
+    @property
+    def active_organization_id(self) -> UUID | None:
+        return self.memberships[0].org_id if len(self.memberships) == 1 else None
 
 
 async def count_users(db: AsyncSession) -> int:
@@ -187,26 +229,111 @@ async def register(
     db.add(user)
     await db.flush()
 
-    await _event(
-        db,
-        "USER_CREATED",
-        f"User {email_norm} registered",
-        actor_id=actor.user_id if actor else user.id,
-        actor_type=ActorType.USER if actor else ActorType.SYSTEM,
-        res="user",
-        rid=str(user.id),
-        data={"email": email_norm, "bootstrap": bootstrap},
-    )
-    await _audit(
-        db,
-        actor,
-        "user.register",
-        res="user",
-        rid=user.id,
-        meta={"email": email_norm, "bootstrap": bootstrap},
-        request=request,
-    )
+    # Bootstrap: the first account of a fresh instance also creates the first
+    # organization and becomes its Owner. Without this the account would exist
+    # with no tenant to act in and every org-scoped request would 403 — a
+    # dead-end that would otherwise need an operator to fix by hand.
+    org: Organization | None = None
+    if bootstrap:
+        org = await _bootstrap_organization(db, user)
+
+    if org is not None:
+        # Membership, audit and event all belong to the new organization, and
+        # PostgreSQL will only accept them under its scope (the tenant policy's
+        # WITH CHECK compares against the active organization). The session
+        # already has a transaction open from the account insert, so the scope
+        # has to be pushed onto the connection explicitly.
+        with org_scope(org.id):
+            await apply_scope_to_session(db)
+            await db.flush()
+            await _event(
+                db,
+                "USER_CREATED",
+                f"User {email_norm} registered",
+                actor_id=user.id,
+                actor_type=ActorType.USER,
+                res="user",
+                rid=str(user.id),
+                data={"email": email_norm, "bootstrap": True},
+                org_id=org.id,
+            )
+            await _audit(
+                db,
+                actor,
+                "user.register",
+                res="user",
+                rid=user.id,
+                meta={"email": email_norm, "bootstrap": True},
+                request=request,
+                org_id=org.id,
+            )
+        return user
+
+    # Invited account (an operator created it): the invitation path adds the
+    # membership separately, so this row is filed at instance level.
+    async with system_write_scope(db, "auth.register_audit"):
+        await _event(
+            db,
+            "USER_CREATED",
+            f"User {email_norm} registered",
+            actor_id=actor.user_id if actor else user.id,
+            actor_type=ActorType.USER if actor else ActorType.SYSTEM,
+            res="user",
+            rid=str(user.id),
+            data={"email": email_norm, "bootstrap": False},
+        )
+        await _audit(
+            db,
+            actor,
+            "user.register",
+            res="user",
+            rid=user.id,
+            meta={"email": email_norm, "bootstrap": False},
+            request=request,
+        )
     return user
+
+
+async def _bootstrap_organization(db: AsyncSession, user: User) -> Organization:
+    """First organization of a fresh instance: named after its creator.
+
+    The name is explicitly a placeholder (``is_provisional``), never the
+    vendor's name, and it is expected to be renamed — the UI says so, and
+    renaming clears the flag.
+    """
+    now = datetime.now(UTC)
+    display = user.display_name()
+    org = Organization(
+        name=f"{display}'s Organization"[:120],
+        slug=await organization_service.unique_slug(db, organization_service.slugify(display)),
+        description=(
+            "Created automatically for the first account on this instance "
+            "and named after it. Rename it to your real organization."
+        ),
+        status=OrganizationStatus.ACTIVE,
+        is_provisional=True,
+        created_by_id=user.id,
+        created_at=now,
+        updated_at=now,
+    )
+    db.add(org)
+    await db.flush()
+
+    owner_role = (
+        await db.execute(select(Role).where(Role.name == organization_service.DEFAULT_OWNER_ROLE))
+    ).scalar_one_or_none()
+    membership = Membership(
+        org_id=org.id,
+        user_id=user.id,
+        role_id=owner_role.id if owner_role else None,
+        status=MembershipStatus.ACTIVE,
+        created_by_id=user.id,
+        created_at=now,
+        updated_at=now,
+    )
+    db.add(membership)
+    await db.flush()
+    return org
 
 
 async def _record_login_failure(
@@ -224,25 +351,37 @@ async def _record_login_failure(
     the request-scoped session dependency rolls back on exceptions — without
     this commit the lockout counters and the audit row would be discarded.
     """
-    await _audit(
-        db,
-        ctx,
-        "auth.login",
-        res="user",
-        result=AuditResult.DENIED,
-        meta={"email": email, "reason": reason, **(extra_meta or {})},
-        request=request,
-    )
-    await _event(
-        db,
-        "LOGIN_FAILED",
-        f"Failed login for {email}",
-        level=EventLevel.WARNING,
-        actor_id=ctx.user_id if ctx else None,
-        actor_type=ActorType.USER if ctx else ActorType.SYSTEM,
-        res="user",
-        data={"email": email},
-    )
+    # A failure against a known account belongs to that account's organization —
+    # an administrator of that tenant is exactly who needs to see it. When the
+    # account is unknown, or its membership is ambiguous, there is no
+    # organization to attribute the row to, so it is written under a system
+    # scope and remains invisible to every tenant.
+    failure_org: UUID | None = None
+    if ctx is not None:
+        failure_org = primary_org_of(await active_memberships(db, ctx.user_id))
+
+    async with system_write_scope(db, "auth.failed_login_audit"):
+        await _audit(
+            db,
+            ctx,
+            "auth.login",
+            res="user",
+            result=AuditResult.DENIED,
+            meta={"email": email, "reason": reason, **(extra_meta or {})},
+            request=request,
+            org_id=failure_org,
+        )
+        await _event(
+            db,
+            "LOGIN_FAILED",
+            f"Failed login for {email}",
+            level=EventLevel.WARNING,
+            actor_id=ctx.user_id if ctx else None,
+            actor_type=ActorType.USER if ctx else ActorType.SYSTEM,
+            res="user",
+            data={"email": email},
+            org_id=failure_org,
+        )
     await db.commit()
 
 
@@ -326,20 +465,36 @@ async def login(
     )
     await db.flush()
 
-    await _audit(
-        db, ctx, "auth.login", res="user", rid=user.id, meta={"email": email_norm}, request=request
-    )
-    await _event(
-        db,
-        "USER_LOGIN",
-        f"User {email_norm} logged in",
-        actor_id=user.id,
-        actor_type=ActorType.USER,
-        res="session",
-        rid=str(session.id),
-        data={"ip": ip},
-    )
-    return _issue_access(user, session, raw_refresh)
+    memberships = await active_memberships(db, user.id)
+    # Login is pre-org by definition, so the security trail is written under a
+    # system scope with the organization resolved from the account's own
+    # memberships (a single membership is unambiguous; several are filed at
+    # instance level rather than guessed).
+    async with system_write_scope(db, "auth.login_audit"):
+        await _audit(
+            db,
+            ctx,
+            "auth.login",
+            res="user",
+            rid=user.id,
+            meta={"email": email_norm},
+            request=request,
+            org_id=primary_org_of(memberships),
+        )
+        await _event(
+            db,
+            "USER_LOGIN",
+            f"User {email_norm} logged in",
+            actor_id=user.id,
+            actor_type=ActorType.USER,
+            res="session",
+            rid=str(session.id),
+            data={"ip": ip},
+            org_id=primary_org_of(memberships),
+        )
+    issued = _issue_access(user, session, raw_refresh)
+    issued.memberships = memberships
+    return issued
 
 
 def _issue_access(user: User, session: DbSession, raw_refresh: str) -> IssuedTokens:
@@ -426,33 +581,35 @@ async def refresh(
         if grace_successor is None:
             # Token replay → assume theft: kill every token and the session itself.
             await revoke_session(db, row.session_id, reason="token_reuse_detected")
-            await _audit(
-                db,
-                None,
-                "auth.token_reuse_detected",
-                res="session",
-                rid=row.session_id,
-                result=AuditResult.DENIED,
-                meta={"refresh_token_id": str(row.id)},
-                request=request,
-            )
+            async with system_write_scope(db, "auth.token_reuse_audit"):
+                await _audit(
+                    db,
+                    None,
+                    "auth.token_reuse_detected",
+                    res="session",
+                    rid=row.session_id,
+                    result=AuditResult.DENIED,
+                    meta={"refresh_token_id": str(row.id)},
+                    request=request,
+                )
             # The request dependency rolls back on exceptions; commit so the
             # revocation (and the audit trail) actually survive the raised 401.
             await db.commit()
             raise Unauthorized("Refresh token reuse detected; session revoked", code="TOKEN_REUSE")
         row.grace_used = True
-        await _audit(
-            db,
-            None,
-            "auth.token_grace_reuse",
-            res="session",
-            rid=row.session_id,
-            meta={
-                "refresh_token_id": str(row.id),
-                "grace_seconds": settings.refresh_grace_seconds,
-            },
-            request=request,
-        )
+        async with system_write_scope(db, "auth.token_grace_audit"):
+            await _audit(
+                db,
+                None,
+                "auth.token_grace_reuse",
+                res="session",
+                rid=row.session_id,
+                meta={
+                    "refresh_token_id": str(row.id),
+                    "grace_seconds": settings.refresh_grace_seconds,
+                },
+                request=request,
+            )
 
     if row.expires_at <= now:
         raise Unauthorized("Refresh token expired", code="REFRESH_EXPIRED")
@@ -486,42 +643,57 @@ async def refresh(
         grace_successor.revoked_at = now
     session.last_seen_at = now
 
-    await _audit(
-        db,
-        AuthContext(user=user),
-        "auth.token_rotated",
-        res="session",
-        rid=session.id,
-        meta={"rotated_from": str(row.id), "rotated_to": str(new_row.id)},
-        request=request,
-    )
-    return _issue_access(user, session, raw_new)
+    memberships = await active_memberships(db, user.id)
+    async with system_write_scope(db, "auth.token_rotation_audit"):
+        await _audit(
+            db,
+            AuthContext(user=user),
+            "auth.token_rotated",
+            res="session",
+            rid=session.id,
+            meta={"rotated_from": str(row.id), "rotated_to": str(new_row.id)},
+            request=request,
+            org_id=primary_org_of(memberships),
+        )
+    issued = _issue_access(user, session, raw_new)
+    issued.memberships = memberships
+    return issued
 
 
 # --- Logout & password change -------------------------------------------------------
 
 
 async def logout(db: AsyncSession, *, ctx: AuthContext, request: Request | None = None) -> None:
-    """Revoke the caller's current session (if any) and record the logout."""
+    """Revoke the caller's current session (if any) and record the logout.
+
+    Identity-only by design (an account must always be able to end its own
+    session, even with no organization selected), so the trail is written under
+    a system scope and attributed to the account's only organization when that
+    is unambiguous.
+    """
     if ctx.session_id is not None:
         await revoke_session(db, ctx.session_id, reason="logout")
-    await _audit(
-        db,
-        ctx,
-        "auth.logout",
-        res="session",
-        rid=str(ctx.session_id) if ctx.session_id else None,
-        request=request,
-    )
-    await _event(
-        db,
-        "USER_LOGOUT",
-        f"User {ctx.email} logged out",
-        actor_id=ctx.user_id,
-        actor_type=ActorType.USER,
-        res="user",
-        rid=str(ctx.user_id),
-    )
+    memberships = await active_memberships(db, ctx.user_id)
+    async with system_write_scope(db, "auth.logout_audit"):
+        await _audit(
+            db,
+            ctx,
+            "auth.logout",
+            res="session",
+            rid=str(ctx.session_id) if ctx.session_id else None,
+            request=request,
+            org_id=primary_org_of(memberships),
+        )
+        await _event(
+            db,
+            "USER_LOGOUT",
+            f"User {ctx.email} logged out",
+            actor_id=ctx.user_id,
+            actor_type=ActorType.USER,
+            res="user",
+            rid=str(ctx.user_id),
+            org_id=primary_org_of(memberships),
+        )
 
 
 async def change_own_password(
@@ -535,15 +707,16 @@ async def change_own_password(
     """Change the caller's password, revoking all of their other sessions."""
     user = ctx.user
     if not verify_password(user.password_hash, current_password):
-        await _audit(
-            db,
-            ctx,
-            "user.password.change",
-            res="user",
-            rid=user.id,
-            result=AuditResult.DENIED,
-            request=request,
-        )
+        async with system_write_scope(db, "auth.password_change_denied_audit"):
+            await _audit(
+                db,
+                ctx,
+                "user.password.change",
+                res="user",
+                rid=user.id,
+                result=AuditResult.DENIED,
+                request=request,
+            )
         raise Unauthorized("Current password is incorrect", code="INVALID_CREDENTIALS")
 
     validate_password_policy(new_password)
@@ -551,23 +724,27 @@ async def change_own_password(
     revoked = await revoke_all_user_sessions(
         db, user.id, reason="password_changed", exclude_session_id=ctx.session_id
     )
-    await _audit(
-        db,
-        ctx,
-        "user.password.change",
-        res="user",
-        rid=user.id,
-        meta={"revoked_other_sessions": revoked},
-        request=request,
-    )
-    await _event(
-        db,
-        "USER_PASSWORD_CHANGED",
-        f"Password changed for {user.email}",
-        level=EventLevel.WARNING,
-        actor_id=user.id,
-        actor_type=ActorType.USER,
-        res="user",
-        rid=str(user.id),
-    )
+    memberships = await active_memberships(db, user.id)
+    async with system_write_scope(db, "auth.password_change_audit"):
+        await _audit(
+            db,
+            ctx,
+            "user.password.change",
+            res="user",
+            rid=user.id,
+            meta={"revoked_other_sessions": revoked},
+            request=request,
+            org_id=primary_org_of(memberships),
+        )
+        await _event(
+            db,
+            "USER_PASSWORD_CHANGED",
+            f"Password changed for {user.email}",
+            level=EventLevel.WARNING,
+            actor_id=user.id,
+            actor_type=ActorType.USER,
+            res="user",
+            rid=str(user.id),
+            org_id=primary_org_of(memberships),
+        )
     return user

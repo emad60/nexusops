@@ -29,12 +29,17 @@ const UsersPage = lazy(() => import("./pages/UsersPage"));
 const RolesPage = lazy(() => import("./pages/RolesPage"));
 const ApiKeysPage = lazy(() => import("./pages/ApiKeysPage"));
 const SessionsPage = lazy(() => import("./pages/SessionsPage"));
+const OrganizationRequiredPage = lazy(() => import("./pages/OrganizationRequiredPage"));
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
-  const { user, initializing } = useAuth();
+  const { user, initializing, activeMembership } = useAuth();
   const location = useLocation();
   if (initializing) return <LoadingBlock label="Starting NexusOps…" />;
   if (!user) return <Navigate to="/login" replace state={{ from: location.pathname }} />;
+  // Authenticated, but with no organization to act in. Every tenant endpoint
+  // requires the X-Org-Id the shell has nothing to fill in yet, so the pages
+  // behind this gate would only render 403s.
+  if (!activeMembership) return <OrganizationRequiredPage />;
   return children;
 }
 
@@ -60,8 +65,8 @@ export function App() {
               }
             >
               <Route path="/" element={<DashboardPage />} />
-              <Route path="/servers" element={<ServerListPage />} />
-              <Route path="/servers/:serverId" element={<ServerDetailPage />} />
+              <Route path="/nodes" element={<ServerListPage />} />
+              <Route path="/nodes/:serverId" element={<ServerDetailPage />} />
               <Route path="/containers" element={<ContainerListPage />} />
               <Route path="/containers/:containerId" element={<ContainerDetailPage />} />
               <Route path="/docker-hosts" element={<DockerHostsPage />} />

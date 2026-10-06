@@ -4,7 +4,7 @@
  * ServerListPage (create) and ServerDetailPage (edit) previously carried two
  * ~150-line copies of the same fields and the same validation; both now render
  * <ServerFormFields> and share validateServerForm / buildServerPayload, so the
- * wire contract (POST /servers, PATCH /servers/{id}) has exactly one owner.
+ * wire contract (POST /nodes, PATCH /nodes/{id}) has exactly one owner.
  *
  * Per-field errors come from validateServerForm; buildServerPayload must only
  * be called once validation reports no errors.
@@ -74,7 +74,7 @@ export function validateServerForm(values: ServerFormValues): ServerFormErrors {
   return errors;
 }
 
-/** Payload for POST /servers and PATCH /servers/{id} (mirrors the backend schema). */
+/** Payload for POST /nodes and PATCH /nodes/{id} (mirrors the backend schema). */
 export interface ServerPayload {
   name: string;
   hostname: string;
@@ -220,7 +220,7 @@ export function ServerFormFields({
         <TextField
           id={`${idPrefix}-offline-after`}
           label="Offline after (seconds, optional)"
-          info="How long the server waits without a heartbeat before marking the server OFFLINE and opening alerts. Empty uses the backend default."
+          info="How long the node waits without a heartbeat before marking the node OFFLINE and opening alerts. Empty uses the backend default."
           type="number"
           min={1}
           error={error("offline_after_seconds")}
@@ -245,7 +245,7 @@ export function ServerFormFields({
       />
       <CheckboxField
         id={`${idPrefix}-simulated`}
-        label="Simulated server (demo data)"
+        label="Simulated node (demo data)"
         info="Generates plausible fake metrics, containers and deployments without contacting any real host — for demos and testing the UI."
         checked={values.simulated}
         onChange={(e) => set("simulated", e.target.checked)}

@@ -25,6 +25,7 @@ import { apiGet } from "../api/client";
 import { useEventStream } from "../hooks/useEventStream";
 import { CommandPalette } from "./CommandPalette";
 import { InfoHint } from "./InfoHint";
+import { OrganizationSwitcher } from "./OrganizationSwitcher";
 import { FOCUSABLE_SELECTOR } from "./ui";
 
 interface UnreadCount {
@@ -176,7 +177,7 @@ export function Layout() {
         {navItem("/events", "Events", ArrowLeftRight)}
 
         <div className="nav-group-label">Infrastructure</div>
-        {hasPermission("server.read") && navItem("/servers", "Servers", Server)}
+        {hasPermission("node.read") && navItem("/nodes", "Nodes", Server)}
         {hasPermission("container.read") && navItem("/containers", "Containers", Container)}
         {hasPermission("container.read") && navItem("/docker-hosts", "Docker hosts", Boxes)}
         {hasPermission("project.read") && navItem("/projects", "Projects", FolderKanban)}
@@ -213,7 +214,7 @@ export function Layout() {
               placement="right"
               label="About simulation mode"
             >
-              Simulated infrastructure — no real hosts are contacted. Servers, metrics and
+              Simulated infrastructure — no real hosts are contacted. Nodes, metrics and
               deployments are generated demo data.
             </InfoHint>
           </div>
@@ -239,6 +240,7 @@ export function Layout() {
             ⌕ Search… <kbd>Ctrl K</kbd>
           </button>
           <div className="flex-between" style={{ marginLeft: "auto", gap: 12 }}>
+            <OrganizationSwitcher />
             <span className="small muted">{user?.email}</span>
             <button type="button" className="btn sm" onClick={() => void logout()}>
               Sign out

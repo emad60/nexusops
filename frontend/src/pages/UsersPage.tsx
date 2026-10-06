@@ -147,10 +147,12 @@ export default function UsersPage() {
     onError: (err) => notify(describeError(err), "error"),
   });
 
+  // Removing a member ends their access to *this* organization; it does not
+  // disable the account, which may hold memberships elsewhere. The copy says so.
   const deactivate = useMutation({
     mutationFn: (target: User) => apiDelete<User>(`/users/${target.id}`),
     onSuccess: (_updated, target) => {
-      notify(`Deactivated ${target.email}`, "success");
+      notify(`Removed ${target.email} from this organization`, "success");
       void refresh();
     },
     onError: (err) => notify(describeError(err), "error"),
@@ -159,7 +161,7 @@ export default function UsersPage() {
   const reactivate = useMutation({
     mutationFn: (target: User) => apiPatch<User>(`/users/${target.id}`, { is_active: true }),
     onSuccess: (_updated, target) => {
-      notify(`Reactivated ${target.email}`, "success");
+      notify(`Added ${target.email} back to this organization`, "success");
       void refresh();
     },
     onError: (err) => notify(describeError(err), "error"),
@@ -177,7 +179,10 @@ export default function UsersPage() {
       <div className="page-head">
         <div className="page-title">
           <h1>Users</h1>
-          <p className="page-sub">Everyone with access to this NexusOps instance.</p>
+          <p className="page-sub">
+            Members of this organization. Roles and removal apply here only — the same person may hold
+            different access in another organization.
+          </p>
         </div>
         <div className="page-actions">
           {canManage && (
@@ -221,8 +226,8 @@ export default function UsersPage() {
               }}
             >
               <option value="">All statuses</option>
-              <option value="active">Active</option>
-              <option value="disabled">Disabled</option>
+              <option value="active">Active here</option>
+              <option value="disabled">Removed here</option>
             </select>
             {roles.length > 0 && (
               <select
@@ -307,37 +312,40 @@ export default function UsersPage() {
                         )}
                       </td>
                       <td>
-                        <StatusBadge value={user.status} />
+                        <StatusBadge value={user.membership_status ?? user.status} />
                         {user.status === "LOCKED" && (
                           <div className="small faint">sign-in locked</div>
+                        )}
+                        {user.status === "DISABLED" && (
+                          <div className="small faint">account disabled</div>
                         )}
                       </td>
                       <td className="muted">{formatDateTime(user.created_at)}</td>
                       {canManage && (
                         <td>
-                          {user.is_active ? (
+                          {(user.membership_status ?? "ACTIVE") === "ACTIVE" ? (
                             <button
                               type="button"
                               className="btn danger sm"
                               disabled={user.id === me?.id || deactivate.isPending}
                               title={
                                 user.id === me?.id
-                                  ? "You cannot deactivate your own account"
-                                  : `Deactivate ${user.email}`
+                                  ? "You cannot remove your own membership"
+                                  : `Remove ${user.email} from this organization`
                               }
                               onClick={() => deactivate.mutate(user)}
                             >
-                              Deactivate
+                              Remove
                             </button>
                           ) : (
                             <button
                               type="button"
                               className="btn sm"
                               disabled={reactivate.isPending}
-                              title={`Reactivate ${user.email}`}
+                              title={`Add ${user.email} back to this organization`}
                               onClick={() => reactivate.mutate(user)}
                             >
-                              Reactivate
+                              Add back
                             </button>
                           )}
                         </td>

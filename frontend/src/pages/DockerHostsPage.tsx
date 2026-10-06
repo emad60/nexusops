@@ -81,7 +81,7 @@ export default function DockerHostsPage() {
   // server_id → server name for the "attached server" column.
   const serversQuery = useQuery({
     queryKey: ["servers", "docker-hosts-page"],
-    queryFn: ({ signal }) => apiGet<Page<ServerSummary>>("/servers", { limit: 100 }, signal),
+    queryFn: ({ signal }) => apiGet<Page<ServerSummary>>("/nodes", { limit: 100 }, signal),
     staleTime: 60_000,
   });
 
@@ -271,7 +271,7 @@ export default function DockerHostsPage() {
                         <td>
                           {host.server_id ? (
                             serverNames.has(host.server_id) ? (
-                              <Link to={`/servers/${host.server_id}`}>
+                              <Link to={`/nodes/${host.server_id}`}>
                                 {serverNames.get(host.server_id)}
                               </Link>
                             ) : (

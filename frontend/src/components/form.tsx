@@ -67,6 +67,10 @@ export function Field({
   return (
     <div className={`field${error ? " has-error" : ""}`}>
       <div className="label-row">
+        {/* The required marker is aria-hidden, so it is decorative for assistive
+            tech — but it is still part of the label's *text*, which is what
+            `getByLabel(..., { exact: true })` compares against. Query required
+            fields with a loose/regex label (`/^name\b/i`). */}
         <label htmlFor={inputId}>
           {label}
           {required ? (

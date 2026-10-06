@@ -106,7 +106,7 @@ beforeEach(() => {
 describe("ContainerListPage", () => {
   it("renders container rows with status, host and usage", async () => {
     vi.mocked(apiGet).mockImplementation(async (path: string) => {
-      if (path === "/servers") return serversPage;
+      if (path === "/nodes") return serversPage;
       if (path === "/containers") {
         return {
           items: [
@@ -151,7 +151,7 @@ describe("ContainerListPage", () => {
 
   it("shows the empty state when no containers exist", async () => {
     vi.mocked(apiGet).mockImplementation(async (path: string) => {
-      if (path === "/servers") return serversPage;
+      if (path === "/nodes") return serversPage;
       if (path === "/containers") return { items: [], total: 0, limit: 25, offset: 0 };
       throw new Error(`unexpected path: ${path}`);
     });
@@ -164,7 +164,7 @@ describe("ContainerListPage", () => {
 
   it("renders the API error message when the request fails", async () => {
     vi.mocked(apiGet).mockImplementation(async (path: string) => {
-      if (path === "/servers") return serversPage;
+      if (path === "/nodes") return serversPage;
       throw new ApiError(500, "DB_DOWN", "Database unavailable");
     });
 
@@ -176,7 +176,7 @@ describe("ContainerListPage", () => {
 
   it("sends the status filter and resets the offset when filtering", async () => {
     vi.mocked(apiGet).mockImplementation(async (path: string) => {
-      if (path === "/servers") return serversPage;
+      if (path === "/nodes") return serversPage;
       if (path === "/containers") {
         return { items: [makeContainer({})], total: 1, limit: 25, offset: 0 };
       }

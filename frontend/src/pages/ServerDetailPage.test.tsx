@@ -143,9 +143,9 @@ function renderDetail() {
   return render(
     <ToastProvider>
       <QueryClientProvider client={queryClient}>
-        <MemoryRouter initialEntries={[`/servers/${SERVER_ID}`]}>
+        <MemoryRouter initialEntries={[`/nodes/${SERVER_ID}`]}>
           <Routes>
-            <Route path="/servers/:serverId" element={<ServerDetailPage />} />
+            <Route path="/nodes/:serverId" element={<ServerDetailPage />} />
           </Routes>
         </MemoryRouter>
       </QueryClientProvider>
@@ -155,9 +155,9 @@ function renderDetail() {
 
 function primeApiGet() {
   mocks.apiGet.mockImplementation((path: string) => {
-    if (path === `/servers/${SERVER_ID}`) return Promise.resolve(makeDetail());
-    if (path === `/servers/${SERVER_ID}/metrics/latest`) return Promise.resolve(snapshot);
-    if (path.startsWith(`/servers/${SERVER_ID}/metrics`)) return Promise.resolve(timeseries);
+    if (path === `/nodes/${SERVER_ID}`) return Promise.resolve(makeDetail());
+    if (path === `/nodes/${SERVER_ID}/metrics/latest`) return Promise.resolve(snapshot);
+    if (path.startsWith(`/nodes/${SERVER_ID}/metrics`)) return Promise.resolve(timeseries);
     if (path === "/containers") {
       return Promise.resolve({
         items: [container],
@@ -227,7 +227,7 @@ describe("ServerDetailPage", () => {
 
   it("issues an agent token, shows it once, and hides it after dismissal", async () => {
     mocks.apiPost.mockImplementation((path: string) => {
-      if (path === `/servers/${SERVER_ID}/agent-token`) {
+      if (path === `/nodes/${SERVER_ID}/agent-token`) {
         return Promise.resolve({
           agent_token: "nxs_live_secret_abc123",
           install_hint: "NEXUSOPS_TOKEN=nxs_live_secret_abc123 bash agent/install.sh",

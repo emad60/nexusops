@@ -49,9 +49,9 @@ function AddServerModal({
   const [errors, setErrors] = useState<ServerFormErrors>({});
 
   const createMutation = useMutation({
-    mutationFn: (payload: ServerPayload) => apiPost<ServerSummary>("/servers", payload),
+    mutationFn: (payload: ServerPayload) => apiPost<ServerSummary>("/nodes", payload),
     onSuccess: (created) => {
-      notify(`Server ${created.name} registered`, "success");
+      notify(`Node ${created.name} registered`, "success");
       void queryClient.invalidateQueries({ queryKey: ["servers"] });
       onCreated(created);
       onClose();
@@ -67,7 +67,7 @@ function AddServerModal({
   };
 
   return (
-    <Modal open={open} title="Register server" onClose={onClose} wide>
+    <Modal open={open} title="Register node" onClose={onClose} wide>
       <form
         onSubmit={(e) => {
           e.preventDefault();
@@ -80,7 +80,7 @@ function AddServerModal({
             Cancel
           </button>
           <button type="submit" className="btn primary" disabled={createMutation.isPending}>
-            {createMutation.isPending ? "Registering…" : "Register server"}
+            {createMutation.isPending ? "Registering…" : "Register node"}
           </button>
         </div>
       </form>
@@ -130,7 +130,7 @@ export default function ServerListPage() {
     queryKey: ["servers", { q, status, environment, offset }],
     queryFn: ({ signal }) =>
       apiGet<Page<ServerSummary>>(
-        "/servers",
+        "/nodes",
         {
           limit: PAGE_SIZE,
           offset,
@@ -147,16 +147,16 @@ export default function ServerListPage() {
   const hasFilters = Boolean(q || status || environment);
 
   return (
-    <section aria-labelledby="servers-heading">
+    <section aria-labelledby="nodes-heading">
       <div className="page-head">
         <div className="page-title">
-          <h1 id="servers-heading">Servers</h1>
+          <h1 id="nodes-heading">Nodes</h1>
           <p className="page-sub">Registered machines, their agent state and last heartbeat.</p>
         </div>
         <div className="page-actions">
-          {hasPermission("server.create") ? (
+          {hasPermission("node.create") ? (
             <button type="button" className="btn primary" onClick={() => setAddOpen(true)}>
-              + Add server
+              + Add node
             </button>
           ) : null}
         </div>
@@ -197,21 +197,21 @@ export default function ServerListPage() {
       </div>
 
       {serversQuery.isError ? <ErrorBlock error={serversQuery.error} /> : null}
-      {serversQuery.isPending ? <TableSkeleton label="Loading servers" rows={8} cols={8} /> : null}
+      {serversQuery.isPending ? <TableSkeleton label="Loading nodes" rows={8} cols={8} /> : null}
 
       {serversQuery.data && servers.length === 0 ? (
         <EmptyState
           icon="◎"
-          title="No servers found"
+          title="No nodes found"
           hint={
             hasFilters
               ? "No machine matches the current filters — try clearing them."
-              : "Register your first server to start monitoring."
+              : "Register your first node to start monitoring."
           }
           action={
-            !hasFilters && hasPermission("server.create") ? (
+            !hasFilters && hasPermission("node.create") ? (
               <button type="button" className="btn primary" onClick={() => setAddOpen(true)}>
-                Register server
+                Register node
               </button>
             ) : null
           }
@@ -224,7 +224,7 @@ export default function ServerListPage() {
             <table className="data">
               <thead>
                 <tr>
-                  <th scope="col">Server</th>
+                  <th scope="col">Node</th>
                   <th scope="col">Status</th>
                   <th scope="col">Environment</th>
                   <th scope="col">IP address</th>
@@ -236,9 +236,9 @@ export default function ServerListPage() {
               </thead>
               <tbody>
                 {servers.map((server) => (
-                  <tr key={server.id} className="clickable" onClick={() => navigate(`/servers/${server.id}`)}>
+                  <tr key={server.id} className="clickable" onClick={() => navigate(`/nodes/${server.id}`)}>
                     <td>
-                      <Link to={`/servers/${server.id}`}>{server.name}</Link>
+                      <Link to={`/nodes/${server.id}`}>{server.name}</Link>
                       <div className="small faint mono">{server.hostname}</div>
                     </td>
                     <td>
@@ -285,7 +285,7 @@ export default function ServerListPage() {
       <AddServerModal
         open={addOpen}
         onClose={() => setAddOpen(false)}
-        onCreated={(created) => navigate(`/servers/${created.id}`)}
+        onCreated={(created) => navigate(`/nodes/${created.id}`)}
       />
     </section>
   );

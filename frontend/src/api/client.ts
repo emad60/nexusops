@@ -4,12 +4,59 @@
  * The access token lives ONLY in module memory (never localStorage) and is
  * attached as a Bearer header. Renewal uses the HttpOnly refresh cookie via
  * POST /auth/refresh — the raw refresh token is never readable from JS.
+ *
+ * Tenancy: the platform never guesses which organization a request is for, so
+ * every authenticated call carries `X-Org-Id`. The value is a *choice*, not a
+ * claim — the API validates it against the caller's active memberships on every
+ * request and answers 403 otherwise. Which organization that is must be settled
+ * before other requests go out; see `AuthProvider`.
  */
 
 export const API_BASE = "/api/v1";
 
+/** Header naming the organization the browser is acting in. */
+export const ORGANIZATION_HEADER = "X-Org-Id";
+
 let accessToken: string | null = null;
 let refreshPromise: Promise<boolean> | null = null;
+let activeOrgId: string | null = null;
+
+// Listeners for the active organization. The HTTP client reads it at call time,
+// but the WebSocket handshake has to *wait* for it — the socket is bound to an
+// organization at auth time, and connecting before the AuthProvider has
+// resolved one means an unauthenticated socket the hub closes (§ useEventStream).
+type OrgListener = (orgId: string | null) => void;
+const orgListeners = new Set<OrgListener>();
+
+/** Called whenever the active organization changes. Returns an unsubscribe function. */
+export function onActiveOrgChange(listener: OrgListener): () => void {
+  orgListeners.add(listener);
+  return () => {
+    orgListeners.delete(listener);
+  };
+}
+
+/**
+ * Set (or clear) the organization every subsequent request acts in.
+ *
+ * Also mirrors the value into `localStorage` so a reload does not land on a
+ * request with no organization at all — the server would reject that with
+ * `ORGANIZATION_HEADER_REQUIRED`.
+ */
+export function setActiveOrgId(orgId: string | null): void {
+  activeOrgId = orgId;
+  try {
+    if (orgId) localStorage.setItem("nexusops.activeOrgId", orgId);
+    else localStorage.removeItem("nexusops.activeOrgId");
+  } catch {
+    // Private-mode Safari and friends: session-scoped is still correct.
+  }
+  for (const listener of orgListeners) listener(orgId);
+}
+
+export function getActiveOrgId(): string | null {
+  return activeOrgId;
+}
 
 export class ApiError extends Error {
   readonly status: number;
@@ -107,6 +154,8 @@ export async function apiRequest<T>(path: string, options: RequestOptions = {}):
   const headers: Record<string, string> = {};
   if (body !== undefined) headers["Content-Type"] = "application/json";
   if (accessToken) headers.Authorization = `Bearer ${accessToken}`;
+  // Only on authenticated calls: the pre-auth endpoints have no tenant.
+  if (accessToken && activeOrgId) headers[ORGANIZATION_HEADER] = activeOrgId;
 
   let response: Response;
   try {

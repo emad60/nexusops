@@ -22,7 +22,7 @@ vi.mock("../api/client", async (importOriginal) => {
 function makeKey(over: Partial<ApiKeyOut> & { id: string; name: string }): ApiKeyOut {
   return {
     key_prefix: "nxk_1a2b3c",
-    scopes: ["server.read", "monitor.read"],
+    scopes: ["node.read", "monitor.read"],
     last_used_at: null,
     expires_at: null,
     revoked_at: null,
@@ -69,7 +69,7 @@ describe("ApiKeysPage", () => {
 
     expect(await screen.findByText("CI key")).toBeInTheDocument();
     expect(screen.getByText("nxk_1a2b3c…")).toBeInTheDocument();
-    expect(screen.getByText("server.read")).toBeInTheDocument();
+    expect(screen.getByText("node.read")).toBeInTheDocument();
     // Both "last used" and "expires" render "Never" for this fixture.
     expect(screen.getAllByText("Never")).toHaveLength(2);
     expect(screen.getByRole("button", { name: "Revoke CI key" })).toBeInTheDocument();
@@ -77,7 +77,7 @@ describe("ApiKeysPage", () => {
 
   it("creates a scoped key and shows the raw secret exactly once", async () => {
     mocks.apiPost.mockResolvedValue({
-      ...makeKey({ id: "k-2", name: "Deploy key", scopes: ["server.read"] }),
+      ...makeKey({ id: "k-2", name: "Deploy key", scopes: ["node.read"] }),
       key: "nxk_raw_secret_value",
     });
     renderPage();
@@ -85,13 +85,13 @@ describe("ApiKeysPage", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Create key" }));
     fireEvent.change(screen.getByLabelText("Key name"), { target: { value: "Deploy key" } });
-    fireEvent.click(screen.getByLabelText(/server\.read/));
+    fireEvent.click(screen.getByLabelText(/node\.read/));
     fireEvent.click(screen.getByRole("button", { name: "Generate key" }));
 
     await waitFor(() =>
       expect(mocks.apiPost).toHaveBeenCalledWith("/api-keys", {
         name: "Deploy key",
-        scopes: ["server.read"],
+        scopes: ["node.read"],
         expires_in_days: null,
       }),
     );
@@ -105,11 +105,11 @@ describe("ApiKeysPage", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Create key" }));
     fireEvent.click(screen.getByLabelText(/Full access/));
-    expect(screen.getByLabelText(/server\.read/)).toBeDisabled();
+    expect(screen.getByLabelText(/node\.read/)).toBeDisabled();
 
     fireEvent.click(screen.getByLabelText(/Full access/));
-    expect(screen.getByLabelText(/server\.read/)).toBeEnabled();
-    fireEvent.click(screen.getByLabelText(/server\.read/));
+    expect(screen.getByLabelText(/node\.read/)).toBeEnabled();
+    fireEvent.click(screen.getByLabelText(/node\.read/));
     expect(screen.getByLabelText(/container\.read/)).toBeEnabled();
   });
 

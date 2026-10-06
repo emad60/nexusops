@@ -30,6 +30,9 @@ vi.mock("../api/client", () => ({
   apiDelete: vi.fn(),
   apiRequest: vi.fn(),
   setAccessToken: vi.fn(),
+  getActiveOrgId: () => null,
+  setActiveOrgId: vi.fn(),
+  ORGANIZATION_HEADER: "X-Org-Id",
   getAccessToken: () => null,
   refreshToken: vi.fn(async () => false),
   API_BASE: "/api/v1",
@@ -43,6 +46,22 @@ vi.mock("../hooks/useEventStream", () => ({
     mocks.stream.handler = onFrame;
   },
 }));
+
+const ACTIVE_MEMBERSHIP = {
+  organization: {
+    id: "org-1",
+    name: "Ops Admin's Organization",
+    slug: "ops-admin",
+    description: "",
+    status: "ACTIVE" as const,
+    is_provisional: true,
+    renamed_at: null,
+    created_at: "2026-01-01T00:00:00Z",
+  },
+  role_name: "admin",
+  role_id: "r-1",
+  status: "ACTIVE" as const,
+};
 
 const ME = {
   user: {
@@ -59,6 +78,8 @@ const ME = {
   role: "admin",
   permissions: ["*"],
   superadmin: true,
+  organizations: [ACTIVE_MEMBERSHIP],
+  active_organization_id: "org-1",
 };
 
 const META = {
@@ -156,7 +177,7 @@ describe("DashboardPage", () => {
     expect(screen.getByText("api-gateway is down")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /view servers/i })).toHaveAttribute(
       "href",
-      "/servers",
+      "/nodes",
     );
     // Subscribed to the live global channel.
     expect(mocks.stream.subs).toEqual([{ channel: "global" }]);
@@ -216,12 +237,12 @@ describe("DashboardPage", () => {
     });
     await renderDashboard();
 
-    expect(await screen.findByText("No servers enrolled yet")).toBeInTheDocument();
+    expect(await screen.findByText("No nodes enrolled yet")).toBeInTheDocument();
     expect(screen.getByText("No events yet")).toBeInTheDocument();
     await waitFor(() => {
       expect(screen.getByRole("link", { name: /view servers/i })).toHaveAttribute(
         "href",
-        "/servers",
+        "/nodes",
       );
     });
   });

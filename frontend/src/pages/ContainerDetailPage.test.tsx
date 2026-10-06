@@ -97,7 +97,7 @@ function renderDetail() {
           <Routes>
             <Route path="/containers" element={<div>containers list</div>} />
             <Route path="/containers/:containerId" element={<ContainerDetailPage />} />
-            <Route path="/servers/:serverId" element={<div>server detail</div>} />
+            <Route path="/nodes/:serverId" element={<div>server detail</div>} />
           </Routes>
         </MemoryRouter>
       </ToastProvider>
@@ -134,7 +134,7 @@ describe("ContainerDetailPage", () => {
     expect(screen.getByText("NGINX_PORT")).toBeInTheDocument();
     expect(screen.getByText("/srv/site")).toBeInTheDocument();
     const serverLink = screen.getByRole("link", { name: "build-01" });
-    expect(serverLink).toHaveAttribute("href", "/servers/srv-1");
+    expect(serverLink).toHaveAttribute("href", "/nodes/srv-1");
   });
 
   it("shows the log history oldest-first", async () => {

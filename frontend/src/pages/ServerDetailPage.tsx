@@ -35,13 +35,13 @@ import {
 const CONTAINER_PAGE_SIZE = 8;
 const METRIC_RANGES = ["1h", "6h", "24h", "7d", "30d"] as const;
 
-/** Response of POST /servers/{id}/agent-token — the raw token is shown exactly once. */
+/** Response of POST /nodes/{id}/agent-token — the raw token is shown exactly once. */
 interface EnrollTokenOut {
   agent_token: string;
   install_hint: string;
 }
 
-/** Response of GET /servers/{id}/metrics/latest. */
+/** Response of GET /nodes/{id}/metrics/latest. */
 interface MetricSnapshot {
   server_id: string;
   recorded_at: string;
@@ -56,7 +56,7 @@ interface MetricSnapshot {
   uptime_seconds: number;
 }
 
-/** Response of GET /servers/{id}/metrics (bucketed timeseries). */
+/** Response of GET /nodes/{id}/metrics (bucketed timeseries). */
 interface ServerTimeseries {
   range: string;
   granularity: string;
@@ -142,9 +142,9 @@ function EditServerModal({ server, onClose }: { server: ServerDetail; onClose: (
 
   const updateMutation = useMutation({
     mutationFn: (payload: ServerPayload) =>
-      apiPatch<ServerDetail>(`/servers/${server.id}`, payload),
+      apiPatch<ServerDetail>(`/nodes/${server.id}`, payload),
     onSuccess: (updated) => {
-      notify(`Server ${updated.name} updated`, "success");
+      notify(`Node ${updated.name} updated`, "success");
       void queryClient.invalidateQueries({ queryKey: ["server", server.id] });
       void queryClient.invalidateQueries({ queryKey: ["servers"] });
       onClose();
@@ -240,7 +240,7 @@ export default function ServerDetailPage() {
 
   const serverQuery = useQuery({
     queryKey: ["server", serverId],
-    queryFn: ({ signal }) => apiGet<ServerDetail>(`/servers/${serverId}`, undefined, signal),
+    queryFn: ({ signal }) => apiGet<ServerDetail>(`/nodes/${serverId}`, undefined, signal),
     enabled: Boolean(serverId),
     // Heartbeats arrive out-of-band (agent → backend), so liveness changes are
     // not tied to any page action: poll gently so the status badge stays true.
@@ -251,7 +251,7 @@ export default function ServerDetailPage() {
     queryKey: ["server-metrics", serverId, range],
     queryFn: ({ signal }) =>
       apiGet<ServerTimeseries>(
-        `/servers/${serverId}/metrics`,
+        `/nodes/${serverId}/metrics`,
         { range, metrics: "cpu_percent,mem_percent,disk_percent" },
         signal,
       ),
@@ -262,7 +262,7 @@ export default function ServerDetailPage() {
     queryKey: ["server-metrics-latest", serverId],
     queryFn: async () => {
       try {
-        return await apiGet<MetricSnapshot>(`/servers/${serverId}/metrics/latest`);
+        return await apiGet<MetricSnapshot>(`/nodes/${serverId}/metrics/latest`);
       } catch (error) {
         // 404 simply means the agent has not reported metrics yet.
         if (error instanceof ApiError && error.status === 404) return null;
@@ -296,7 +296,7 @@ export default function ServerDetailPage() {
   const tokenMutation = useMutation({
     mutationFn: () => {
       if (!serverId) return Promise.reject(new Error("Missing server id"));
-      return apiPost<EnrollTokenOut>(`/servers/${serverId}/agent-token`);
+      return apiPost<EnrollTokenOut>(`/nodes/${serverId}/agent-token`);
     },
     onSuccess: (data) => {
       setIssuedToken(data);
@@ -308,12 +308,12 @@ export default function ServerDetailPage() {
   const deleteMutation = useMutation({
     mutationFn: () => {
       if (!serverId) return Promise.reject(new Error("Missing server id"));
-      return apiDelete<void>(`/servers/${serverId}`);
+      return apiDelete<void>(`/nodes/${serverId}`);
     },
     onSuccess: () => {
-      notify(`Server ${serverQuery.data?.name ?? ""} deleted`, "success");
+      notify(`Node ${serverQuery.data?.name ?? ""} deleted`, "success");
       void queryClient.invalidateQueries({ queryKey: ["servers"] });
-      navigate("/servers");
+      navigate("/nodes");
     },
     onError: (error) => notify(errorMessage(error), "error"),
   });
@@ -346,14 +346,14 @@ export default function ServerDetailPage() {
   if (!serverId) {
     return (
       <EmptyState
-        title="Server not found"
-        hint="The address does not include a server id."
+        title="Node not found"
+        hint="The address does not include a node id."
       />
     );
   }
 
   if (serverQuery.isPending) {
-    return <LoadingBlock label="Loading server…" />;
+    return <LoadingBlock label="Loading node…" />;
   }
 
   if (serverQuery.isError || !serverQuery.data) {
@@ -361,8 +361,8 @@ export default function ServerDetailPage() {
   }
 
   const server = serverQuery.data;
-  const canUpdate = hasPermission("server.update");
-  const canDelete = hasPermission("server.delete");
+  const canUpdate = hasPermission("node.update");
+  const canDelete = hasPermission("node.delete");
 
   const snapshot = latestQuery.data;
   const current: CurrentMetrics | null =
@@ -387,16 +387,16 @@ export default function ServerDetailPage() {
   };
 
   return (
-    <section aria-labelledby="server-heading">
+    <section aria-labelledby="node-heading">
       <div className="page-head">
         <div className="page-title">
-          <h1 id="server-heading">
+          <h1 id="node-heading">
             {server.name} <StatusBadge value={server.status} />
             {server.simulated ? (
               <span className="badge WARNING no-dot">
                 SIMULATED
-                <InfoHint label="About simulated servers">
-                  This server generates demo data — no real host is contacted and none of its
+                <InfoHint label="About simulated nodes">
+                  This node generates demo data — no real host is contacted and none of its
                   metrics, containers or deployments are real.
                 </InfoHint>
               </span>
@@ -661,7 +661,7 @@ export default function ServerDetailPage() {
 
       {editOpen ? <EditServerModal server={server} onClose={() => setEditOpen(false)} /> : null}
 
-      <Modal open={deleteOpen} title="Delete server" onClose={() => setDeleteOpen(false)}>
+      <Modal open={deleteOpen} title="Delete node" onClose={() => setDeleteOpen(false)}>
         <p>
           Delete <strong>{server.name}</strong>? Its containers, metrics and events are removed as
           well. This cannot be undone.
@@ -681,7 +681,7 @@ export default function ServerDetailPage() {
             onClick={() => deleteMutation.mutate()}
             disabled={deleteMutation.isPending}
           >
-            {deleteMutation.isPending ? "Deleting…" : "Delete server"}
+            {deleteMutation.isPending ? "Deleting…" : "Delete node"}
           </button>
         </div>
       </Modal>

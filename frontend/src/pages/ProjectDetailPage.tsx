@@ -652,7 +652,7 @@ export default function ProjectDetailPage() {
 
   const serversQ = useQuery({
     queryKey: ["servers", { scope: "env-targets", limit: 100 }],
-    queryFn: ({ signal }) => apiGet<Page<ServerSummary>>("/servers", { limit: 100 }, signal),
+    queryFn: ({ signal }) => apiGet<Page<ServerSummary>>("/nodes", { limit: 100 }, signal),
     staleTime: 60_000,
   });
 

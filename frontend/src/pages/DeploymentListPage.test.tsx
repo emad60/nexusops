@@ -32,6 +32,9 @@ vi.mock("../api/client", () => {
     apiDelete: vi.fn(),
     apiRequest: vi.fn(),
     setAccessToken: vi.fn(),
+    getActiveOrgId: () => null,
+    setActiveOrgId: vi.fn(),
+    ORGANIZATION_HEADER: "X-Org-Id",
     getAccessToken: vi.fn(() => null),
     refreshToken: vi.fn(async () => false),
   };
@@ -39,6 +42,22 @@ vi.mock("../api/client", () => {
 
 const get = apiGet as unknown as Mock;
 const post = apiPost as unknown as Mock;
+
+const ACTIVE_MEMBERSHIP = {
+  organization: {
+    id: "org-1",
+    name: "Ops Admin's Organization",
+    slug: "ops-admin",
+    description: "",
+    status: "ACTIVE" as const,
+    is_provisional: true,
+    renamed_at: null,
+    created_at: "2026-01-01T00:00:00Z",
+  },
+  role_name: "admin",
+  role_id: "r-1",
+  status: "ACTIVE" as const,
+};
 
 const ME = {
   user: {
@@ -55,6 +74,8 @@ const ME = {
   role: "Owner",
   permissions: ["*"],
   superadmin: true,
+  organizations: [ACTIVE_MEMBERSHIP],
+  active_organization_id: "org-1",
 };
 
 function deploymentRow(overrides: Record<string, unknown> = {}) {

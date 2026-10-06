@@ -14,7 +14,7 @@ interface Command {
 
 const STATIC_COMMANDS: Command[] = [
   { id: "nav-dash", label: "Dashboard", kind: "Navigate", path: "/" },
-  { id: "nav-servers", label: "Servers", kind: "Navigate", path: "/servers" },
+  { id: "nav-nodes", label: "Nodes", kind: "Navigate", path: "/nodes" },
   { id: "nav-containers", label: "Containers", kind: "Navigate", path: "/containers" },
   { id: "nav-hosts", label: "Docker hosts", kind: "Navigate", path: "/docker-hosts" },
   { id: "nav-monitors", label: "Uptime monitors", kind: "Navigate", path: "/monitors" },

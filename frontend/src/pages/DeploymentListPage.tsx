@@ -11,6 +11,7 @@ import type { DeploymentOut, EnvironmentOut, Page, ProjectOut } from "../api/typ
 import { useAuth } from "../auth/AuthContext";
 import { Pagination } from "../components/Pagination";
 import { EmptyState, ErrorBlock, Modal, StatusBadge } from "../components/ui";
+import { SimulatedChip } from "../components/SimulatedChip";
 import { TableSkeleton } from "../components/Skeleton";
 import { useToast } from "../components/toast";
 import { formatDurationMs, formatRelative, truncate } from "../lib/format";
@@ -255,7 +256,11 @@ export default function DeploymentListPage() {
     <main className="content" aria-label="Deployments">
       <div className="page-head">
         <div className="page-title">
-          <h1>Deployments</h1>
+          <h1>
+            Deployments
+            {/* Execution is a staged simulation until Phase 6. */}
+            <SimulatedChip />
+          </h1>
           <p className="page-sub">
             Release history across every application and environment
             {deploymentsQ.data ? ` · ${deploymentsQ.data.total} total` : ""}

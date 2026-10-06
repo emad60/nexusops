@@ -96,7 +96,7 @@ function renderHosts() {
         <MemoryRouter initialEntries={["/docker-hosts"]}>
           <Routes>
             <Route path="/docker-hosts" element={<DockerHostsPage />} />
-            <Route path="/servers/:serverId" element={<div>server detail</div>} />
+            <Route path="/nodes/:serverId" element={<div>server detail</div>} />
           </Routes>
         </MemoryRouter>
       </ToastProvider>
@@ -111,7 +111,7 @@ function mockCountApi() {
   };
   vi.mocked(apiGet).mockImplementation(async (path: string, query?: Record<string, unknown>) => {
     if (path === "/docker-hosts") return hostsPage;
-    if (path === "/servers") return serversPage;
+    if (path === "/nodes") return serversPage;
     if (path === "/containers") {
       const counts = totalsByHost[String(query?.host_id)] ?? { total: 0, running: 0 };
       const running = query?.status === "RUNNING";
@@ -142,7 +142,7 @@ describe("DockerHostsPage", () => {
     expect(screen.getByTitle("connection refused")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "build-01" })).toHaveAttribute(
       "href",
-      "/servers/srv-1",
+      "/nodes/srv-1",
     );
   });
 
@@ -197,7 +197,7 @@ describe("DockerHostsPage", () => {
   it("shows the empty state when no hosts are registered", async () => {
     vi.mocked(apiGet).mockImplementation(async (path: string) => {
       if (path === "/docker-hosts") return { items: [], total: 0, limit: 20, offset: 0 };
-      if (path === "/servers") return serversPage;
+      if (path === "/nodes") return serversPage;
       throw new Error(`unexpected path: ${path}`);
     });
 
@@ -209,7 +209,7 @@ describe("DockerHostsPage", () => {
 
   it("renders the API error message when the host list fails", async () => {
     vi.mocked(apiGet).mockImplementation(async (path: string) => {
-      if (path === "/servers") return serversPage;
+      if (path === "/nodes") return serversPage;
       throw new ApiError(403, "PERMISSION_DENIED", "container.read is required");
     });
 

@@ -124,7 +124,7 @@ describe("ServerFormFields", () => {
     fireEvent.change(screen.getByLabelText("Name *"), { target: { value: "edge-01" } });
     expect(onChange).toHaveBeenCalledWith(expect.objectContaining({ name: "edge-01" }));
 
-    fireEvent.click(screen.getByLabelText("Simulated server (demo data)"));
+    fireEvent.click(screen.getByLabelText("Simulated node (demo data)"));
     expect(onChange).toHaveBeenLastCalledWith(expect.objectContaining({ simulated: true }));
   });
 });

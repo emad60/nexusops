@@ -30,6 +30,7 @@ const ME = {
     status: "ACTIVE",
     role_id: "r-1",
     role_name: "Owner",
+    membership_status: "ACTIVE",
     last_login_at: null,
     created_at: "2026-01-01T00:00:00Z",
   },
@@ -45,6 +46,7 @@ function makeUser(over: Partial<User> & { id: string; email: string }): User {
     status: "ACTIVE",
     role_id: null,
     role_name: null,
+    membership_status: "ACTIVE",
     last_login_at: null,
     created_at: "2026-02-02T00:00:00Z",
     ...over,
@@ -73,7 +75,7 @@ const USERS_PAGE: Page<User> = { items: [ALICE, BOB], total: 2, limit: 25, offse
 const ROLES_PAGE: Page<Role> = {
   items: [
     { id: "r-1", name: "Owner", description: "", is_system: true, permissions: ["*"], created_at: "2026-01-01T00:00:00Z" },
-    { id: "r-2", name: "Developer", description: "", is_system: true, permissions: ["server.read"], created_at: "2026-01-01T00:00:00Z" },
+    { id: "r-2", name: "Developer", description: "", is_system: true, permissions: ["node.read"], created_at: "2026-01-01T00:00:00Z" },
   ],
   total: 2,
   limit: 100,
@@ -128,13 +130,15 @@ describe("UsersPage", () => {
     renderPage();
     await screen.findByText("admin@example.com");
 
-    const buttons = screen.getAllByRole("button", { name: "Deactivate" });
+    const buttons = screen.getAllByRole("button", { name: "Remove" });
     expect(buttons).toHaveLength(2);
     expect(buttons[0]).toBeDisabled(); // own account
 
     fireEvent.click(buttons[1]);
     await waitFor(() => expect(mocks.apiDelete).toHaveBeenCalledWith("/users/u-2"));
-    expect(await screen.findByText("Deactivated bob@example.com")).toBeInTheDocument();
+    expect(
+      await screen.findByText("Removed bob@example.com from this organization"),
+    ).toBeInTheDocument();
   });
 
   it("invites a user and shows the generated password exactly once", async () => {

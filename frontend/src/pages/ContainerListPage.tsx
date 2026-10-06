@@ -94,7 +94,7 @@ export default function ContainerListPage() {
   // Lightweight option source for the server filter (server names only).
   const serversQuery = useQuery({
     queryKey: ["servers", "container-filter-options"],
-    queryFn: ({ signal }) => apiGet<Page<ServerSummary>>("/servers", { limit: 100 }, signal),
+    queryFn: ({ signal }) => apiGet<Page<ServerSummary>>("/nodes", { limit: 100 }, signal),
     staleTime: 60_000,
   });
 

@@ -13,14 +13,38 @@ export interface CursorPage<T> {
   has_more: boolean;
 }
 
+export interface Organization {
+  id: string;
+  name: string;
+  slug: string;
+  description: string;
+  status: "ACTIVE" | "SUSPENDED";
+  /** Auto-provisioned by the tenancy migration for data that pre-dates orgs. */
+  is_provisional: boolean;
+  renamed_at: string | null;
+  created_at: string;
+}
+
+/** The caller's own membership: an organization plus their role in it. */
+export interface Membership {
+  organization: Organization;
+  role_name: string | null;
+  role_id: string | null;
+  status: "ACTIVE" | "SUSPENDED";
+}
+
 export interface User {
   id: string;
   email: string;
   full_name: string;
+  /** Account state — instance-wide, not the tenant's view of the member. */
   is_active: boolean;
   status: "ACTIVE" | "LOCKED" | "DISABLED";
+  /** Role held **in the active organization** (null until the membership loads). */
   role_id: string | null;
   role_name: string | null;
+  /** The member's state in the active organization, independent of the account. */
+  membership_status: "ACTIVE" | "SUSPENDED" | null;
   last_login_at: string | null;
   created_at: string;
 }
@@ -391,7 +415,7 @@ export interface DashboardSummary {
 }
 
 export interface SearchResult {
-  servers: SearchHit[];
+  nodes: SearchHit[];
   containers: SearchHit[];
   deployments: SearchHit[];
   projects: SearchHit[];

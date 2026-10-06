@@ -28,10 +28,29 @@ vi.mock("../api/client", () => ({
   apiDelete: vi.fn(),
   apiRequest: vi.fn(),
   setAccessToken: mocks.setAccessToken,
+  getActiveOrgId: () => null,
+  setActiveOrgId: vi.fn(),
+  ORGANIZATION_HEADER: "X-Org-Id",
   getAccessToken: () => null,
   refreshToken: vi.fn(async () => false),
   API_BASE: "/api/v1",
 }));
+
+const ACTIVE_MEMBERSHIP = {
+  organization: {
+    id: "org-1",
+    name: "Ops Admin's Organization",
+    slug: "ops-admin",
+    description: "",
+    status: "ACTIVE" as const,
+    is_provisional: true,
+    renamed_at: null,
+    created_at: "2026-01-01T00:00:00Z",
+  },
+  role_name: "admin",
+  role_id: "r-1",
+  status: "ACTIVE" as const,
+};
 
 const ME = {
   user: {
@@ -48,6 +67,8 @@ const ME = {
   role: "admin",
   permissions: ["*"],
   superadmin: true,
+  organizations: [ACTIVE_MEMBERSHIP],
+  active_organization_id: "org-1",
 };
 
 async function renderLogin(state?: { from: string }) {
@@ -58,7 +79,7 @@ async function renderLogin(state?: { from: string }) {
           <Routes>
             <Route path="/login" element={<LoginPage />} />
             <Route path="/" element={<div>Dashboard marker</div>} />
-            <Route path="/servers" element={<div>Servers marker</div>} />
+            <Route path="/nodes" element={<div>Nodes marker</div>} />
           </Routes>
         </ToastProvider>
       </AuthProvider>
@@ -110,11 +131,11 @@ describe("LoginPage", () => {
 
   it("signs in and redirects to the originally requested page", async () => {
     mocks.apiPost.mockResolvedValue({ access_token: "tok-1", expires_in: 900, user: ME.user });
-    await renderLogin({ from: "/servers" });
+    await renderLogin({ from: "/nodes" });
 
     fillAndSubmit("op@nexusops.io", "hunter22");
 
-    expect(await screen.findByText("Servers marker")).toBeInTheDocument();
+    expect(await screen.findByText("Nodes marker")).toBeInTheDocument();
     expect(mocks.apiPost).toHaveBeenCalledWith("/auth/login", {
       email: "op@nexusops.io",
       password: "hunter22",

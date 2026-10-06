@@ -379,7 +379,7 @@ export default function ContainerDetailPage() {
             <dt>Server</dt>
             <dd>
               {container.server ? (
-                <Link to={`/servers/${container.server.id}`}>{container.server.name}</Link>
+                <Link to={`/nodes/${container.server.id}`}>{container.server.name}</Link>
               ) : (
                 "—"
               )}

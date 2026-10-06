@@ -41,8 +41,8 @@ const ME = {
 const REGISTRY = [
   { group: "Access Control", codename: "user.read", description: "List and view users" },
   { group: "Access Control", codename: "user.manage", description: "Manage users" },
-  { group: "Servers", codename: "server.read", description: "List and view servers" },
-  { group: "Servers", codename: "server.update", description: "Edit servers" },
+  { group: "Nodes", codename: "node.read", description: "List and view servers" },
+  { group: "Nodes", codename: "node.update", description: "Edit servers" },
 ];
 
 const ROLES_PAGE: Page<Role> = {
@@ -60,7 +60,7 @@ const ROLES_PAGE: Page<Role> = {
       name: "OnCall",
       description: "Night shift",
       is_system: false,
-      permissions: ["server.read", "user.read"],
+      permissions: ["node.read", "user.read"],
       created_at: "2026-05-01T00:00:00Z",
     },
   ],
@@ -105,17 +105,17 @@ describe("RolesPage", () => {
   it("renders the permission matrix, expanding the wildcard role", async () => {
     renderPage();
 
-    expect(await screen.findByText("server.update")).toBeInTheDocument();
+    expect(await screen.findByText("node.update")).toBeInTheDocument();
 
     // Owner holds ["*"] so it ticks every permission — OnCall only has
-    // server.read and user.read, so server.update shows exactly one tick.
-    const updateRow = screen.getByText("server.update").closest("tr");
+    // node.read and user.read, so node.update shows exactly one tick.
+    const updateRow = screen.getByText("node.update").closest("tr");
     expect(updateRow).not.toBeNull();
     expect(within(updateRow as HTMLTableRowElement).getAllByText("✓")).toHaveLength(1);
     expect(within(updateRow as HTMLTableRowElement).getAllByText("—")).toHaveLength(1);
 
-    // server.read is granted to both roles.
-    const readRow = screen.getByText("server.read").closest("tr");
+    // node.read is granted to both roles.
+    const readRow = screen.getByText("node.read").closest("tr");
     expect(within(readRow as HTMLTableRowElement).getAllByText("✓")).toHaveLength(2);
 
     // user.manage: granted to Owner only via the wildcard.
@@ -125,7 +125,7 @@ describe("RolesPage", () => {
 
     // Permissions render grouped under their group headers.
     expect(screen.getByText("Access Control")).toBeInTheDocument();
-    expect(screen.getByText("Servers")).toBeInTheDocument();
+    expect(screen.getByText("Nodes")).toBeInTheDocument();
   });
 
   it("marks system roles non-editable while custom roles get Edit/Delete", async () => {
@@ -145,14 +145,14 @@ describe("RolesPage", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "New role" }));
     fireEvent.change(screen.getByLabelText("Name"), { target: { value: "SRE" } });
-    fireEvent.click(screen.getByLabelText(/server\.update/));
+    fireEvent.click(screen.getByLabelText(/node\.update/));
     fireEvent.click(screen.getByRole("button", { name: "Create role" }));
 
     await waitFor(() =>
       expect(mocks.apiPost).toHaveBeenCalledWith("/roles", {
         name: "SRE",
         description: "",
-        permissions: ["server.update"],
+        permissions: ["node.update"],
       }),
     );
     expect(await screen.findByText("Created role SRE")).toBeInTheDocument();

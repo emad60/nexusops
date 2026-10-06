@@ -7,7 +7,7 @@
  * the summary query is refreshed.
  *
  * Note: the metrics API only exposes per-server timeseries
- * (/servers/{id}/metrics) — there is no fleet-wide history endpoint, so this
+ * (/nodes/{id}/metrics) — there is no fleet-wide history endpoint, so this
  * page charts nothing and leans on counters + the live feed instead.
  */
 
@@ -127,7 +127,7 @@ export default function DashboardPage() {
     ? [
         {
           key: "servers",
-          label: "Servers online",
+          label: "Nodes online",
           value: summary.servers_online,
           tone: summary.servers_offline > 0 ? "err" : "ok",
           foot: (
@@ -147,9 +147,9 @@ export default function DashboardPage() {
               ) : null}
             </div>
           ),
-          to: "/servers",
+          to: "/nodes",
           link: "View servers",
-          hidden: !hasPermission("server.read"),
+          hidden: !hasPermission("node.read"),
         },
         {
           key: "incidents",
@@ -225,7 +225,7 @@ export default function DashboardPage() {
               >
                 SIMULATION MODE
                 <InfoHint label="About simulation mode" placement="right">
-                  Simulated infrastructure — no real hosts are contacted. Servers, metrics and
+                  Simulated infrastructure — no real hosts are contacted. Nodes, metrics and
                   deployments are generated demo data.
                 </InfoHint>
               </span>
@@ -250,7 +250,7 @@ export default function DashboardPage() {
             <div className="card mb-16">
               <EmptyState
                 icon="▣"
-                title="No servers enrolled yet"
+                title="No nodes enrolled yet"
                 hint="Enroll a server with the NexusOps agent to see live metrics, containers and deployments here."
               />
             </div>

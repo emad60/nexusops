@@ -11,6 +11,7 @@ import { ApiError, apiGet, apiPost } from "../api/client";
 import type { CursorPage, DeploymentStepOut } from "../api/types";
 import { useAuth } from "../auth/AuthContext";
 import { EmptyState, ErrorBlock, LoadingBlock, Modal, StatusBadge } from "../components/ui";
+import { SimulatedChip } from "../components/SimulatedChip";
 import { useToast } from "../components/toast";
 import { useEventStream } from "../hooks/useEventStream";
 import { formatDateTime, formatDurationMs, formatRelative } from "../lib/format";
@@ -271,6 +272,8 @@ export default function DeploymentDetailPage() {
         <div className="page-title">
           <h1>
             Deployment #{deployment.number} <StatusBadge value={deployment.status} />
+            {/* Honesty label: execution is simulated until Phase 6. */}
+            <SimulatedChip />
           </h1>
           <p className="page-sub">
             <span className="mono">{deployment.version}</span>

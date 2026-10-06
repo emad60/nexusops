@@ -70,9 +70,9 @@ function renderList() {
   return render(
     <ToastProvider>
       <QueryClientProvider client={queryClient}>
-        <MemoryRouter initialEntries={["/servers"]}>
+        <MemoryRouter initialEntries={["/nodes"]}>
           <Routes>
-            <Route path="/servers" element={<ServerListPage />} />
+            <Route path="/nodes" element={<ServerListPage />} />
           </Routes>
         </MemoryRouter>
       </QueryClientProvider>
@@ -113,20 +113,20 @@ describe("ServerListPage", () => {
     expect(screen.getByText("5m ago")).toBeInTheDocument();
     expect(screen.getByText("Showing 1–2 of 2")).toBeInTheDocument();
     expect(mocks.apiGet).toHaveBeenCalledWith(
-      "/servers",
+      "/nodes",
       expect.objectContaining({ limit: 20, offset: 0 }),
       expect.anything(),
     );
   });
 
-  it("shows the empty state when no servers exist", async () => {
+  it("shows the empty state when no nodes exist", async () => {
     mocks.apiGet.mockImplementation(() =>
       Promise.resolve({ items: [], total: 0, limit: 20, offset: 0 } satisfies Page<ServerSummary>),
     );
 
     renderList();
 
-    expect(await screen.findByText("No servers found")).toBeInTheDocument();
+    expect(await screen.findByText("No nodes found")).toBeInTheDocument();
   });
 
   it("shows an error block when the API call fails", async () => {
@@ -141,7 +141,7 @@ describe("ServerListPage", () => {
     expect(alert).toHaveTextContent(/database exploded/);
   });
 
-  it("registers a server from the Add server dialog", async () => {
+  it("registers a node from the Add node dialog", async () => {
     const page: Page<ServerSummary> = { items: [makeServer()], total: 1, limit: 20, offset: 0 };
     mocks.apiGet.mockImplementation(() => Promise.resolve(page));
     const created = makeServer({ id: "srv-new", name: "new-box", hostname: "newbox.example.net" });
@@ -150,7 +150,7 @@ describe("ServerListPage", () => {
     renderList();
 
     await screen.findByText("edge-01");
-    fireEvent.click(screen.getByRole("button", { name: "+ Add server" }));
+    fireEvent.click(screen.getByRole("button", { name: "+ Add node" }));
 
     fireEvent.change(screen.getByLabelText("Name *"), { target: { value: "new-box" } });
     fireEvent.change(screen.getByLabelText("Hostname *"), {
@@ -158,11 +158,11 @@ describe("ServerListPage", () => {
     });
     fireEvent.change(screen.getByLabelText("Environment"), { target: { value: "staging" } });
 
-    fireEvent.click(screen.getByRole("button", { name: "Register server" }));
+    fireEvent.click(screen.getByRole("button", { name: "Register node" }));
 
     await waitFor(() => {
       expect(mocks.apiPost).toHaveBeenCalledWith(
-        "/servers",
+        "/nodes",
         expect.objectContaining({
           name: "new-box",
           hostname: "newbox.example.net",

@@ -20,8 +20,18 @@ def unique_email(prefix: str = "user") -> str:
     return f"{prefix}-{uuid4().hex[:12]}@example.com"
 
 
-def bearer(token: str) -> dict[str, str]:
-    return {"Authorization": f"Bearer {token}"}
+def bearer(token: str, org_id: Any | None = None) -> dict[str, str]:
+    """Bearer header, optionally naming the active organization.
+
+    Every org-scoped route requires ``X-Org-Id``; passing the org the login
+    response advertised is what a real client does.
+    """
+    from app.api.deps import ORGANIZATION_HEADER
+
+    headers = {"Authorization": f"Bearer {token}"}
+    if org_id is not None:
+        headers[ORGANIZATION_HEADER] = str(org_id)
+    return headers
 
 
 def server_payload(name: str, **overrides: Any) -> dict[str, Any]:
@@ -98,19 +108,28 @@ async def login_account(client: httpx.AsyncClient, *, email: str, password: str)
         "refresh_cookie_header": header,
         "expires_in": body["expires_in"],
         "user": body["user"],
+        "organizations": body.get("organizations", []),
+        "active_organization_id": body.get("active_organization_id"),
     }
 
 
 def login_headers(login_result: dict[str, Any]) -> dict[str, str]:
-    return bearer(login_result["access_token"])
+    """Headers for a logged-in caller, including its active organization."""
+    return bearer(login_result["access_token"], login_result.get("active_organization_id"))
 
 
 async def register_and_login(client: httpx.AsyncClient) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Bootstrap owner account + session; returns ``(credentials, login_result)``."""
+    """Bootstrap owner account + session; returns ``(credentials, login_result)``.
+
+    The bootstrap account creates the instance's first organization, so the
+    login result carries ``active_organization_id`` — the value every subsequent
+    request must send as ``X-Org-Id``.
+    """
     credentials, _created = await register_account(client)
     login = await login_account(
         client, email=credentials["email"], password=credentials["password"]
     )
+    assert login["active_organization_id"], "bootstrap login must yield an organization"
     return credentials, login
 
 

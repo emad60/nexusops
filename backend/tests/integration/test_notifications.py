@@ -33,22 +33,22 @@ async def _channel(client, owner) -> dict:
     return response.json()
 
 
-async def _delivery(db, channel_id: uuid.UUID) -> NotificationDelivery:
+async def _delivery(org_db, channel_id: uuid.UUID) -> NotificationDelivery:
     row = NotificationDelivery(
         channel_id=channel_id,
         event_type="MONITOR_DOWN",
         subject="down",
         body="probe is down",
     )
-    db.add(row)
-    await db.commit()
-    await db.refresh(row)
+    org_db.add(row)
+    await org_db.commit()
+    await org_db.refresh(row)
     return row
 
 
-async def test_list_deliveries_serializes_rows(client, owner, db):
+async def test_list_deliveries_serializes_rows(client, owner, org_db):
     channel = await _channel(client, owner)
-    await _delivery(db, uuid.UUID(channel["id"]))
+    await _delivery(org_db, uuid.UUID(channel["id"]))
 
     response = await client.get(
         f"{API}/notification-channels/deliveries?limit=20",
@@ -63,9 +63,9 @@ async def test_list_deliveries_serializes_rows(client, owner, db):
     assert datetime.fromisoformat(item["created_at"].replace("Z", "+00:00")) <= datetime.now(UTC)
 
 
-async def test_list_deliveries_filters_by_channel(client, owner, db):
+async def test_list_deliveries_filters_by_channel(client, owner, org_db):
     channel = await _channel(client, owner)
-    await _delivery(db, uuid.UUID(channel["id"]))
+    await _delivery(org_db, uuid.UUID(channel["id"]))
 
     other = await _channel(client, owner)
     response = await client.get(
@@ -76,7 +76,7 @@ async def test_list_deliveries_filters_by_channel(client, owner, db):
     assert all(d["channel_id"] == other["id"] for d in response.json()["items"])
 
 
-async def test_dispatch_frame_is_idempotent_across_workers(client, owner, db):
+async def test_dispatch_frame_is_idempotent_across_workers(client, owner, org_db):
     """The same event frame consumed twice queues ONE delivery per channel.
 
     Every API worker runs the dispatcher and Redis pubsub broadcasts each
@@ -90,12 +90,22 @@ async def test_dispatch_frame_is_idempotent_across_workers(client, owner, db):
 
     channel = await _channel(client, owner)
     # A real event row: the delivery FK references system_events.
-    event = SystemEvent(type="MONITOR_DOWN", level=EventLevel.INFO, message="probe down", data={})
-    db.add(event)
-    await db.commit()
+    org_id = owner["active_organization_id"]
+    event = SystemEvent(
+        org_id=uuid.UUID(org_id),
+        type="MONITOR_DOWN",
+        level=EventLevel.INFO,
+        message="probe down",
+        data={},
+    )
+    org_db.add(event)
+    await org_db.commit()
     event_id = str(event.id)
+    # The frame carries its organization — that is what limits the dispatcher to
+    # one tenant's channels when the frame is broadcast to every worker.
     frame = {
         "id": event_id,
+        "org_id": org_id,
         "type": "MONITOR_DOWN",
         "message": "probe down",
         "data": {},
@@ -106,7 +116,7 @@ async def test_dispatch_frame_is_idempotent_across_workers(client, owner, db):
     assert first == 1
     assert second == 0
 
-    rows = await db.execute(
+    rows = await org_db.execute(
         select(NotificationDelivery).where(
             NotificationDelivery.channel_id == uuid.UUID(channel["id"]),
             NotificationDelivery.event_id == uuid.UUID(event_id),
@@ -114,5 +124,5 @@ async def test_dispatch_frame_is_idempotent_across_workers(client, owner, db):
     )
     assert len(rows.scalars().all()) == 1
     # And the channel table is untouched by the dedup path.
-    channels = (await db.execute(select(NotificationChannel))).scalars().all()
+    channels = (await org_db.execute(select(NotificationChannel))).scalars().all()
     assert any(c.id == uuid.UUID(channel["id"]) for c in channels)

@@ -39,7 +39,11 @@ async def test_metadata_endpoint_and_private_target_blocked(client, owner):
     assert_error_code(bad.json(), "SSRF_BLOCKED")
 
 
-async def test_down_then_recover_lifecycle(client, owner, db):
+async def test_down_then_recover_lifecycle(client, owner, org_db):
+    """A monitor's checks, incidents and timeline all live in its organization,
+    so the checks are driven from inside that scope — exactly as the worker does
+    after resolving the monitor's owner."""
+    db = org_db
     monitor = await _create_monitor(client, owner, name="lifecycle")
     monitor_id = uuid.UUID(monitor["id"])
 
@@ -93,7 +97,9 @@ async def test_down_then_recover_lifecycle(client, owner, db):
     assert "RESOLVED" in final_kinds
 
 
-async def test_notification_pipeline_queues_delivery_for_down_event(db):
+async def test_notification_pipeline_queues_delivery_for_down_event(owner, org_db):
+    db = org_db
+    org_id = owner["active_organization_id"]
     channel = NotificationChannel(
         name="test sink",
         type="WEBHOOK",
@@ -105,8 +111,11 @@ async def test_notification_pipeline_queues_delivery_for_down_event(db):
     db.add(channel)
     await db.commit()
 
+    # A real frame always names its organization; that is what keeps the
+    # broadcast dispatcher inside one tenant.
     queued = await notification_service.dispatch_event_frame(
         {
+            "org_id": org_id,
             "type": "MONITOR_DOWN",
             "level": "CRITICAL",
             "message": "probe is down",

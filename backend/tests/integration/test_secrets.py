@@ -49,7 +49,7 @@ async def test_detail_endpoint_never_carries_the_value(client, owner):
     assert "swordfish-actual" not in str(body)
 
 
-async def test_rotate_bumps_version_changes_digest_and_ciphertext(client, owner, db):
+async def test_rotate_bumps_version_changes_digest_and_ciphertext(client, owner, org_db):
     created = await _create(client, owner)
 
     rotated = await client.post(
@@ -61,21 +61,21 @@ async def test_rotate_bumps_version_changes_digest_and_ciphertext(client, owner,
     assert rotated.json()["version"] == 2
     assert rotated.json()["digest"] != created["digest"]
 
-    row = (await db.execute(select(Secret).where(Secret.key == "TEST_KEY"))).scalar_one()
+    row = (await org_db.execute(select(Secret).where(Secret.key == "TEST_KEY"))).scalar_one()
     assert decrypt_str(row.ciphertext) == "second-passphrase"
 
 
-async def test_delete_removes_metadata_row(client, owner, db):
+async def test_delete_removes_metadata_row(client, owner, org_db):
     created = await _create(client, owner, key="DOOMED_KEY")
     response = await client.delete(f"{API}/secrets/{created['id']}", headers=owner["headers"])
     assert response.status_code in (200, 204)
     remaining = (
-        await db.execute(select(Secret).where(Secret.key == "DOOMED_KEY"))
+        await org_db.execute(select(Secret).where(Secret.key == "DOOMED_KEY"))
     ).scalar_one_or_none()
     assert remaining is None
 
 
-async def test_environment_resolution_substitutes_secret_refs(client, owner, db):
+async def test_environment_resolution_substitutes_secret_refs(client, owner, org_db):
     """${secret:KEY} placeholders resolve through decrypt at deploy time."""
     project = (
         await client.post(f"{API}/projects", headers=owner["headers"], json={"name": "Resolve Co"})
@@ -109,11 +109,89 @@ async def test_environment_resolution_substitutes_secret_refs(client, owner, db)
         digest="digest-1",
         description="resolution test",
     )
-    db.add(row)
-    await db.commit()
+    org_db.add(row)
+    await org_db.commit()
 
-    env_row = await db.get(DeploymentEnvironment, uuid.UUID(environment["id"]))
-    resolved = await secret_service.resolve_secrets_for_environment(db, env_row)
-    # Contract: the resolver returns {referenced_secret_key: plaintext} — the
-    # deployment engine substitutes these into the environment's config.
-    assert resolved == {"RESOLVE_DB_URL": "postgresql://resolved:user@db/x"}
+    env_row = await org_db.get(DeploymentEnvironment, uuid.UUID(environment["id"]))
+    resolved = await secret_service.resolve_secrets_for_environment(org_db, env_row)
+    # Contract: the resolver returns the referenced secrets' plaintext values —
+    # the deployment engine substitutes these into the environment's config —
+    # plus metadata (key name + version, never a value) for the resolution audit.
+    assert resolved.values == {"RESOLVE_DB_URL": "postgresql://resolved:user@db/x"}
+    assert [(ref.key, ref.version) for ref in resolved.references] == [("RESOLVE_DB_URL", 1)]
+
+
+async def _environment_config(client, owner, config: dict) -> str:
+    """Project → application → environment carrying *config*; returns its id."""
+    project = (
+        await client.post(f"{API}/projects", headers=owner["headers"], json={"name": "Fail Co"})
+    ).json()
+    application = (
+        await client.post(
+            f"{API}/projects/{project['id']}/applications",
+            headers=owner["headers"],
+            json={"name": "fail-closed-app"},
+        )
+    ).json()
+    environment = (
+        await client.post(
+            f"{API}/projects/applications/{application['id']}/environments",
+            headers=owner["headers"],
+            json={"name": "production", "config": config},
+        )
+    ).json()
+    return environment["id"]
+
+
+async def test_missing_reference_fails_closed(client, owner, org_db):
+    """A reference naming no secret must abort, not resolve to an empty value.
+
+    Regression: resolution used to return ``""`` with a log warning, so a
+    deployment shipped without the credentials its config declared.
+    """
+    env_id = await _environment_config(
+        client, owner, {"DATABASE_URL": "${secret:ABSENT_KEY}", "PLAIN": "untouched"}
+    )
+    env_row = await org_db.get(DeploymentEnvironment, uuid.UUID(env_id))
+
+    with pytest.raises(secret_service.SecretResolutionError) as excinfo:
+        await secret_service.resolve_secrets_for_environment(org_db, env_row)
+
+    error = excinfo.value
+    assert error.missing == ("ABSENT_KEY",)
+    assert error.undecryptable == ()
+    # The message names the key so an operator can act, and carries no value.
+    assert "ABSENT_KEY" in str(error)
+
+
+async def test_undecryptable_reference_fails_closed(client, owner, org_db):
+    """A row this ENCRYPTION_KEY cannot decrypt must abort, not yield ``""``."""
+    env_id = await _environment_config(client, owner, {"TOKEN": "${secret:BROKEN_KEY}"})
+    env_row = await org_db.get(DeploymentEnvironment, uuid.UUID(env_id))
+    org_db.add(
+        Secret(
+            key="BROKEN_KEY",
+            ciphertext="not-a-valid-fernet-token",
+            version=3,
+            digest="digest-broken",
+            description="undecryptable by construction",
+        )
+    )
+    await org_db.commit()
+
+    with pytest.raises(secret_service.SecretResolutionError) as excinfo:
+        await secret_service.resolve_secrets_for_environment(org_db, env_row)
+
+    error = excinfo.value
+    assert error.undecryptable == ("BROKEN_KEY",)
+    assert error.missing == ()
+
+
+async def test_no_references_returns_empty(client, owner, org_db):
+    env_id = await _environment_config(client, owner, {"PLAIN": "untouched"})
+    env_row = await org_db.get(DeploymentEnvironment, uuid.UUID(env_id))
+
+    resolved = await secret_service.resolve_secrets_for_environment(org_db, env_row)
+
+    assert resolved.values == {}
+    assert resolved.references == ()

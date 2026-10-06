@@ -7,6 +7,7 @@ from collections.abc import AsyncIterator
 import pytest
 from app.models.enums import LogLevel
 from app.providers.deployment_runner import (
+    ENGINE_STEPS,
     STEP_ORDER,
     RunContext,
     SimulatedDeploymentRunner,
@@ -52,6 +53,22 @@ def test_plan_steps_returns_full_ordered_plan() -> None:
     assert plan == list(STEP_ORDER)
     assert plan is not STEP_ORDER  # callers may mutate their copy
     assert StepName.HEALTH_CHECK in plan
+
+
+def test_plan_steps_excludes_engine_owned_steps() -> None:
+    """RESOLVE_CONFIG is planned by the engine, not produced by a runner."""
+    plan = SimulatedDeploymentRunner().plan_steps(_ctx())
+    assert StepName.RESOLVE_CONFIG not in plan
+    assert not (set(plan) & ENGINE_STEPS)
+
+
+async def test_engine_owned_step_is_refused_by_the_runner() -> None:
+    """Dispatching RESOLVE_CONFIG to a runner would silently pass an unresolved
+    step, which is exactly the fail-open behavior the engine step exists to
+    prevent — so the runner refuses it loudly."""
+    runner = SimulatedDeploymentRunner()
+    with pytest.raises(StepFailure, match="engine-owned"):
+        await _collect(runner.execute_step(StepName.RESOLVE_CONFIG, _ctx()))
 
 
 def test_pace_bounds() -> None:

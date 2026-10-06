@@ -9,7 +9,7 @@ from app.schemas.search import SearchHit, SearchResultOut
 from pydantic import ValidationError
 
 _SECTIONS = (
-    "servers",
+    "nodes",
     "containers",
     "deployments",
     "projects",
@@ -30,20 +30,20 @@ def test_search_result_exposes_exactly_the_documented_sections() -> None:
 
 
 def test_sections_hold_hits() -> None:
-    hit = SearchHit(type="server", id=uuid4(), title="edge-01", url_path="/servers/1")
+    hit = SearchHit(type="node", id=uuid4(), title="edge-01", url_path="/nodes/1")
     assert hit.subtitle == ""
-    out = SearchResultOut(servers=[hit])
-    assert out.servers == [hit]
+    out = SearchResultOut(nodes=[hit])
+    assert out.nodes == [hit]
     assert out.containers == []
 
 
 def test_search_hit_requires_core_fields() -> None:
     with pytest.raises(ValidationError):
-        SearchHit(type="server", title="no id", url_path="/x")
+        SearchHit(type="node", title="no id", url_path="/x")
     with pytest.raises(ValidationError):
         SearchHit(id=uuid4(), title="no type", url_path="/x")
 
 
 def test_extra_fields_are_forbidden() -> None:
     with pytest.raises(ValidationError):
-        SearchResultOut(servers=[], mystery=1)
+        SearchResultOut(nodes=[], mystery=1)

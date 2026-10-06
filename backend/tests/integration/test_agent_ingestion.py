@@ -54,10 +54,10 @@ def _heartbeat(**overrides):
 
 async def _enrolled(client, owner, name="srv-ingest"):
     created = (
-        await client.post(f"{API}/servers", headers=owner["headers"], json=server_payload(name))
+        await client.post(f"{API}/nodes", headers=owner["headers"], json=server_payload(name))
     ).json()
     token = (
-        await client.post(f"{API}/servers/{created['id']}/agent-token", headers=owner["headers"])
+        await client.post(f"{API}/nodes/{created['id']}/agent-token", headers=owner["headers"])
     ).json()["agent_token"]
     return created, token
 
@@ -77,13 +77,13 @@ async def test_hello_persists_facts_and_negotiates_interval(client, owner):
     assert body["name"] == "srv-ingest"
     assert body["heartbeat_interval_seconds"] >= 5
 
-    detail = (await client.get(f"{API}/servers/{created['id']}", headers=owner["headers"])).json()
+    detail = (await client.get(f"{API}/nodes/{created['id']}", headers=owner["headers"])).json()
     assert detail["enrolled"] is True
     assert detail["os_name"] == "Ubuntu"
     assert detail["cpu_cores"] == 8
 
 
-async def test_heartbeat_updates_status_metrics_and_containers(client, owner, db):
+async def test_heartbeat_updates_status_metrics_and_containers(client, owner, org_db):
     created, token = await _enrolled(client, owner)
 
     beat = await client.post(
@@ -91,19 +91,19 @@ async def test_heartbeat_updates_status_metrics_and_containers(client, owner, db
     )
     assert beat.status_code == 204, beat.text
 
-    detail = (await client.get(f"{API}/servers/{created['id']}", headers=owner["headers"])).json()
+    detail = (await client.get(f"{API}/nodes/{created['id']}", headers=owner["headers"])).json()
     assert detail["status"] == "ONLINE"
     assert detail["last_heartbeat_at"] is not None
     assert detail["counts"] == {"containers_running": 1, "containers_total": 1}
 
-    metrics = await db.execute(
+    metrics = await org_db.execute(
         select(func.count())
         .select_from(MetricSnapshot)
         .where(MetricSnapshot.server_id == uuid.UUID(created["id"]))
     )
     assert metrics.scalar_one() >= 1
 
-    container = (await db.execute(select(Container))).scalar_one()
+    container = (await org_db.execute(select(Container))).scalar_one()
     assert container.name == "web"
     assert container.container_id == "abc123def456"
 
@@ -127,7 +127,9 @@ async def test_heartbeat_updates_status_metrics_and_containers(client, owner, db
     event_types = {
         row[0]
         for row in (
-            await db.execute(select(SystemEvent.type).where(SystemEvent.type.like("CONTAINER%")))
+            await org_db.execute(
+                select(SystemEvent.type).where(SystemEvent.type.like("CONTAINER%"))
+            )
         ).all()
     }
     assert "CONTAINER_STARTED" in event_types
@@ -143,7 +145,7 @@ async def test_malformed_heartbeat_is_422_not_500(client, owner):
     assert response.status_code == 422
 
 
-async def test_heartbeat_removes_vanished_containers(client, owner, db):
+async def test_heartbeat_removes_vanished_containers(client, owner, org_db):
     """A container absent from a later heartbeat is gone from the daemon."""
     _created, token = await _enrolled(client, owner, "srv-reap")
     two = _heartbeat(
@@ -188,17 +190,21 @@ async def test_heartbeat_removes_vanished_containers(client, owner, db):
     )
     assert again.status_code == 204
 
-    remaining = (await db.execute(select(Container.name))).scalars().all()
+    remaining = (await org_db.execute(select(Container.name))).scalars().all()
     assert remaining == ["stays"]
     removed = (
-        (await db.execute(select(SystemEvent.type).where(SystemEvent.type == "CONTAINER_REMOVED")))
+        (
+            await org_db.execute(
+                select(SystemEvent.type).where(SystemEvent.type == "CONTAINER_REMOVED")
+            )
+        )
         .scalars()
         .all()
     )
     assert removed == ["CONTAINER_REMOVED"]
 
 
-async def test_heartbeat_at_container_cap_skips_reconciliation(client, owner, db):
+async def test_heartbeat_at_container_cap_skips_reconciliation(client, owner, org_db):
     """A payload at the agent's cap may be truncated — absence proves nothing."""
     _created, token = await _enrolled(client, owner, "srv-cap")
     seeded = _heartbeat(
@@ -234,5 +240,5 @@ async def test_heartbeat_at_container_cap_skips_reconciliation(client, owner, db
         await client.post(f"{API}/agent/heartbeat", json=at_cap, headers={"X-Agent-Token": token})
     ).status_code == 204
 
-    names = (await db.execute(select(Container.name))).scalars().all()
+    names = (await org_db.execute(select(Container.name))).scalars().all()
     assert "must-survive" in names

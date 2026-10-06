@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from types import SimpleNamespace
 
 import pytest
@@ -17,6 +18,7 @@ from app.core.permissions import (
     scope_matches,
 )
 from app.models import User
+from app.models.enums import MembershipStatus
 
 # --- scope_matches truth table ---------------------------------------------------
 
@@ -25,26 +27,26 @@ from app.models import User
     ("scopes", "required", "expected"),
     [
         # exact
-        (["server.read"], "server.read", True),
+        (["node.read"], "node.read", True),
         (["user.read"], "user.read", True),
-        (["server.read"], "server.update", False),
-        (["server.reading"], "server.read", False),
-        (["SERVER.READ"], "server.read", False),  # case-sensitive
+        (["node.read"], "node.update", False),
+        (["node.reading"], "node.read", False),
+        (["NODE.READ"], "node.read", False),  # case-sensitive
         # global wildcard
-        (["*"], "server.read", True),
+        (["*"], "node.read", True),
         (["*"], "secret.write", True),
         (["monitor.*", "*"], "anything.at.all", True),
         # trailing namespace wildcard
-        (["server.*"], "server.read", True),
-        (["server.*"], "server.delete", True),
-        (["server.*"], "servers.read", False),  # different namespace
-        (["server.*"], "user.read", False),
+        (["node.*"], "node.read", True),
+        (["node.*"], "node.delete", True),
+        (["node.*"], "servers.read", False),  # different namespace
+        (["node.*"], "user.read", False),
         # multiple scopes: any match wins
         (["user.read", "metric.read"], "metric.read", True),
         (["user.read", "metric.read"], "secret.write", False),
         # misses
-        ([], "server.read", False),
-        ([""], "server.read", False),
+        ([], "node.read", False),
+        ([""], "node.read", False),
         ([], "", False),
     ],
 )
@@ -116,10 +118,10 @@ class _FakeCtx:
 
 
 async def test_require_permission_returns_ctx_when_allowed() -> None:
-    dep = require_permission("server.read")
+    dep = require_permission("node.read")
     ctx = _FakeCtx(allowed=True)
     assert await dep(ctx) is ctx  # type: ignore[arg-type]
-    assert ctx.asked_for == ["server.read"]
+    assert ctx.asked_for == ["node.read"]
 
 
 async def test_require_permission_raises_forbidden_when_denied() -> None:
@@ -134,10 +136,31 @@ async def test_require_permission_raises_forbidden_when_denied() -> None:
 # --- AuthContext.has_permission integration (in-memory models only) ---------------
 
 
-def _auth_context(*, superadmin: bool = False, api_key_scopes: list[str] | None = None):
+def _auth_context(
+    *,
+    superadmin: bool = False,
+    api_key_scopes: list[str] | None = None,
+    membership_status: MembershipStatus | None = MembershipStatus.ACTIVE,
+):
+    """A fake context in the given organization.
+
+    ``membership_status=None`` models a caller with **no** membership in the
+    organization it is asking about — the state that must grant nothing.
+    """
     user = User(email="owner@example.com", password_hash="x", is_superadmin=superadmin)
     api_key = SimpleNamespace(scopes=api_key_scopes) if api_key_scopes is not None else None
-    return AuthContext(user=user, actor_type="API_KEY" if api_key else "USER", api_key=api_key)  # type: ignore[arg-type]
+    membership = (
+        SimpleNamespace(status=membership_status, role=SimpleNamespace(permissions=[]))
+        if membership_status is not None
+        else None
+    )
+    return AuthContext(  # type: ignore[arg-type]
+        user=user,
+        org=SimpleNamespace(id=uuid.uuid4()) if membership else None,
+        membership=membership,
+        actor_type="API_KEY" if api_key else "USER",
+        api_key=api_key,
+    )
 
 
 def test_superadmin_bypasses_everything() -> None:
@@ -149,7 +172,25 @@ def test_superadmin_bypasses_everything() -> None:
 def test_plain_user_without_permissions_is_denied() -> None:
     ctx = _auth_context()
     ctx._permission_set = set()
-    assert ctx.has_permission("server.read") is False
+    assert ctx.has_permission("node.read") is False
+
+
+def test_membership_is_required_for_authority() -> None:
+    # A permission set is only meaningful inside an organization the caller is
+    # an *active* member of. A wildcard role loaded elsewhere (e.g. the user's
+    # default role) must not survive into an organization without a membership.
+    no_membership = _auth_context(membership_status=None)
+    no_membership._permission_set = {"*"}
+    assert no_membership.has_permission("node.read") is False
+
+    suspended = _auth_context(membership_status=MembershipStatus.SUSPENDED)
+    suspended._permission_set = {"*"}
+    assert suspended.has_permission("node.read") is False
+
+    # Superadmins are the deliberate exception: platform authority is not
+    # conferred by a membership row.
+    admin = _auth_context(superadmin=True, membership_status=None)
+    assert admin.has_permission("node.read") is True
 
 
 def test_user_with_wildcard_or_exact_or_namespace_perm() -> None:
@@ -158,15 +199,15 @@ def test_user_with_wildcard_or_exact_or_namespace_perm() -> None:
     assert ctx.has_permission("container.remove") is True
 
     ctx2 = _auth_context()
-    ctx2._permission_set = {"server.*"}
-    assert ctx2.has_permission("server.delete") is True
+    ctx2._permission_set = {"node.*"}
+    assert ctx2.has_permission("node.delete") is True
     assert ctx2.has_permission("server") is False  # prefix must include the dot boundary
 
 
 def test_api_key_scope_intersects_role_permissions() -> None:
-    ctx = _auth_context(api_key_scopes=["server.*"])
-    ctx._permission_set = {"server.read", "secret.write"}
-    assert ctx.has_permission("server.read") is True  # both key scope and role allow
+    ctx = _auth_context(api_key_scopes=["node.*"])
+    ctx._permission_set = {"node.read", "secret.write"}
+    assert ctx.has_permission("node.read") is True  # both key scope and role allow
     assert ctx.has_permission("secret.write") is False  # role allows but key scope does not
 
     scoped_out = _auth_context(api_key_scopes=["*"])
@@ -182,11 +223,11 @@ def test_superadmin_owned_api_key_is_limited_to_its_scope() -> None:
     # leaked "read-only" key yields full platform control.
     ctx = _auth_context(superadmin=True, api_key_scopes=["metric.read"])
     assert ctx.has_permission("metric.read") is True
-    assert ctx.has_permission("server.read") is False
-    assert ctx.has_permission("server.delete") is False
+    assert ctx.has_permission("node.read") is False
+    assert ctx.has_permission("node.delete") is False
     assert ctx.has_permission("secret.write") is False
     assert ctx.has_permission("user.manage") is False
 
     # A superadmin-owned key with an explicit wildcard still acts globally.
     wildcard_ctx = _auth_context(superadmin=True, api_key_scopes=["*"])
-    assert wildcard_ctx.has_permission("server.delete") is True
+    assert wildcard_ctx.has_permission("node.delete") is True

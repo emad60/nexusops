@@ -32,16 +32,25 @@ async def _invite_user(client, owner_headers, role_name: str) -> dict:
     return {"email": email, "password": "Integration-Pass1"}
 
 
+def _org_headers(session: dict) -> dict[str, str]:
+    """Headers for an invited user, scoped to the organization they joined.
+
+    An account can belong to several organizations, so the platform never
+    guesses which one a request is for: the caller names it.
+    """
+    return bearer(session["access_token"], session["active_organization_id"])
+
+
 async def test_viewer_cannot_create_but_can_read(client, owner):
     creds = await _invite_user(client, owner["headers"], "Viewer")
     session = await login_account(client, **creds)
-    viewer_headers = bearer(session["access_token"])
+    viewer_headers = _org_headers(session)
 
-    allowed = await client.get(f"{API}/servers", headers=viewer_headers)
+    allowed = await client.get(f"{API}/nodes", headers=viewer_headers)
     assert allowed.status_code == 200
 
     denied = await client.post(
-        f"{API}/servers",
+        f"{API}/nodes",
         headers=viewer_headers,
         json={"name": "nope", "hostname": "nope.integration.test"},
     )
@@ -52,7 +61,7 @@ async def test_viewer_cannot_create_but_can_read(client, owner):
 async def test_operator_reads_but_cannot_manage_secrets(client, owner):
     creds = await _invite_user(client, owner["headers"], "Operator")
     session = await login_account(client, **creds)
-    operator_headers = bearer(session["access_token"])
+    operator_headers = _org_headers(session)
 
     listed = await client.get(f"{API}/secrets", headers=operator_headers)
     assert listed.status_code == 200
@@ -70,7 +79,7 @@ async def test_scoped_api_key_cannot_exceed_its_grant(client, owner):
     """Regression: a superadmin-owned key is still limited to its scope list.
 
     The owner created by the bootstrap registration is a superadmin; a machine
-    key minted by them with scopes=["server.read"] must act like a read-only
+    key minted by them with scopes=["node.read"] must act like a read-only
     credential even though its owner could do everything. Previously the
     superadmin shortcut in AuthContext.has_permission ran before the key-scope
     intersection, so any leaked "read-only" key had full platform control.
@@ -78,17 +87,17 @@ async def test_scoped_api_key_cannot_exceed_its_grant(client, owner):
     created = await client.post(
         f"{API}/api-keys",
         headers=owner["headers"],
-        json={"name": "ci read-only", "scopes": ["server.read"]},
+        json={"name": "ci read-only", "scopes": ["node.read"]},
     )
     assert created.status_code == 201, created.text
     raw_key = created.json()["key"]
     key_headers = {"X-API-Key": raw_key}
 
-    allowed = await client.get(f"{API}/servers", headers=key_headers)
+    allowed = await client.get(f"{API}/nodes", headers=key_headers)
     assert allowed.status_code == 200
 
     denied = await client.post(
-        f"{API}/servers",
+        f"{API}/nodes",
         headers=key_headers,
         json=server_payload("nope-via-key"),
     )
@@ -103,7 +112,7 @@ async def test_scoped_api_key_cannot_exceed_its_grant(client, owner):
     )
     assert wild.status_code == 201, wild.text
     allowed_write = await client.post(
-        f"{API}/servers",
+        f"{API}/nodes",
         headers={"X-API-Key": wild.json()["key"]},
         json=server_payload("yes-via-key"),
     )

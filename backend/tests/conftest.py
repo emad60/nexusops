@@ -25,6 +25,12 @@ TEST_DB_NAME = "nexusops_test"
 TEST_PG_HOST = "127.0.0.1"
 #: Dedicated Redis index so flushdb can never touch shared data.
 TEST_REDIS_DB = 1
+#: Password for the RLS-enforced application role in the test database. The
+#: suite always runs as that role so PostgreSQL row-level security is actually
+#: exercised — running as the owner would make every policy inert and every RLS
+#: test vacuous.
+TEST_APP_ROLE = "nexusops_app_test"
+TEST_APP_PASSWORD = "nexusops-test-app-password"
 
 if str(BACKEND_DIR) not in sys.path:  # allow `pytest` from any cwd
     sys.path.insert(0, str(BACKEND_DIR))
@@ -56,10 +62,19 @@ _PG_USER = _DOT_ENV.get("POSTGRES_USER", "nexusops")
 _PG_PASSWORD = _DOT_ENV.get("POSTGRES_PASSWORD", "")
 _ADMIN_DB = _DOT_ENV.get("POSTGRES_DB", "postgres")
 
-TEST_DATABASE_URL = (
-    f"postgresql+psycopg://{quote_plus(_PG_USER)}:{quote_plus(_PG_PASSWORD)}"
-    f"@{TEST_PG_HOST}:{_PG_PORT}/{TEST_DB_NAME}"
-)
+
+def _dsn(user: str, password: str) -> str:
+    return (
+        f"postgresql+psycopg://{quote_plus(user)}:{quote_plus(password)}"
+        f"@{TEST_PG_HOST}:{_PG_PORT}/{TEST_DB_NAME}"
+    )
+
+
+#: Runtime DSN — the application role, filtered by RLS.
+TEST_DATABASE_URL = _dsn(TEST_APP_ROLE, TEST_APP_PASSWORD)
+#: Owner DSN — migrations, fixtures and TRUNCATE (which is not RLS-filtered and
+#: needs table ownership anyway).
+TEST_OWNER_DATABASE_URL = _dsn(_PG_USER, _PG_PASSWORD)
 TEST_REDIS_URL = f"redis://127.0.0.1:{_REDIS_PORT}/{TEST_REDIS_DB}"
 
 # Test-only fallbacks; the repo .env values win when present.
@@ -70,6 +85,9 @@ _FALLBACK_ENCRYPTION_KEY = base64.urlsafe_b64encode(b"nexusops-integration-test-
 def configure_test_env() -> None:
     """Export the exact settings the app caches; host values cannot leak through."""
     os.environ["DATABASE_URL"] = TEST_DATABASE_URL
+    os.environ["MIGRATION_DATABASE_URL"] = TEST_OWNER_DATABASE_URL
+    os.environ["POSTGRES_APP_USER"] = TEST_APP_ROLE
+    os.environ["POSTGRES_APP_PASSWORD"] = TEST_APP_PASSWORD
     os.environ["REDIS_URL"] = TEST_REDIS_URL
     os.environ["SIMULATION_MODE"] = "true"
     os.environ["ENVIRONMENT"] = "test"

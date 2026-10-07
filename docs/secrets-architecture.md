@@ -1,7 +1,9 @@
 # Secrets Architecture
 
-**Status:** Proposal for review — not yet approved for implementation.
-**Date:** 2026-09-20
+**Status:** §1 shipped (Fernet store, metadata-only reads, deploy-time resolution); the
+per-node delivery and rotation target for later phases is a proposal — not yet approved
+or built.
+**Date:** 2026-09-20 (status updated 2026-10-07)
 **Reads best after:** [domain-model.md](domain-model.md) §2.5 · [multi-tenancy.md](multi-tenancy.md) §3, §4 · [authorization.md](authorization.md) §3
 
 ---

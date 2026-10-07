@@ -234,9 +234,9 @@
     "semantic_hash": "5bf207fba39dd409cbc3519cc84c52b8"
   },
   "backend/app/core/config.py": {
-    "mtime": 1790113135.2860491,
-    "seen": 1790274598.396239,
-    "ast_hash": "a5e2863fd65df5c336b0e80fb83c39c4",
+    "mtime": 1791326689.9238439,
+    "seen": 1791328960.3471968,
+    "ast_hash": "e1e4c5d8cb8aaf866875bb2a02e79938",
     "semantic_hash": ""
   },
   "backend/app/core/db.py": {
@@ -618,9 +618,9 @@
     "semantic_hash": ""
   },
   "backend/app/services/event_bus.py": {
-    "mtime": 1790113859.0580654,
-    "seen": 1790274598.3963087,
-    "ast_hash": "48860271a0dd9163f7309f659adb88a9",
+    "mtime": 1791328213.8547826,
+    "seen": 1791328960.3472703,
+    "ast_hash": "f650ce14c6cf35feb32a14be9e503524",
     "semantic_hash": ""
   },
   "backend/app/services/event_registry.py": {
@@ -696,9 +696,9 @@
     "semantic_hash": "d41d8cd98f00b204e9800998ecf8427e"
   },
   "backend/app/tasks/_util.py": {
-    "mtime": 1790114269.5520747,
-    "seen": 1790274598.3963225,
-    "ast_hash": "b586d650987cf5ffa55757462bb96692",
+    "mtime": 1791328046.1823282,
+    "seen": 1791328960.3472857,
+    "ast_hash": "bb30081b56274f29e3776ea36e862dea",
     "semantic_hash": ""
   },
   "backend/app/tasks/celery_app.py": {
@@ -768,9 +768,9 @@
     "semantic_hash": "a71fa1a51d943bc355b284362d609973"
   },
   "backend/scripts/seed.py": {
-    "mtime": 1790972197.2448225,
-    "seen": 1790973659.317032,
-    "ast_hash": "68181dbce01794ce1814026b1a880daa",
+    "mtime": 1791328236.4776359,
+    "seen": 1791328960.3472986,
+    "ast_hash": "f8ba70449c5f056f760120fd16525c04",
     "semantic_hash": ""
   },
   "backend/tests/__init__.py": {
@@ -780,9 +780,9 @@
     "semantic_hash": "d41d8cd98f00b204e9800998ecf8427e"
   },
   "backend/tests/conftest.py": {
-    "mtime": 1790107559.3920023,
-    "seen": 1790274598.396336,
-    "ast_hash": "e5175fd77dd7c375f31728a26574e59a",
+    "mtime": 1791326727.4429555,
+    "seen": 1791328960.3473005,
+    "ast_hash": "4395766ed6b23dfb926de531048acfd7",
     "semantic_hash": ""
   },
   "backend/tests/integration/__init__.py": {
@@ -1482,9 +1482,9 @@
     "semantic_hash": "5d93f74523cfc2045cd3efa08e83a7cb"
   },
   "docker-compose.yml": {
-    "mtime": 1790113139.7730494,
-    "seen": 1790274598.3964665,
-    "ast_hash": "c6f24ac40076c53116109db7bc7f7ba9",
+    "mtime": 1791326693.5647213,
+    "seen": 1791328960.3474438,
+    "ast_hash": "034212437cdf6aa39cd8eafbba9625eb",
     "semantic_hash": ""
   },
   "docs/agent.md": {
@@ -1547,22 +1547,16 @@
     "ast_hash": "fe4d2c98363d9a76716ab34fdbc40810",
     "semantic_hash": "fe4d2c98363d9a76716ab34fdbc40810"
   },
-  ".claude/workflows/findings.json": {
-    "mtime": 1789935009.9010031,
-    "seen": 1789940843.4369726,
-    "ast_hash": "72e95d058e33631ac2b3b8d683e08bb3",
-    "semantic_hash": ""
-  },
   ".claude/workflows/nexusops-draft.mjs": {
-    "mtime": 1789935549.458485,
-    "seen": 1789940843.4369762,
-    "ast_hash": "9dfc600542c3ad07a381ebcd27bb22aa",
+    "mtime": 1791328883.3926,
+    "seen": 1791328960.3471437,
+    "ast_hash": "4c02b8bcbcebd6c49cb26a46fd1067cf",
     "semantic_hash": ""
   },
   ".claude/workflows/nexusops-understand.mjs": {
-    "mtime": 1789934036.364618,
-    "seen": 1789940843.4369779,
-    "ast_hash": "b04668f40e3867d8d05adde2a8caa153",
+    "mtime": 1791328919.0505981,
+    "seen": 1791328960.3471453,
+    "ast_hash": "67b585242a396057db7ae82a89b1736a",
     "semantic_hash": ""
   },
   "docs/authorization.md": {
@@ -1632,9 +1626,9 @@
     "semantic_hash": ""
   },
   ".claude/workflows/nexusops-challenge.mjs": {
-    "mtime": 1789942791.8862216,
-    "seen": 1789949502.316971,
-    "ast_hash": "12c579d23015a3b079a2d084ca22f90a",
+    "mtime": 1791328899.8935993,
+    "seen": 1791328960.3471408,
+    "ast_hash": "a736e468113ebf9daca277d0ff0fe5b3",
     "semantic_hash": ""
   },
   "backend/tests/unit/test_agent_backoff.py": {
@@ -1821,6 +1815,12 @@
     "mtime": 1791319285.9293282,
     "seen": 1791322957.9829106,
     "ast_hash": "eb1bb61717c063109f1658659840ed87",
+    "semantic_hash": ""
+  },
+  "backend/tests/unit/test_event_publish_drain.py": {
+    "mtime": 1791328223.8326366,
+    "seen": 1791328960.34733,
+    "ast_hash": "4698cf58dfc2170ec1739231dc20737a",
     "semantic_hash": ""
   }
 }

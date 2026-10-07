@@ -29,8 +29,25 @@ logger = get_logger(__name__)
 
 
 def run_async[T](coroutine: Coroutine[Any, Any, T]) -> T:
-    """Run *coroutine* on a dedicated event loop (Celery workers are sync)."""
-    return asyncio.run(coroutine)
+    """Run *coroutine* on a dedicated event loop (Celery workers are sync).
+
+    The loop is deliberately kept alive just long enough to flush the event
+    frames the coroutine committed: ``event_bus`` announces an event from an
+    ``after_commit`` hook by scheduling a publish task, and ``asyncio.run``
+    cancels anything still pending the moment the coroutine returns. A task
+    whose last act is a commit therefore used to lose its own frame — and with
+    it every notification that frame would have dispatched.
+    """
+
+    async def _drained() -> T:
+        from app.services.event_bus import flush_pending_publishes
+
+        try:
+            return await coroutine
+        finally:
+            await flush_pending_publishes()
+
+    return asyncio.run(_drained())
 
 
 @contextlib.asynccontextmanager

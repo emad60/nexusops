@@ -34,7 +34,7 @@ const SCHEMA = {
 }
 
 const COMMON = [
-  'You are analyzing the NexusOps repository at /home/emad/projects/nexusops (FastAPI async backend in backend/app,',
+  'You are analyzing the NexusOps repository you are working in (FastAPI async backend in backend/app,',
   'Celery worker, React SPA in frontend/src, stdlib Python agent in agent/, docker-compose infra).',
   'Your findings feed a MULTI-TENANT PLATFORM REDESIGN, so precision matters.',
   '',

@@ -812,8 +812,11 @@ Platform evolution overview (§1) and the simulated-capabilities honesty box
 X-Forwarded-Proto behavior, confirmed the 5-role registry and the
 fixed-window limiter; updated the sweep/log-collection mechanics; ER updated
 to the org-scoped target model (existing/new/promoted). Sections describing
-the org model, Domain/Route/Certificate, Operations and grants are design
-specs — proposals for review, not shipped behavior.*
+Domain/Route/Certificate and the grants model are design specs — proposals for
+review, not shipped behavior. The organization model and the Operations control
+plane described here **are** shipped (Phase 1 — multi-tenancy.md,
+node-agent-architecture.md §5); what Operations still lacks is delivery of
+pending ops to the agent, which is the Phase 2 boundary.*
 
 *Doc version 2.2 — 2026-09-24 (Phase 1, multi-tenancy.md §0). §1 now records the
 shipped tenant foundation: `organizations`/`memberships`, `org_id` on every tenant

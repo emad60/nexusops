@@ -60,6 +60,45 @@ def _after_commit_publish(session: Any) -> None:
         task.add_done_callback(_background_publishes.discard)
 
 
+#: How long a short-lived loop waits for the frames its own commit scheduled
+#: before closing. A Redis publish is sub-millisecond; the bound exists only so
+#: a wedged Redis cannot hang a Celery task.
+PUBLISH_DRAIN_TIMEOUT_SECONDS = 5.0
+
+
+async def flush_pending_publishes(drain_seconds: float = PUBLISH_DRAIN_TIMEOUT_SECONDS) -> int:
+    """Wait for frames scheduled by ``after_commit`` hooks to reach Redis.
+
+    The commit hook cannot await — it runs inside the commit — so it schedules
+    the publish as a task on the running loop. That is correct for a long-lived
+    loop (the API serves it, and the task runs a moment later) and wrong for a
+    short-lived one: ``asyncio.run`` closes the loop as soon as its coroutine
+    returns and cancels whatever is still pending, so a worker task whose last
+    act is a commit announced its event to nobody — which is exactly how every
+    monitor/incident notification went missing.
+
+    Callers that own a short-lived loop await this before closing it. Returns
+    how many frames were still in flight when the wait expired; those are
+    cancelled and logged, because an unsent frame is a notification nobody
+    received.
+    """
+    pending = [task for task in _background_publishes if not task.done()]
+    if not pending:
+        return 0
+    _, unfinished = await asyncio.wait(pending, timeout=drain_seconds)
+    for task in unfinished:
+        task.cancel()
+    if unfinished:
+        # Reap the cancellations so they do not surface as loop-shutdown noise.
+        await asyncio.gather(*unfinished, return_exceptions=True)
+        log.warning(
+            "event_publish_drain_incomplete",
+            frames=len(unfinished),
+            drain_seconds=drain_seconds,
+        )
+    return len(unfinished)
+
+
 def _after_rollback_drop(session: Any) -> None:
     """Drop stashed frames on rollback.
 

@@ -82,12 +82,15 @@ future reader deserves to know where the code intentionally differs.
    tenant isolation off; `tests/unit/test_tenancy_allowlist.py` AST-scans the
    source and fails in both directions (a module opening a scope outside the set,
    or a listed module that no longer does).
-8. **Verification status.** 481 backend tests (unit + integration, RLS probes
+8. **Verification status.** 483 backend tests (unit + integration, RLS probes
    against the real `nexusops_app` role, WS hub, worker sweeps, a
-   tenant-concurrency suite and a model/migration drift test) and 176 frontend
-   tests pass; ruff, mypy, `tsc` and eslint are clean; the Playwright journey is
-   11/11. The isolation suite is 24 tests. Full Phase 1 deliverables and the
-   hardening pass: [phase1-report.md](phase1-report.md).
+   tenant-concurrency suite, a model/migration drift test and the event-frame
+   drain tests) and 176 frontend tests pass; ruff, mypy, `tsc` and eslint are
+   clean; the Playwright journey is 11/11 **from a removed volume** (the database
+   is built from zero, never recycled — a recycled volume is what hid a lost-frame
+   defect until 2026-10-07). The isolation suite is 24 tests. Full Phase 1
+   deliverables, the hardening pass and the integrity pass:
+   [phase1-report.md](phase1-report.md).
 9. **Done: the `server.*` → `node.*` vocabulary rename** (§10 step 3). Codenames,
    routes (`/v1/nodes`, with a schema-hidden `/v1/servers` alias), the SPA and the
    docs all use Node; the `servers` table keeps its name until the cleanup phase

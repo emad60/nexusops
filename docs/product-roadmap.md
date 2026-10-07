@@ -1,7 +1,7 @@
 # Product Roadmap — NexusOps Multi-Tenant Platform
 
-**Status:** Proposal for review — not yet approved for implementation.
-**Date:** 2026-09-20
+**Status:** Phase 1 delivered; the later phases are proposals for review, not yet approved.
+**Date:** 2026-09-20 (status updated 2026-10-07)
 **Companions:** [platform-vision.md](platform-vision.md) · [domain-model.md](domain-model.md) · [multi-tenancy.md](multi-tenancy.md) · [authorization.md](authorization.md) · [platform-security-model.md](platform-security-model.md)
 
 ## 0. Stance

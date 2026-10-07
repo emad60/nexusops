@@ -7,7 +7,7 @@ COMPOSE_DEV := $(COMPOSE) -f docker-compose.yml -f docker-compose.dev.yml
 #   PG_URL     — owner: migrations and bootstrap scripts only. Owning a table
 #                means bypassing its RLS policies, so it never serves traffic.
 #   APP_PG_URL — application role: the runtime, where the tenant policies apply.
-PG_URL := postgresql+psycopg://$${POSTGRES_USER:-nexusops}:$${POSTGRES_PASSWORD:-change-me-postgres}@127.0.0.1:$${NEXUSOPS_POSTGRES_PORT:-5433}/$${POSTGRES_DB:-nexusops}
+PG_URL := postgresql+psycopg://$${POSTGRES_USER:-nexusops_owner}:$${POSTGRES_PASSWORD:-change-me-postgres}@127.0.0.1:$${NEXUSOPS_POSTGRES_PORT:-5433}/$${POSTGRES_DB:-nexusops}
 APP_PG_URL := postgresql+psycopg://$${POSTGRES_APP_USER:-nexusops_app}:$${POSTGRES_APP_PASSWORD:-change-me-postgres-app}@127.0.0.1:$${NEXUSOPS_POSTGRES_PORT:-5433}/$${POSTGRES_DB:-nexusops}
 REDIS := redis://127.0.0.1:$${NEXUSOPS_REDIS_PORT:-6390}/0
 
@@ -81,7 +81,7 @@ E2E_COMPOSE := NEXUSOPS_HTTP_PORT=$(E2E_HTTP_PORT) \
 # that one resolves the port through `${NEXUSOPS_POSTGRES_PORT:-5433}`, and
 # `VAR=1 OTHER=${VAR:-x} cmd` does not pick up the sibling assignment, so it
 # silently fell back to the dev port. The port is baked in here instead.
-E2E_PG_URL := postgresql+psycopg://$${POSTGRES_USER:-nexusops}:$${POSTGRES_PASSWORD:-change-me-postgres}@127.0.0.1:$(E2E_PG_PORT)/$${POSTGRES_DB:-nexusops}
+E2E_PG_URL := postgresql+psycopg://$${POSTGRES_USER:-nexusops_owner}:$${POSTGRES_PASSWORD:-change-me-postgres}@127.0.0.1:$(E2E_PG_PORT)/$${POSTGRES_DB:-nexusops}
 E2E_REDIS_URL := redis://127.0.0.1:$(E2E_REDIS_PORT)/0
 
 # Host-run seed against the e2e port. `.env` is sourced (with `set -a`, so its

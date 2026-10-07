@@ -1,7 +1,8 @@
 # Deployment Architecture — NexusOps (target state)
 
-**Status:** Proposal for review — not yet approved for implementation.
-**Date:** 2026-09-20
+**Status:** Orchestration is shipped (the runner is simulated — §1); the target architecture
+in the rest of this document is a proposal for review, not yet approved for implementation.
+**Date:** 2026-09-20 (status updated 2026-10-07)
 **Companions:** [platform-vision.md](platform-vision.md) · [domain-model.md](domain-model.md) §2.2 · [multi-tenancy.md](multi-tenancy.md) · [authorization.md](authorization.md) · [product-roadmap.md](product-roadmap.md) Phase 6
 
 ---

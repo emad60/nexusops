@@ -28,12 +28,22 @@ notification, and deploy → step logs → rollback.
   user, never a tenant); roles are per-organization; enforcement is three
   independent nets — a SQLAlchemy session guard that refuses scope-less writes, a
   row-stamping flush hook, and PostgreSQL row-level security behind a
-  least-privilege `nexusops_app` role. WebSocket sockets, worker jobs, Redis
-  frames, search, audit rows, secrets and agent/node calls are all org-scoped
+  least-privilege `nexusops_app` role (the schema is owned by `nexusops_owner`,
+  which runs migrations and never serves traffic). WebSocket sockets, worker jobs,
+  Redis frames, search, audit rows, secrets and agent/node calls are all org-scoped
   (`docs/multi-tenancy.md`).
 - **RBAC + audit log** — DB-backed permission registry with custom roles
   (`require_permission(...)` dependencies) and a full audit trail of mutations,
   each row attributed to the organization it happened in.
+- **Node operations control plane** — whitelisted node actions (`container
+  start|stop|restart|remove`, `logs.tail`) are enqueued through
+  `POST /api/v1/operations` under an existing permission codename, then claimed and
+  reported by an enrolled node through a compare-and-set queue bound to one
+  `(node, organization)` — no `node.execute`, no push tunnel
+  (`docs/node-agent-architecture.md` §5, `docs/authorization.md`). Scope note: this
+  is the **control plane**; nothing hands an agent its pending operation ids yet, and
+  a type whose capability enrollment cannot guarantee is refused
+  `409 NODE_CAPABILITY_UNVERIFIED` rather than dispatched unverified.
 - **Operations dashboard** — fleet counters plus a live event feed on the `global`
   WebSocket channel. Note: there is no fleet-wide metrics history endpoint yet, so the
   dashboard charts nothing; per-server timeseries live on each server's detail page.
@@ -191,11 +201,12 @@ tenancy model as built — org resolution, the session guard, PostgreSQL RLS and
 - **Change `POSTGRES_PASSWORD`** before first start — compose refuses to boot without
   it, and the seeded dev admin password is intentionally only created by `make seed`.
 - **Set `POSTGRES_APP_PASSWORD` (and `POSTGRES_APP_USER`) before the first start.**
-  The stack uses two database roles: `POSTGRES_USER`/`POSTGRES_PASSWORD` is the owner
-  that owns the schema and runs migrations, while the runtime connects as
-  `nexusops_app` — `NOSUPERUSER NOBYPASSRLS`, not the owner — so row-level security
-  actually binds. The migration provisions that role and its password from these
-  variables, so set them *before* `make up`; pointing the runtime at the owner role
+  The stack uses two database roles: `POSTGRES_USER`/`POSTGRES_PASSWORD` defaults to
+  `nexusops_owner` — the owner that owns the schema and is the only role that runs
+  migrations — while the runtime connects as `nexusops_app` — `NOSUPERUSER
+  NOBYPASSRLS`, owning no tenant table — so row-level security actually binds. The
+  migration provisions that role and its password from these variables, so set them
+  *before* `make up`; pointing the runtime at the owner role
   would silently drop the database-level tenancy net, which is why the application
   refuses to start against an owner DSN (`backend/app/core/config.py`,
   `rls_enforced`).

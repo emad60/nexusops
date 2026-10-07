@@ -1,8 +1,14 @@
 # Node & Agent Architecture
 
-**Status:** Proposal for review — not yet approved for implementation.
-**Date:** 2026-09-20
+**Status:** Phase 1 shipped (§5), target design for the rest — see §5.4.
+**Date:** 2026-09-20 (status updated 2026-10-07)
 **Companions:** [platform-vision.md](platform-vision.md) · [domain-model.md](domain-model.md) · [multi-tenancy.md](multi-tenancy.md) · [authorization.md](authorization.md)
+
+The **operations control plane** (§5 — creation, claim, result, cancel, expiry) is
+implemented and tested: that part is Phase 1, not a proposal. Everything else here —
+enrollment v2, the heartbeat v2 additions, per-node capability advertisement, delivery
+of operations to the agent, versioning/self-update and the install UX — is the target
+design for Phase 2/3 and is **not** built. §5.4 states that boundary explicitly.
 
 ---
 

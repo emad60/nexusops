@@ -9,7 +9,7 @@ services:
     image: postgres:17-alpine
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-nexusops}
-      POSTGRES_USER: ${POSTGRES_USER:-nexusops}
+      POSTGRES_USER: ${POSTGRES_USER:-nexusops_owner}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
     volumes:
       - pgdata:/var/lib/postgresql/data
@@ -48,7 +48,7 @@ services:
     environment:
       # The runtime connects as the RLS-enforced application role; only the
       # migration step (run by this container's entrypoint) uses the owner.
-      MIGRATION_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-nexusops}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-nexusops}
+      MIGRATION_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-nexusops_owner}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-nexusops}
       REDIS_URL: redis://redis:6379/0
       SMTP_HOST: mailpit
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers ${API_WORKERS:-2} --proxy-headers
@@ -70,7 +70,7 @@ services:
       context: ./backend
     env_file: .env
     environment:
-      MIGRATION_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-nexusops}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-nexusops}
+      MIGRATION_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-nexusops_owner}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-nexusops}
       REDIS_URL: redis://redis:6379/0
       SMTP_HOST: mailpit
       RUN_MIGRATIONS_ON_START: "false"
@@ -97,7 +97,7 @@ services:
       context: ./backend
     env_file: .env
     environment:
-      MIGRATION_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-nexusops}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-nexusops}
+      MIGRATION_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-nexusops_owner}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-nexusops}
       REDIS_URL: redis://redis:6379/0
       SMTP_HOST: mailpit
       RUN_MIGRATIONS_ON_START: "false"

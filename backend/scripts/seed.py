@@ -621,4 +621,16 @@ if __name__ == "__main__":
             file=sys.stderr,
         )
         raise SystemExit(2)
-    raise SystemExit(asyncio.run(seed()))
+
+    async def _seeded() -> int:
+        # Same short-lived-loop trap as the Celery tasks: the events the seed
+        # commits are published from an after_commit hook, so the loop has to
+        # outlive its own outbound frames (see event_bus.flush_pending_publishes).
+        from app.services.event_bus import flush_pending_publishes
+
+        try:
+            return await seed()
+        finally:
+            await flush_pending_publishes()
+
+    raise SystemExit(asyncio.run(_seeded()))

@@ -58,7 +58,7 @@ def _read_dot_env() -> dict[str, str]:
 _DOT_ENV = _read_dot_env()
 _PG_PORT = _DOT_ENV.get("NEXUSOPS_POSTGRES_PORT", "5433")
 _REDIS_PORT = _DOT_ENV.get("NEXUSOPS_REDIS_PORT", "6390")
-_PG_USER = _DOT_ENV.get("POSTGRES_USER", "nexusops")
+_PG_USER = _DOT_ENV.get("POSTGRES_USER", "nexusops_owner")
 _PG_PASSWORD = _DOT_ENV.get("POSTGRES_PASSWORD", "")
 _ADMIN_DB = _DOT_ENV.get("POSTGRES_DB", "postgres")
 

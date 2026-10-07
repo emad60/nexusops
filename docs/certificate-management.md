@@ -1,7 +1,7 @@
 # Certificate Management — NexusOps
 
-**Status:** Proposal for review — not yet approved for implementation.
-**Date:** 2026-09-21
+**Status:** Target design for Phase 2+ — nothing in this subsystem is implemented yet.
+**Date:** 2026-09-21 (status updated 2026-10-07)
 **Companions:** [platform-vision.md](platform-vision.md) · [domain-model.md](domain-model.md) · [multi-tenancy.md](multi-tenancy.md) · [authorization.md](authorization.md) · [node-agent-architecture.md](node-agent-architecture.md) · [domain-routing.md](domain-routing.md)
 
 ## 1. Scope and current state

@@ -40,7 +40,7 @@ class Settings(BaseSettings):
     #: The **owner** role: it owns every table and is the only role that runs
     #: migrations. It bypasses RLS by virtue of ownership, which is exactly why
     #: it never serves request traffic.
-    postgres_user: str = "nexusops"
+    postgres_user: str = "nexusops_owner"
     postgres_password: str = "change-me-postgres"  # noqa: S105 - dev fallback, override via env
     #: The **application** role: the only role the API/workers connect as. It
     #: owns nothing, has no BYPASSRLS, and is filtered by the tenant policies.

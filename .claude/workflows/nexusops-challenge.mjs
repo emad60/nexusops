@@ -47,7 +47,7 @@ const RESEARCH_COMMON = [
 ].join('\n')
 
 const CHALLENGE_COMMON = [
-  'You are a hostile reviewer for the NexusOps platform proposal (docs in /home/emad/projects/nexusops/docs).',
+  'You are a hostile reviewer for the NexusOps platform proposal (docs in the repository docs/ directory).',
   'The proposal: multi-tenant orgs, session-guard tenancy, agent-pull operations, whitelisted op types,',
   'DNS-01-first certificates, image-based deploys first. Read the spine docs (platform-vision.md,',
   'domain-model.md, multi-tenancy.md, authorization.md, product-roadmap.md) plus the docs named in',

@@ -123,17 +123,18 @@ agent claim/result path, and delivery is written out in
 
 | Suite | Result |
 |---|---|
-| `pytest` (whole backend) | **481 passed** |
+| `pytest` (whole backend) | **483 passed** (481 + the 2 drain tests) |
 | `tests/integration/test_tenant_isolation.py` | **24 passed** |
 | `tests/integration/test_operations.py` | **19 passed** (was 16) |
 | `tests/integration/test_tenant_concurrency.py` | **9 passed** (new) |
 | `tests/integration/test_migration_drift.py` | **2 passed** (new) |
 | `tests/unit/test_operation_registry.py` | **8 passed** (new) |
 | `tests/unit/test_ws_hub.py` | **9 passed** (was 8) |
+| `tests/unit/test_event_publish_drain.py` | **2 passed** (new — integrity pass) |
 | frontend `vitest` | **176 passed** (32 files) |
-| `ruff format --check` / `ruff check` / `mypy app` | clean (170 files / 125 sources) |
+| `ruff format --check` / `ruff check` / `mypy app` | clean (171 files / 125 sources) |
 | `tsc --noEmit` / `eslint --max-warnings=0` | clean |
-| Playwright journey | **11 passed** on a clean `make e2e` stack |
+| Playwright journey | **11 passed** — from a **removed volume**, i.e. a database built from zero |
 
 Added in the first pass:
 
@@ -251,6 +252,32 @@ Added in the hardening pass (P1–P5 of the hardening brief):
 6. **`ENVIRONMENT=test` is required for deterministic e2e seeding** and that
    coupling is now documented in `docker-compose.e2e.yml` and the Makefile rather
    than being an undocumented precondition.
+7. **RESOLVED (integrity pass, 2026-10-07): every worker-published event frame was
+   being dropped, so no monitor or incident notification ever reached Redis.**
+   `event_bus` cannot publish inside the transaction (the row is not visible yet,
+   and a rollback must announce nothing), so its `after_commit` hook schedules the
+   publish as a task on the running loop. A Celery task ran its coroutine under
+   `asyncio.run`, which closes that loop — and cancels what is still pending — the
+   instant the coroutine returns, so a task whose last statement is a commit lost
+   its   own frame. Proven by an A/B probe against a live worker: the identical publish
+   committed with no further `await` never reached Redis (`[]`), while the same
+   commit with one extra loop turn delivered it (`['MONITOR_DOWN']`) and produced a
+   `SENT` delivery plus the email. `event_bus.flush_pending_publishes()` now drains
+   the in-flight frames (bounded, and it logs any that do not make it) and
+   `run_async` / `scripts/seed.py` await it before their loop closes;
+   `tests/unit/test_event_publish_drain.py` pins it. This was invisible to the suite
+   and to the e2e run while the e2e database was a recycled volume — the stale
+   delivery rows were re-sent by the retry sweep, which is exactly why the fresh
+   database (no rows to retry) failed test 5 and the recycled one passed.
+8. **An organisation or user hard-delete is not implemented, and would be blocked
+   if it were.** `Base.metadata.sorted_tables` warns about a real FK cycle
+   (`organizations → users → roles → organizations`), which only matters to
+   `create_all`/`drop_all` — nothing in the repo calls either, teardown TRUNCATEs
+   and migrations are explicit Alembic ops. The concrete consequence measured on
+   the throwaway stack: `DELETE FROM organizations` first trips the append-only
+   audit trigger (`audit_logs is append-only (attempted DELETE)`) and would then
+   meet `users.role_id → roles.id ON DELETE RESTRICT`. Whoever builds deletion has
+   to handle both deliberately.
 
 ## 8. Position
 
@@ -258,9 +285,19 @@ This is a foundation, not a product. The hardening pass closed the two most
 serious open items — the WebSocket event-stream defect (root-caused, fixed, with
 a deterministic reconnect test) and the unenforced capability gate (now a
 fail-closed boundary) — added a tenant-concurrency suite and a model/migration
-drift test, and repaired four real schema defects the drift test surfaced. What
-remains open is Phase 2 by design: per-node capability advertisement, operations
-*delivery* to the agent (which changes the heartbeat contract), and the deferred
-renames. The honest summary is that the *tenant boundary* is done and
-well-evidenced, the *operations surface* is a fully-gated control plane still
-waiting for its agent, and no Phase 2 work was started.
+drift test, and repaired four real schema defects the drift test surfaced.
+
+The integrity pass that followed (2026-10-07) re-ran everything against a database
+built from zero and **found a fifth, worse defect**: no worker-published event frame
+reached Redis, so monitor/incident notifications never left the process (item 7 in
+§7). It hid behind a recycled e2e volume — the retry sweep re-sent the previous
+run's stale delivery rows, which satisfied the assertion — so the fresh database was
+what surfaced it. That, plus the WebSocket origin fix, is the whole reason `make e2e`
+is now run from a removed volume rather than "a stack that happens to be up".
+
+What remains open is Phase 2 by design: per-node capability advertisement,
+operations *delivery* to the agent (which changes the heartbeat contract), the
+deferred renames, and organisation/user deletion (item 8). The honest summary is
+that the *tenant boundary and the event spine* are done and evidenced end to end,
+the *operations surface* is a fully-gated control plane still waiting for its agent,
+and no Phase 2 work was started.

@@ -15,11 +15,12 @@ const SPINE = [
   '- docs/multi-tenancy.md (X-Org-Id resolution, session guard, channels, agents, IDOR suite)',
   '- docs/authorization.md (registry changes, 5 roles, grants design, NO node.execute)',
   '',
-  'Then read .claude/workflows/findings.json - structured subsystem reports from an earlier',
-  'analysis phase (11 reports; read the ones relevant to your doc). Current-state claims in',
-  'your doc must agree with those reports (they carry path:line evidence).',
+  'Current-state claims must come from the repository itself: the docs above and the code, each',
+  'cited as path:line. The pre-Phase-1 findings.json this list used to point at (11 subsystem',
+  'reports) was removed - it described the codebase before multi-tenancy and is not current',
+  'evidence for anything. Recover it from git history if you need the historical comparison.',
   '',
-  'Repo: /home/emad/projects/nexusops. If you need to verify a specific code detail, orient',
+  'Repo: the repository root you are working in. If you need to verify a code detail, orient',
   'with the graphify graph first: $(cat graphify-out/.graphify_python) -m graphify query "question" --budget 1500',
   '',
   'Rules for the doc you write:',
@@ -38,9 +39,9 @@ const SPINE = [
 
 const VERIFY_RULES = [
   'You are auditing one architecture document for the NexusOps multi-tenant redesign.',
-  'Repo: /home/emad/projects/nexusops.',
-  'Read: the doc named below, the four spine docs (docs/platform-vision.md, docs/domain-model.md,',
-  'docs/multi-tenancy.md, docs/authorization.md), and .claude/workflows/findings.json.',
+  'Repo: the repository root you are working in.',
+  'Read: the doc named below and the four spine docs (docs/platform-vision.md, docs/domain-model.md,',
+  'docs/multi-tenancy.md, docs/authorization.md). Ground every current-state claim in the repo.',
   'Check and report issues:',
   '1. CONSISTENCY: entity names, phase numbering, permission codenames, org-scoping statements must',
   '   match the spine docs exactly. Flag any contradiction.',
@@ -250,7 +251,7 @@ const results = await pipeline(
     return agent(
       [
         'You are fixing verified issues in an architecture document for the NexusOps multi-tenant redesign.',
-        'Repo: /home/emad/projects/nexusops. The doc ' + d.file + ' was audited against the spine docs',
+        'Repo: the repository root you are working in. The doc ' + d.file + ' was audited against the spine docs',
         '(docs/platform-vision.md, docs/domain-model.md, docs/multi-tenancy.md, docs/authorization.md)',
         'and the repo. Fix EVERY issue below by editing ' + d.file + ' ONLY. Do not modify any other file.',
         'For claimed spine-doc contradictions, re-read the spine doc and fix this doc to match it.',

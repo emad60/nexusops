@@ -35,10 +35,25 @@ export interface Bootstrap {
   freshDatabase: boolean;
 }
 
+/** One full window of the login limiter (10 requests / 60s / IP). */
+const RATE_LIMIT_WINDOW_MS = 65_000;
+
 async function bootstrapVia(request: APIRequestContext): Promise<Bootstrap> {
-  const login = await request.post(`${EDGE}/api/v1/auth/login`, {
-    data: { email: ADMIN.email, password: ADMIN.password },
-  });
+  const attemptLogin = () =>
+    request.post(`${EDGE}/api/v1/auth/login`, {
+      data: { email: ADMIN.email, password: ADMIN.password },
+    });
+
+  let login = await attemptLogin();
+  if (!login.ok() && login.status() === 429) {
+    // The auth limiter is **fail-closed** and keyed per IP, so every request in
+    // the run shares one bucket. A 429 means "too many logins", NOT "no such
+    // account": reading it as the latter would send the harness down the
+    // bootstrap-registration path, which a seeded instance always refuses
+    // (INVITATION_REQUIRED). Wait out one window and retry instead.
+    await new Promise((resolve) => setTimeout(resolve, RATE_LIMIT_WINDOW_MS));
+    login = await attemptLogin();
+  }
   if (login.ok()) {
     return { token: ((await login.json()) as { access_token: string }).access_token, freshDatabase: false };
   }
@@ -48,7 +63,10 @@ async function bootstrapVia(request: APIRequestContext): Promise<Bootstrap> {
   const reg = await request.post(`${EDGE}/api/v1/auth/register`, {
     data: { email: ADMIN.email, password: ADMIN.password, full_name: ADMIN.full_name },
   });
-  expect(reg.ok(), `bootstrap register failed: ${reg.status()} ${await reg.text()}`).toBeTruthy();
+  expect(
+    reg.ok(),
+    `bootstrap register failed (login said ${login.status()}): ${reg.status()} ${await reg.text()}`,
+  ).toBeTruthy();
   const retry = await request.post(`${EDGE}/api/v1/auth/login`, {
     data: { email: ADMIN.email, password: ADMIN.password },
   });

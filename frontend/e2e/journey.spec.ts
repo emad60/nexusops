@@ -123,10 +123,11 @@ test.describe.serial("NexusOps end-to-end journey", () => {
         // Seeded database: signup is invite-only by design. Exercise the invite
         // path instead — create a user as admin, take its one-time password,
         // sign out, then register-login as the new user.
-        await page.getByLabel("Email").fill(ADMIN.email);
-        await page.getByLabel("Password", { exact: true }).fill(ADMIN.password);
-        await page.getByRole("button", { name: /sign in/i }).click();
-        await expect(page).toHaveURL("/");
+        // Reuse the retrying helper: on a cold stack the login form can be
+        // re-rendered while the first paint settles, and a single fill+click
+        // then submits nothing. `formLogin` re-fills and honors the
+        // fail-closed login limiter instead of racing it.
+        await formLogin(page);
 
         await page.goto("/settings/users");
         await page.getByRole("button", { name: /add user|new user|invite/i }).click();

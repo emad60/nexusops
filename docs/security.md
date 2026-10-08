@@ -133,6 +133,32 @@ and the audit trail's append-only trigger (verified to still reject `UPDATE` and
 `DELETE` after the tenant column was added). The residual risks that remain are
 listed under Known limitations.
 
+## Third security review — projects, environments & secrets (2026-10-08)
+
+An adversarial pass over the Phase 2 change set: IDOR, cross-project and
+cross-organization access, project/environment confusion, secret scope confusion,
+plaintext leakage, rollback authorization, concurrent rotation, raw-SQL paths, RLS
+bypass, worker/WebSocket scope, and privilege escalation. It was written against
+the delivered code, not the plan.
+
+| # | Surface | Finding | Status |
+| --- | --- | --- | --- |
+| 1 | Environment routes | Every environment route resolves `project_id` **and** `environment_id` inside the active organization before use; a foreign or mismatched pair is a 404 identical to a random uuid. Knowing a project uuid or an environment uuid grants nothing. | Closed — regression tests in `test_phase2_environments.py` (IDOR, cross-org) |
+| 2 | Secret scope | Creating an environment-scoped secret validates that the environment belongs to the given project in the same organization; the model CHECK makes "environment-scoped without project" unrepresentable. | Closed — `test_phase2_secrets.py` (scope confusion, cross-tenant) |
+| 3 | Rotation race | `rotate_secret`/`rollback_secret` take the secret row `FOR UPDATE` and insert version `parent.version + 1` under the uq `(secret_id, version)` constraint, so two concurrent rotations serialize: distinct version numbers, no lost update, exactly one current version. | Closed — concurrency test drives two real concurrent rotations |
+| 4 | Rollback authorization | Rollback requires `secret.write` and only accepts a version that exists **for that secret**; it appends a new version rather than rewriting history, so it can never destroy the pre-rollback value. | Closed |
+| 5 | Plaintext leakage | No secret-bearing schema has a value field; project/environment detail returns references and key **names** only; resolution runs inside the deployment's worker and never returns through a response. The SPA renders no value column anywhere, including version history. | Closed — API tests assert the response bodies carry no value; SPA tests assert no value column |
+| 6 | Secret consumption vs metadata | `secret.read` (metadata) stays separate from the deploy chain. No endpoint resolves a secret on request. | Closed — but see the limitation below on grant narrowing |
+| 7 | Raw SQL / RLS | `secret_versions` carries `org_id` with the standard tenant + system policies and is in the catalog test's scope. The tenant-scoped SQL uses ORM selects (the tenancy guard rejected a Core `select(1)` probe during development, confirming the guard applies to the new code paths). | Closed — catalog + raw-SQL probes unchanged and green |
+| 8 | Environment type | `environment_type` is descriptive only. Nothing in the authorization path reads it. | Closed by construction |
+| 9 | Config as a channel | Config is a flat, bounded `string → string` map; malformed secret refs are rejected; nothing in config is interpolated or executed. | Closed |
+
+**Residual risk carried forward:** resource-level grants do not exist yet, so a
+principal holding `deployment.create` may deploy *any* environment of its own
+organization, and therefore can cause any referenced secret of that organization to
+be consumed by a deployment. That is a known, documented gap (roadmap Phase 7) —
+not an accidental hole — and it is why resolution is audited per reference.
+
 ## Transport and headers
 
 - Single nginx edge terminates traffic (`nginx/default.conf.template`): `server_tokens off`, HSTS emitted in production, `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, a strict referrer policy, and a restrictive CSP for the SPA
@@ -146,6 +172,8 @@ listed under Known limitations.
 - **Never returned after creation.** Agent enrollment tokens, API keys and notification-channel credentials are shown once in the UI with an explicit "stored only as a hash" notice; only a salted hash is persisted.
 - `digest_of` (`backend/app/core/security.py`) renders a short, server-keyed HMAC digest for change-detection UI — a leaked digest is useless without the app secret, unlike a plain SHA-256.
 - Secret *values* never appear in logs, audit records, or API responses; the redaction layer (`redact_mapping` in `backend/app/core/logging.py`) scrubs sensitive-named keys from structured payloads before they are persisted or logged. Caveat: it recurses dicts but not lists (platform-security-model.md S8).
+- **Scopes and history (Phase 2).** A secret is org-, project- or environment-scoped, resolved most-specific-first (environment > project > organization). Rotation appends an immutable version; rollback re-appends an older value as a *new* version, so history is never rewritten or deleted. Version history exposes version numbers, digests and actors only. Deleting a secret cascades its history — the one destructive secret operation, gated by `secret.write` and audited.
+- **Fail-closed resolution.** An unresolvable reference fails the deployment before its first step instead of substituting an empty value; the failure reason names the key, never the value.
 - Probe headers on uptime monitors are echoed back **masked** (`mask_sensitive_headers` in `backend/app/schemas/monitor.py`) and monitor URL query strings are redacted in responses (`_redact_url_query`).
 - Notification channels expose only a pre-masked `display_target` (e.g. `sm******@example.com`, path-stripped URLs) — `backend/app/schemas/channel.py`.
 - `scripts/generate_secrets.sh` refuses to overwrite existing real values unless `--force` is passed explicitly.
@@ -223,6 +251,8 @@ report accompanying this release.
 - The compose stack ships for lab/self-hosted use: TLS termination, external WAF, and SMTP relay hardening are deployment concerns (documented in `docs/deployment.md`).
 - Rate limiting is per-IP at the application layer; a reverse proxy must forward real client IPs (`X-Forwarded-For` handling in `backend/app/middleware/`).
 - Notification-channel and secret values are masked but the database stores them encrypted-at-rest only via disk-level encryption of the host volume; application-level envelope encryption is future work.
+- **Deploying is not grant-narrowed.** `deployment.create` authorizes a deployment into any environment of the organization; resource-level grants ("Ali deploys staging but not production") are a later phase. Until then, permission to deploy implies permission to consume the secrets that environment references.
+- **Secret history is unbounded.** There is no prune policy for `secret_versions` — retention beats an arbitrary window for now; a maintenance job is a follow-up (secrets-architecture.md §3).
 - **The RLS-exempt class has no database-level tenancy net.** `organizations`, `memberships`, `api_keys`, `agent_credentials` and `roles` are filtered only in the application, because each is legitimately read before an organization is known. A stray query or guard bug in those five is cross-tenant by definition; the `system_scope` allowlist and the catalog test are the fences, not the database.
 - **Redis is control-plane-internal.** Container logs, metric frames, deployment logs and event frames from every organization share one pub/sub; the hub drops frames whose organization is not the socket's, but compromise of Redis itself is cross-tenant visibility. The channels are not org-prefixed by design (`docs/multi-tenancy.md` §0 delta 2).
 - **A live WebSocket keeps the permission set it connected with.** A suspended membership or a changed role is not visible until the socket reconnects (HTTP requests are unaffected — the org check runs per request). Bounded connection TTL plus drop-on-revocation is the designed follow-up.

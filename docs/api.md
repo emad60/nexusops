@@ -569,10 +569,26 @@ sweep, `nx.expire_operations`, every 60s).
 
 | Method | Path | Permission | Notes |
 |---|---|---|---|
-| GET | `/secrets` · `/secrets/{secret_id}` | `secret.read` | metadata only |
-| POST | `/secrets` | `secret.write` | value encrypted at rest (Fernet), never echoed |
-| POST | `/secrets/{secret_id}/rotate` | `secret.write` | |
-| DELETE | `/secrets/{secret_id}` | `secret.write` | 204 |
+| GET | `/secrets` | `secret.read` | metadata only; filters `q`, `project_id`, `environment_id` |
+| GET | `/secrets/{secret_id}` | `secret.read` | metadata only |
+| GET | `/secrets/{secret_id}/versions` | `secret.read` | append-only history: version, digest, actor, timestamp — never a value |
+| POST | `/secrets` | `secret.write` | value encrypted at rest (Fernet), never echoed. Scope: `environment_id` (implies `project_id`) > `project_id` > organization |
+| POST | `/secrets/{secret_id}/rotate` | `secret.write` | appends a version and makes it current |
+| POST | `/secrets/{secret_id}/rollback` | `secret.write` | body `{"version": N}`; re-appends that version's value as a **new** version — nothing is rewritten or deleted |
+| DELETE | `/secrets/{secret_id}` | `secret.write` | 204; cascades the version history |
+
+No endpoint in this module returns a value. `secret.read` is metadata access; it
+is **not** the capability that lets a deployment consume a secret — that is
+`deployment.create` on the trigger route.
+
+```bash
+# Rotate, then roll back one version — history keeps both.
+curl -X POST "$API/secrets/$SECRET_ID/rotate" -H "Authorization: Bearer $TOKEN" \
+  -H "X-Org-Id: $ORG" -H 'Content-Type: application/json' \
+  -d '{"value":"new-password"}'
+curl -X POST "$API/secrets/$SECRET_ID/rollback" -H "Authorization: Bearer $TOKEN" \
+  -H "X-Org-Id: $ORG" -H 'Content-Type: application/json' -d '{"version":1}'
+```
 
 ### Docker hosts & containers — `docker_hosts.py`, `containers.py`
 
@@ -590,7 +606,11 @@ sweep, `nx.expire_operations`, every 60s).
 | DELETE | `/containers/{container_id}` | `container.remove` | destructive; requires `?confirm=<exact name>` |
 | GET | `/containers/{container_id}/logs` | `container.logs` | cursor-paged history; `?level=`, `?q=` |
 
-### Delivery: projects, applications, deployments — `projects.py`, `deployments.py`
+### Delivery: projects, applications, environments, deployments — `projects.py`, `deployments.py`
+
+**Environments are project-scoped (Phase 2).** There is no
+`/applications/{id}/environments` route: an environment belongs to its project, and
+an application deploys *into* one of its project's environments.
 
 | Method | Path | Permission |
 |---|---|---|
@@ -600,9 +620,10 @@ sweep, `nx.expire_operations`, every 60s).
 | POST | `/projects/{project_id}/applications` | `project.manage` |
 | GET | `/projects/{project_id}/applications` · `/{application_id}` | `project.read` |
 | PATCH · DELETE | `/projects/{project_id}/applications/{application_id}` | `project.manage` |
-| POST | `/applications/{application_id}/environments` | `project.manage` |
-| GET | `/applications/{application_id}/environments` · `/{environment_id}` | `project.read` |
-| PATCH · DELETE | `/applications/{application_id}/environments/{environment_id}` | `project.manage` |
+| POST | `/projects/{project_id}/environments` | `project.manage` |
+| GET | `/projects/{project_id}/environments` | `project.read` |
+| GET | `/projects/{project_id}/environments/{environment_id}` | `project.read` |
+| PATCH · DELETE | `/projects/{project_id}/environments/{environment_id}` | `project.manage` |
 | GET | `/deployments` | `deployment.read` |
 | GET | `/applications/{application_id}/deployments` | `deployment.read` |
 | POST | `/applications/{application_id}/deployments` | `deployment.create` (20/min/IP) → `202 Accepted` |
@@ -610,6 +631,38 @@ sweep, `nx.expire_operations`, every 60s).
 | POST | `/deployments/{deployment_id}/cancel` | `deployment.cancel` |
 | POST | `/deployments/{deployment_id}/rollback` | `deployment.rollback` → `202 Accepted` |
 | GET | `/deployments/{deployment_id}/logs` | `deployment.read` (cursor-paged) |
+
+#### Configuration layering
+
+`projects.config` is the project's base configuration; each environment's `config`
+holds **only its overrides**. Both are flat `string → string` maps (≤ 100 keys,
+≤ 4096 chars per value) and may reference secrets as `${secret:KEY}`. The merge is
+**shallow**: a key the environment defines replaces the project's value for that
+key, and every other project key is inherited unchanged. The environment **detail**
+route returns all three layers separately so a client can show provenance:
+
+```jsonc
+// GET /projects/{project_id}/environments/{environment_id}
+{
+  "id": "…", "project_id": "…", "name": "production", "slug": "production",
+  "environment_type": "PROD",              // DEV | STAGING | PROD (descriptive only)
+  "server_id": null, "healthcheck_path": "/healthz", "auto_deploy": true,
+  "config": { "LOG_LEVEL": "debug" },                                  // overrides
+  "project_config": { "LOG_LEVEL": "info", "REGION": "eu" },          // base
+  "effective_config": { "LOG_LEVEL": "debug", "REGION": "eu" },       // merged
+  "secret_references": ["DATABASE_URL"],    // key NAMES only — never values
+  "application_count": 2, "deployment_count": 14, "secret_count": 3
+}
+```
+
+`environment_type` accepts `dev`/`staging`/`prod` (and the `development`/`stage`/
+`production` spellings) case-insensitively. It is **descriptive**: authorization is
+permission-based, never derived from the environment kind.
+
+Secret resolution at deploy time prefers the most specific scope —
+**environment > project > organization** — and **fails closed**: an unresolvable
+reference fails the deployment before any step runs rather than substituting an
+empty value.
 
 ### Monitoring: monitors, incidents — `monitors.py`, `incidents.py`
 

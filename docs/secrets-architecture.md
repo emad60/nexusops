@@ -1,9 +1,11 @@
 # Secrets Architecture
 
-**Status:** §1 shipped (Fernet store, metadata-only reads, deploy-time resolution); the
-per-node delivery and rotation target for later phases is a proposal — not yet approved
-or built.
-**Date:** 2026-09-20 (status updated 2026-10-07)
+**Status:** §1 shipped (Fernet store, metadata-only reads, deploy-time resolution).
+**Phase 2 shipped §2 (org/project/environment scope), §3 (SecretVersion history,
+transactional rotation, non-destructive rollback) and the fail-closed policy of
+§5.** Still proposal, not built: per-node delivery (§7), the per-org DEK envelope
+(§6), and the §3 prune job.
+**Date:** 2026-09-20 (status updated 2026-10-08)
 **Reads best after:** [domain-model.md](domain-model.md) §2.5 · [multi-tenancy.md](multi-tenancy.md) §3, §4 · [authorization.md](authorization.md) §3
 
 ---
@@ -29,27 +31,52 @@ deploy-time reference resolution. All cites verified against the working tree.
 
 | Column | Purpose |
 |---|---|
-| `project_id` (nullable FK, CASCADE) | Only scope dimension today: NULL = global, set = project-scoped |
-| `key` | Grammar `^[A-Z][A-Z0-9_.-]{0,158}[A-Z0-9]$` (`schemas/secret.py:19`) |
-| `ciphertext` | Fernet token; overwritten in place on rotation |
-| `secrets.version` | Integer counter starting 1, `+= 1` per rotate (`secret_service.py:181-224`) |
-| `digest`, `description` | Change-detection + human note |
-| `rotated_at`, `rotated_by_id`, `created_by_id` | Lineage of the *current* value only |
+| `org_id` | Tenant owner (Phase 1) |
+| `project_id` (nullable FK, CASCADE) | Scope level 2 — NULL = not project-scoped |
+| `environment_id` (nullable FK, CASCADE) | Scope level 3 — set implies `project_id` (CHECK `ck_secrets_environment_requires_project`) |
+| `key` | Grammar `^[A-Z][A-Z0-9_.-]{0,158}[A-Z0-9]$` (`schemas/secret.py`) |
+| `ciphertext`, `digest` | The **current** value (denormalized pointer to a `secret_versions` row) |
+| `version` | The current version number; `>= 1` |
+| `rotated_at`, `rotated_by_id`, `created_by_id` | Lineage of the *current* value |
 
-Uniqueness: `uq_secrets_project_key` on `(project_id, key)` plus partial unique
-`ux_secrets_global_key` on `key WHERE project_id IS NULL`
-(`backend/app/models/secrets.py:34-40`). Consequence: **global secrets form one
-platform-wide key namespace** — two orgs cannot both define a global `STRIPE_KEY`,
-and global secrets resolve into every project's deploys.
+Uniqueness — one partial unique index per scope level, because NULLs are distinct
+in a plain UNIQUE:
+
+| Index | Columns | Predicate |
+|---|---|---|
+| `ux_secrets_org_scope_key` | `(org_id, key)` | `project_id IS NULL` |
+| `ux_secrets_project_scope_key` | `(org_id, project_id, key)` | `project_id IS NOT NULL AND environment_id IS NULL` |
+| `ux_secrets_environment_scope_key` | `(org_id, environment_id, key)` | `environment_id IS NOT NULL` |
+
+Consequence: the key namespace is **per organization** — the pre-Phase-2
+platform-wide global namespace is gone, and Org A's `STRIPE_KEY` never collides
+with, nor resolves for, Org B.
+
+`secret_versions` (append-only; migration `b2c3d4e5f6a7`):
+
+| Column | Purpose |
+|---|---|
+| `org_id` | Tenant owner — RLS-covered like every other tenant table |
+| `secret_id` (FK CASCADE) | Parent secret |
+| `version` | uq `(secret_id, version)` |
+| `ciphertext` | That version's Fernet token — never rewritten |
+| `digest` | Per-version change-detection digest |
+| `created_by_id`, `created_at` | Who created the version, when |
+
+The migration **backfills one version row per pre-existing secret** from its
+current value, so history starts complete rather than empty (values that were
+already overwritten cannot be invented).
 
 ### 1.3 API surface (metadata-only reads)
 
 | Route | Gate | Returns |
 |---|---|---|
-| `GET /secrets` | `secret.read` | Page of metadata: keys, versions, digests — never values |
+| `GET /secrets` | `secret.read` | Page of metadata: keys, versions, digests, scope — never values. Filters: `q`, `project_id`, `environment_id` |
 | `GET /secrets/{secret_id}` | `secret.read` | One secret's metadata |
-| `POST /secrets` | `secret.write` | Created metadata (201) |
-| `POST /secrets/{secret_id}/rotate` | `secret.write` | Updated metadata |
+| `GET /secrets/{secret_id}/versions` | `secret.read` | Append-only version history, newest first: version, digest, actor, timestamp |
+| `POST /secrets` | `secret.write` | Created metadata (201). Scope from the payload: `environment_id` > `project_id` > organization |
+| `POST /secrets/{secret_id}/rotate` | `secret.write` | Updated metadata — appends a version |
+| `POST /secrets/{secret_id}/rollback` | `secret.write` | Updated metadata — appends the target version's value as a **new** version |
 | `DELETE /secrets/{secret_id}` | `secret.write` | 204 |
 
 Gates are `require_permission` on `backend/app/api/v1/secrets.py:29,48,59,80,91`.
@@ -59,28 +86,34 @@ Gates are `require_permission` on `backend/app/api/v1/secrets.py:29,48,59,80,91`
 metadata-only reads (`backend/tests/integration/test_secrets.py:28-51`) and
 version-bump + digest change on rotate (`test_secrets.py:52-66`).
 
-### 1.4 Deploy-time resolution today
+### 1.4 Deploy-time resolution (shipped)
 
-References: environment config values may contain `${secret:KEY}`; the resolver
-scans `environment.config` recursively for the pattern
-(`secret_service.py:265-274`) using `SECRET_REF_PATTERN`
-(`backend/app/schemas/secret.py:25`). The create-path validator rejects any
-value that contains `${secret:` unless it is exactly one full-value ref
-(`backend/app/schemas/environment.py:41-53`), caps config at 50 keys / 512
-chars/value (`environment.py:18-19`). It does **not** reject plaintext: a value
-with no `${secret:` marker is undetectable to that check and passes as is. Only
-the create path is validated — `EnvironmentUpdate` does not inherit
-`EnvironmentBase` and carries no config validator (`schemas/environment.py:60-67`),
-the PATCH route binds it (`api/v1/projects.py:263`), and `update_environment`
-copies config unvalidated (`project_service.py:515-516`). Raw values are accepted
-on both paths today; §8 states the target control.
+References: config values may contain `${secret:KEY}`. The resolver collects refs
+from the **effective** configuration — the project's `config` merged with the
+environment's overrides (`config_service.effective_config`) — and looks each key
+up at the most specific scope that defines it:
 
-**Grammar drift (current-state bug):** the save-time regex accepts
-`[A-Za-z0-9_]+` keys (`environment.py:20`) while the resolver regex demands
-uppercase-start `SECRET_KEY_PATTERN` keys (`secret.py:25`): a lowercase ref like
-`${secret:db_url}` passes save-time validation but never resolves; keys with
-`.`/`-` pass the resolver grammar but are rejected at config save. One grammar
-should win (§5).
+```
+environment scope  >  project scope  >  organization scope
+```
+
+`resolve_secrets_for_environment` (`secret_service.py`) runs inside the
+deployment's organization scope, so only the tenant's rows are visible. Every
+reference must resolve; otherwise `SecretResolutionError` aborts the deployment
+(§5).
+
+**Validation (shipped):** `config_service.validate_config` is applied on **both**
+the create and update paths (`EnvironmentCreate`/`EnvironmentUpdate`,
+`ProjectCreate`/`ProjectUpdate`). It enforces a flat `string → string` map, bounds
+it (≤ 100 keys, ≤ 4096 chars per value), and rejects any value containing
+`${secret:` that is not exactly one full-value reference. It cannot detect a
+plaintext value with no marker — §8 states that limit plainly.
+
+**Grammar (fixed):** one regex, `SECRET_REF_PATTERN` (`schemas/secret.py`), built
+from `SECRET_KEY_PATTERN`, is used by both save-time validation and the resolver.
+The pre-Phase-2 divergence (save-time `[A-Za-z0-9_]+` vs resolver uppercase) is gone:
+a ref that validates always resolves, and no valid resolver key is rejected at save
+time.
 
 ### 1.5 SILENT DEGRADE BUG — **FIXED (Phase 0)**
 
@@ -90,8 +123,8 @@ should win (§5).
 > first step (all steps `SKIPPED`) with an audited `secret.resolve_failed` row;
 > a successful resolution writes one `secret.resolve` audit row per reference
 > (key + version only). The table below is the pre-Phase-0 behavior, kept for
-> context; **layered scope (§2), SecretVersion (§3), node delivery (§7) and
-> per-org keys (§6) are still open.**
+> context. **Layered scope (§2) and SecretVersion history (§3) shipped in
+> Phase 2; node delivery (§7) and the per-org DEK envelope (§6) remain open.**
 
 Resolution used to degrade silently; deploys proceeded without credentials:
 
@@ -110,28 +143,28 @@ values live in `RunContext.secrets` (`deployment_runner.py:69-70`) in worker
 memory only and the runner logs only a count ("Injected N secret reference(s) as
 env vars", `deployment_runner.py:210`) — no leak, but also no real consumption.
 
-### 1.6 Current-state gap list
+### 1.6 Gap list (Phase 2 status)
 
-| Gap | Addressed in |
+| Gap | Status |
 |---|---|
-| ~~Silent degrade: unresolved → `""`, engine catch-all → `{}`~~ **fixed in Phase 0** | §5 |
-| No value history; rotation is destructive | §3 |
-| Global secrets = one platform-wide namespace, resolve into every project | §2 |
-| Resolution has no org filter; no per-secret authorization beyond the deploy gate | §2.1, §4 |
-| No audit row at resolution time | §4.1 |
-| Only the simulated runner consumes resolved values | §7 (real delivery), §5 (fail-closed) |
-| Two divergent ref grammars (save-time vs resolver) | §5 |
-| Env config validation covers create only; raw values pass both paths | §8 |
-| `ENCRYPTION_KEY` write-once, no rotation path | §6 |
-| Digest key derived from the global key | §6 |
+| Silent degrade: unresolved → `""`, engine catch-all → `{}` | **Fixed** (Phase 0) — §5 |
+| No value history; rotation is destructive | **Fixed** (Phase 2) — §3 |
+| Global secrets = one platform-wide namespace, resolve into every project | **Fixed** (Phase 2) — per-org scope indexes, §2 |
+| Resolution has no org filter; no per-secret authorization beyond the deploy gate | **Fixed** for the tenant filter (resolution runs in org scope); resource-level grants remain a later phase — §2.1, §4 |
+| No audit row at resolution time | Shipped in Phase 0 — §4.1 |
+| Only the simulated runner consumes resolved values | **Open** — real delivery is later-phase (§7) |
+| Two divergent ref grammars (save-time vs resolver) | **Fixed** (Phase 2) — §1.4 |
+| Env config validation covers create only; raw values pass both paths | **Fixed** (Phase 2) — one validator on both paths, §1.4/§8 |
+| `ENCRYPTION_KEY` write-once, no rotation path | **Open** — per-org DEK envelope is §6 |
+| Digest key derived from the global key | **Open** — §6 |
 
 ---
 
-## 2. Target scope model (org / project / environment layering)
+## 2. Scope model (org / project / environment layering) — **shipped**
 
-Per [domain-model.md](domain-model.md) §2.5: `Secret` gains `org_id`, scope via
-`(org_id, project_id?, environment_id?)`. No rewrite — the project-scoped row is
-today's row plus the new levels.
+Per [domain-model.md](domain-model.md) §2.5: `Secret` carries `org_id` and scope via
+`(org_id, project_id?, environment_id?)`. The project-scoped row is the Phase 1 row
+plus the new levels — no rewrite.
 
 | Scope level | Row shape | Resolves for |
 |---|---|---|
@@ -140,16 +173,23 @@ today's row plus the new levels.
 | Environment | org set, project set, env set | Only that Environment |
 
 **Precedence: most specific wins — environment > project > organization.** This
-mirrors config layering in domain-model.md §2.2.1. Today's project-over-global
-preference loop (`secret_service.py:304-311`) generalizes from two levels to
-three.
+mirrors config layering in domain-model.md §2.2.1. Resolution performs one query
+for all referenced keys across the three levels and then ranks the rows, so a key
+defined at more than one level resolves to the most specific one and a key missing
+everywhere fails the deployment (§5).
 
-Uniqueness (extends the existing partial-index pattern of `secrets.py:34-40`):
+Uniqueness is one partial unique index per level (§1.2): `(org_id, key)` for org
+scope, `(org_id, project_id, key)` for project scope, `(org_id, environment_id,
+key)` for environment scope. The platform-wide global namespace is gone; each
+organization owns its keys.
 
-- `uq (org_id, project_id, environment_id, key)` + partial unique indexes for each
-  NULL combination — the platform-wide global namespace becomes per-org.
-- Constraints inherit org scoping; parent rows are org-scoped first
-  (findings: multi-tenancy Phase 1 backfill).
+Scoping rules enforced at write time:
+
+- an `environment_id` must name an environment **of the given project**, in the
+  same organization — cross-project or cross-tenant scope is a 422/404, not a
+  silent bind;
+- the CHECK `ck_secrets_environment_requires_project` makes
+  "environment-scoped but not project-scoped" unrepresentable.
 
 ### 2.1 Resolution runs inside org scope
 
@@ -161,56 +201,65 @@ the session guard makes only that org's Secret rows visible and today's
 resolution has **no org filter at all**; under the guard it becomes
 tenant-correct mechanically.
 
-### 2.2 Migration mapping
+### 2.2 Migration mapping (applied by `b2c3d4e5f6a7`)
 
-| Today | Target |
+| Before | After |
 |:---|:---|
-| Global secret (NULL project) | org-level Secret under the auto-provisioned org (multi-tenancy.md §10) |
-| Project secret | Project secret + org_id |
-| Platform-wide `ux_secrets_global_key` | Per-org partial unique indexes (three scope levels) |
-| Application-scoped `deployment_environments` | Project-scoped Environment (domain-model.md §2.2.1); the env scope level activates with promotion |
+| Global secret (NULL project) | org-level Secret (Phase 1 already gave it `org_id`) |
+| Project secret | Project secret + `org_id` |
+| Platform-wide `ux_secrets_org_global_key` | Per-org partial unique indexes (three scope levels) |
+| Application-scoped `deployment_environments` | Project-scoped Environment (domain-model.md §2.2.1), so the environment scope level is usable |
+| Secret with no history | A version-1 row per secret, seeded from its current ciphertext |
 
 ---
 
-## 3. SecretVersion — append-only history
+## 3. SecretVersion — append-only history (**shipped in Phase 2**)
 
-Today rotation **overwrites in place** (`secret_service.py:181-224`): the previous
-value is unrecoverable except by re-entering it by hand.
+Before Phase 2 rotation **overwrote in place**: the previous value was unrecoverable
+except by re-entering it by hand. Now `secret_versions` (columns in §1.2) records
+every value a secret has ever held.
 
-**Target (domain-model.md §2.5):** `secret_versions` table, append-only:
+**Current-version representation — decided:** the parent row keeps the current
+`ciphertext`, `digest` and `version` (**denormalized pointer**), and every version
+including the current one also exists as an immutable `secret_versions` row. Reads
+therefore never join to resolve a deploy, and history stays complete. The columns
+cannot drift: every write path inserts the version row and updates the parent inside
+one transaction.
 
-| Column | Purpose |
-|---|---|
-| `secret_id` (FK CASCADE) | Parent secret |
-| `version` | uq `(secret_id, version)` |
-| `ciphertext` | That version's Fernet token (current org DEK) |
-| `digest` | Per-version change-detection digest |
-| `created_by_id`, `created_at` | Who rotated, when |
+Mechanics — one transaction per operation:
 
-Mechanics:
-
-1. **Create** = `secrets` row + version-1 row.
-2. **Rotate** = INSERT a new version row; update the parent's pointer fields
-   (`version`, `digest`, `rotated_by_id`, `rotated_at`). Parent `ciphertext`
-   column: dropped (pointer-only) or kept as denormalized current — open question.
-3. **Rollback** = decrypt the target prior version server-side, INSERT it as a
-   **new** version (re-encrypted under the current DEK if one rotated in between).
-   Audited as `secret.rollback`; history is never rewritten.
+1. **Create** = `secrets` row + version-1 row (`version = 1`).
+2. **Rotate** = lock the parent (`SELECT … FOR UPDATE`), INSERT version
+   `parent.version + 1`, then move the parent's pointer (`version`, `digest`,
+   `ciphertext`, `rotated_by_id`, `rotated_at`). Two concurrent rotations therefore
+   serialize on the parent row: no duplicate version number, no lost update, and
+   exactly one version is current afterwards (§Concurrency).
+3. **Rollback to version N** = decrypt version N's ciphertext server-side and
+   INSERT it as a **new** version (`parent.version + 1`) — the rolled-back-to value
+   is re-appended, never copied over history. No version row is updated or deleted,
+   so "current = v4 after rolling back to v2" still lists v2 and v3, and the
+   pre-rollback value remains recoverable by rolling forward to it.
 4. **Prune** = keep last N versions (default 10) and/or younger than 30 days;
-   maintenance task, never user-facing delete.
+   maintenance task, never user-facing delete. **Not implemented** — with the
+   current volumes, unbounded history is cheaper than the risk of a wrong prune
+   policy; no user-facing delete of versions exists.
 
-Append-only enforced application-side (no UPDATE/DELETE paths in the service
-layer), not by DB trigger — contrast `audit_logs` trigger
-`nexusops_block_audit_mutation` (initial schema migration). A trigger on
-`secret_versions` is optional hardening; app-level is the contract.
+Append-only is enforced **application-side** (the service layer has no UPDATE or
+DELETE path against `secret_versions`) plus a uq `(secret_id, version)` constraint
+that makes a rewound write fail loudly. There is deliberately no DB trigger —
+contrast `audit_logs`' `nexusops_block_audit_mutation`. Deleting a *secret* cascades
+its versions (hard delete, no tombstone); §Open questions revisits that.
 
-### 3.1 What this fixes
+Audit: `secret.created`, `secret.rotated` and `secret.rolled_back` rows carry the
+key name and version numbers only — never a value.
 
-| Today | Target |
+### 3.1 What this fixed
+
+| Before | After |
 |---|---|
-| Rotation destroys the old value | Old value preserved as a prior version |
-| Bad rotation unrecoverable | `secret.rollback` to any kept version |
-| Only the current rotator is recorded | Every version carries its own actor |
+| Rotation destroyed the old value | Old value preserved as a prior version |
+| Bad rotation unrecoverable | `POST /secrets/{id}/rollback` re-appends any kept version |
+| Only the current rotator was recorded | Every version carries its own actor and timestamp |
 | Rotation racing a resolve → resolve picks one version | Unchanged: resolution reads the parent pointer atomically; a concurrent rotate affects only later deploys |
 
 ---
@@ -272,8 +321,10 @@ is planned first at queue time (in the engine, ahead of the runner's
 never silently "pass" unresolved. Failure marks the step FAILED and routes
 through the existing `_finalize_failed` path; success writes an output line and
 the resolution audit. The "Before" column is the pre-Phase-0 behavior. One
-deviation remains: deploy-chain authorization (§4) is still Phase 2, so today
-the trigger's `deployment.create` is the only gate.
+deviation remains: the grant-narrowed deploy-chain authorization in §4 is **not
+built** (resource-level grants are a later phase), so today the trigger's
+`deployment.create` is the only gate — a member whose role holds it may deploy any
+environment of the organization.
 
 | Failure | Before (pre-Phase 0) | Now shipped |
 |---|---|---|
@@ -294,11 +345,15 @@ Design:- **`RESOLVE_CONFIG` is an explicit engine-owned step**
   runner may assume presence.
 - No `allow_missing_secrets` escape hatch. If a real need appears it gets its own
   explicit, audited flag — never a silent default.
-- **Grammar unification:** one regex (`schemas/secret.py:25`) for both save-time
-  validation and the resolver scan; the environment schema stops accepting
-  lowercase refs. Save-time lint *warns* when a ref names no existing secret at
-  any scope level (the secret may be created later — hard-reject would create a
-  chicken-and-egg loop between secret creation and config authoring).
+- **Grammar unification (shipped):** one regex (`SECRET_REF_PATTERN` in
+  `schemas/secret.py`) is used for both save-time validation and the resolver scan;
+  config no longer accepts refs the resolver could not match.
+- **Save-time unresolved-ref lint: NOT implemented.** A config may reference a
+  key that does not exist yet at any scope — the deployment then fails closed and
+  the reason names the missing key. Hard-rejecting at save time would create a
+  chicken-and-egg loop between secret creation and config authoring; warning-only
+  would add a response channel this API does not have. The behaviour that *is*
+  guaranteed is the fail-closed one below.
 
 ---
 
@@ -401,15 +456,14 @@ Blast radius:
 
 ## 8. Environment config vs secrets boundary
 
-`Environment.config` (JSONB, `backend/app/models/delivery.py:83-84`) holds
-non-secret settings and `${secret:KEY}` *refs* only — as policy. Enforcement is
-partial today: the create-path validator (`schemas/environment.py:41-53`) rejects
-values containing `${secret:` that are not a single full-value ref, but a
-plaintext value without the marker is undetectable and accepted, and the update
-path skips validation entirely (`EnvironmentUpdate` does not inherit
-`EnvironmentBase`, `schemas/environment.py:60-67`; PATCH route binds it,
-`api/v1/projects.py:263`; `update_environment` copies config unvalidated,
-`project_service.py:515-516`).
+Both `projects.config` and `deployment_environments.config` (JSONB) hold
+non-secret settings and `${secret:KEY}` *refs* only — as policy. Enforcement
+shipped in Phase 2: one validator (`config_service.validate_config`) runs on the
+create **and** update paths of both resources. It enforces the flat shape, bounds
+the map, and rejects a value containing `${secret:` that is not exactly one
+full-value reference. Its stated limit: a plaintext value with no marker is
+undetectable by pattern and is accepted — which is why secret material must live
+only in Secret rows, never in config.
 
 | Value kind | Home | Why |
 |---|---|---|
@@ -421,13 +475,14 @@ path skips validation entirely (`EnvironmentUpdate` does not inherit
 
 Rules:
 
-- Names aren't secrets; values are.
+- Names aren't secrets; values are. The environment detail endpoint returns
+  project config, overrides, effective config and the referenced key **names** —
+  enough to review a configuration without ever revealing a value.
 - `${secret:KEY}` refs are the **only** sanctioned path a secret value takes into
-  a deploy. That boundary is enforced on the create path only today (§1.4); the
-  target control is one shared validator on both create and update paths, with
-  the raw-value limit stated plainly: a plaintext value with no `${secret:`
-  marker is undetectable by pattern, which is why secret material must live only
-  in Secret rows, never in config.
+  a deploy. That boundary is enforced by the one shared validator on both paths
+  (§1.4), with the raw-value limit stated plainly: a plaintext value with no
+  `${secret:` marker is undetectable by pattern, which is why secret material must
+  live only in Secret rows, never in config.
 - Rotation requires no config change — refs are stable, versions resolve at
   deploy time.
 
@@ -441,7 +496,7 @@ Rules:
 | Logs | Mostly guarded | `redact_mapping` substring redaction (`core/logging.py:19-60`); runner logs counts only (`deployment_runner.py:210`) | Fix hole: redaction recurses dicts only — sensitive values inside lists pass through; recurse lists too. Resolution audit never logs values |
 | WS frames | Safe by omission | No secret-bearing channel; deployment-logs carry runner output (counts only) | Org-prefixed channels (multi-tenancy.md §5); delivery-op frames never include values |
 | Audit metadata | Guarded | `redact_mapping` applied at `audit_service.py:54`; resolution audit carries names+versions only | Unchanged |
-| Frontend state | Minimal | Value lives only in create/rotate modal component state, never persisted or cached; no reveal controls (`SecretsPage.tsx:51,142-190`) | Clear value on modal unmount; never persist to localStorage |
+| Frontend state | Minimal | A value lives only in the create/rotate form's component state, never persisted, never cached, never logged; no reveal control anywhere. Version history (`SecretHistory.tsx`) renders metadata only and has no value field to render. | Clear value on modal unmount; never persist to localStorage (unchanged) |
 | Error messages | Guarded | `decrypt_str` error names the key problem, no value (`security.py:133-142`); 500 handler logs exception class only (`core/errors.py:151-166`); engine `hide_parameters=True` (`core/db.py:26-39`) | Fail-closed failure_reason names keys, never values |
 | DB at rest | Encrypted | Fernet under single `ENCRYPTION_KEY` | Per-org DEK envelope (§6) |
 | Op params at rest (agent delivery, §7 — future) | N/A — nothing delivered to nodes today | — | Params ciphertext under the org DEK before insert; scrubbed at terminal state or expires_at |
@@ -484,14 +539,26 @@ sequenceDiagram
 
 ---
 
+## Decided in Phase 2
+
+- **`secrets.ciphertext` retained** as the denormalized current value alongside the
+  immutable history row (§3). Dropping it would put a join on the deploy-time read
+  path for no gain.
+- **Save-time validation rejects malformed refs, not unresolved ones** (§5). A ref
+  naming no secret is legal at authoring time and fails the deployment closed at
+  deploy time; the failure reason names the key.
+- **Secret deletion is a hard delete cascading its versions** (§3).
+
 ## Open questions
 
-- `secrets.ciphertext` column: drop (pointer-only) or keep denormalized current alongside SecretVersion history (§3).
 - SecretVersion prune defaults (last N = 10? 30-day floor?); org-configurable window? (§3)
-- Secret deletion: hard delete cascading versions vs tombstone with grace period for accidental deletes (§3).
-- Save-time config validation: hard-reject refs with no resolvable secret, or stay warn-only? (§5)
+- Secret deletion: is a tombstone with a grace period worth it for accidental
+  deletes? Today it is an immediate cascade with an audit row (§3).
 - Delivery-op params: scrub-and-keep-row-for-audit vs delete the row — deadline
   is decided (terminal state or expires_at, whichever first, §7); open choice is
   keep vs delete. (§7)
 - KEK custody before the KMS phase (env var vs file vs break-glass runbook); multi-person approval for org DEK recovery? (§6)
+- Resource-level grants (§4): without them, `deployment.create` authorizes a deploy
+  into any environment of the organization — the grant-narrowed model is a later
+  phase. Is that acceptable for production before grants ship?
 - Future auto-deploy/webhook triggers: resolution-audit actor attribution (SYSTEM vs configured actor) (§4.1).

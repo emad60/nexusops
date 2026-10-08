@@ -206,29 +206,60 @@ delta 9. **Still open from this phase:** hardening item 5 (org+IP rate limiting)
 moved to Phase 2, and the queue-time deployment preflight (with deploy-chain
 authorization) remains open from Phase 0.
 
-## 5. Phase 2 — Projects & environments
+## 5. Phase 2 — Projects & environments — **DELIVERED 2026-10-08**
 
 **Why:** the project-centric product model ("Ymart → Production") needs
 environments at project scope; per-env config/secrets/grants all anchor here.
 Spec: domain-model.md §2.2.1.
 
-- **DB:** `deployment_environments.application_id` → `project_id`
-  (NOT NULL after backfill; unique `(project_id, slug)`; slug-collision
-  suffix during migration); `environment_type` (dev/staging/prod); `node_id`;
-  `projects.config` JSONB (config-layering base). `secret_versions` table
-  (append-only); `secrets` layered scope (org / project / environment).
-- **API:** env CRUD under `/v1/projects/{id}/environments`; config layering
-  (project config ⊕ environment config ⊕ `${secret:KEY}` refs — most specific
-  wins); SecretVersion append-only rotation + rollback; deploy-chain
-  authorization for resolution (Phase 0's fail-closed policy carries over).
-- **Frontend:** environments on the project page; env config editor; secret
-  version history with rotation rollback.
-- **Security:** resolution authorization = deploy permission chain (never
-  `secret.read`); rotation audited.
-- **Testing:** promotion-migration round-trip incl. slug-collision suffix;
-  layering precedence unit tests; rotation rollback test.
-- **Exit:** "Ymart → Production" env config in one place; non-destructive
-  rotation with rollback proven.
+**Delivered:**
+
+- **DB (migration `20261008_1200-b2c3d4e5f6a7`):**
+  `deployment_environments.application_id` → `project_id` (derived through
+  `application → project`, then NOT NULL), `environment_type` (DEV/STAGING/PROD
+  with a CHECK constraint), unique `uq_envs_project_slug (project_id, slug)`,
+  indexes on `project_id` and `environment_type`; `projects.config` JSONB;
+  `secrets.environment_id` + the scope CHECK and three per-level partial unique
+  indexes; `secret_versions` (append-only, `org_id`, RLS tenant + system
+  policies, version-1 backfill for existing secrets).
+- **Migration behaviour — no slug-suffix:** where two applications of one project
+  had same-named environments, the plan's "`production-2` suffix" was replaced by
+  a **deterministic merge** (earliest `created_at`, tie-broken by `id`) —
+  deployments re-pointed to the survivor before the duplicate is deleted, fields
+  and config unioned. A suffix would have invented a name nobody asked for and
+  split one environment's history in two; merging keeps one environment per real
+  environment. Details: domain-model.md §2.2.1.
+- **API:** environment CRUD under `/v1/projects/{project_id}/environments`
+  (`project.read` / `project.manage`); project `config` on create/update;
+  environment detail returns base, overrides and effective config separately;
+  `GET /secrets/{id}/versions`, `POST /secrets/{id}/rotate`,
+  `POST /secrets/{id}/rollback`.
+- **Layering:** project base ⊕ environment overrides, **shallow** merge; secret
+  resolution prefers environment > project > organization and fails closed.
+- **Frontend:** the project page lists project environments and links each to a
+  detail page (configuration layers, override editor, secret metadata + version
+  history); the secrets manager gains scope display, version history, rotation and
+  rollback.
+- **Security:** Phase 1 tenancy untouched — every new path goes through
+  membership → active org → project-in-org → environment-in-project → permission;
+  `secret.read` (metadata) and secret *consumption* (the deploy chain) stay
+  distinct; no endpoint returns a value.
+- **Testing:** promotion-migration round-trip on realistic legacy fixtures
+  (multi-app projects, duplicate slugs, multiple orgs/projects, existing secrets),
+  layering precedence unit tests, secret scope/precedence/rotation/rollback/
+  concurrency/IDOR/cross-tenant tests, RLS catalog coverage, SPA tests.
+
+**Deviations from the plan at the time of writing:**
+
+- **Deploy-chain (grant-narrowed) authorization is NOT implemented** — grants are
+  a later phase (§10). Today a principal holding `deployment.create` may deploy
+  any environment of its organization. The `secret.read` ≠ secret-consumption
+  split *is* enforced.
+- The project page shows environments but no per-environment deployment actions —
+  deployments stay on the existing pages.
+
+**Exit:** "Ymart → Production" config in one place; non-destructive rotation with
+rollback proven; tenant isolation and RLS extended to the new tables.
 
 ## 6. Phase 3 — Nodes & agent v2
 

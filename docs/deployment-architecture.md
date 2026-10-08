@@ -379,9 +379,11 @@ Effective config = layered merge, **most specific wins**:
 | Deploy-time secret refs | `${secret:KEY}` values in either layer, resolved at RESOLVE_CONFIG | 3 (always wins over literals) |
 
 1. `effective = {**project.config, **environment.config}` — env key overrides.
-2. Values may be a whole-value reference `${secret:KEY}` (strict grammar kept:
-   `_SECRET_REFERENCE_RE` at `schemas/environment.py:20`, enforced at `:51-52`);
-   raw secret values are rejected at config-save time.
+2. Values may be a whole-value reference `${secret:KEY}` (one strict grammar now:
+   `SECRET_REF_PATTERN` in `schemas/secret.py`, enforced for both project and
+   environment config on the create **and** update paths by
+   `config_service.validate_config`, which is also where the flat-map shape and
+   size bounds live); raw secret values are rejected at config-save time.
 3. Each ref resolves against the layered Secret scope: **environment-scoped >
    project-scoped > org-scoped** Secret rows (domain-model.md §2.5; today's
    project-over-global fallback at `secret_service.py:296-311` generalizes).

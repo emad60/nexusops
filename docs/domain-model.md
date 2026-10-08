@@ -1,9 +1,14 @@
 # Domain Model — NexusOps as a Multi-Tenant Platform
 
 **Status:** Partly implemented. The tenant layer (`Organization`, `Membership`,
-`org_id` ownership, RLS) shipped with Phase 1; the later-phase entities in this
-document (Domains, Certificates, Operations, Backups, Grants, Plan) remain design.
-**Date:** 2026-09-20 (tenant layer implemented 2026-09-24)
+`org_id` ownership, RLS) shipped with Phase 1, and **Phase 2 shipped the delivery
+promotion**: `Environment` is project-scoped, `Project.config` exists,
+configuration layers project ⊕ environment, and `Secret`/`SecretVersion` carry
+org/project/environment scope with append-only history. The later-phase entities
+in this document (Domains, Certificates, Backups, Grants, Teams, Plan) remain
+design.
+**Date:** 2026-09-20 (tenant layer implemented 2026-09-24; delivery promotion
+implemented 2026-10-08, migration `b2c3d4e5f6a7`)
 **Companions:** [platform-vision.md](platform-vision.md) · [multi-tenancy.md](multi-tenancy.md) · [authorization.md](authorization.md)
 
 ## 0. Design stance
@@ -156,33 +161,67 @@ active-org header, and an `active` membership in that org is required. Consequen
 
 | Entity | Table | Changes | Notes |
 |---|---|---|---|
-| **Project** | `projects` | + **org_id**; name unique→ per-org unique; + `config` JSONB (Phase 2 — the base layer of deploy config layering) | `owner_id` gets no new access meaning: under orgs, access is governed by membership role; owner_id becomes historical creator (kept for audit, not an access gate). |
+| **Project** | `projects` | + **org_id**; name unique→ per-org unique; + `config` JSONB (**shipped**, Phase 2 — the base layer of deploy config layering) | `owner_id` gets no new access meaning: under orgs, access is governed by membership role; owner_id becomes historical creator (kept for audit, not an access gate). |
 | **Application** | `applications` | none (org via project) | The deployable unit of a project — what other tools call a *service*. There is deliberately no Service entity (the word collides with the Kubernetes mental model). Build_config stays metadata. |
-| **Environment** | `deployment_environments` | **PROMOTED: application_id → project_id**, + environment_type (dev/staging/prod), node_id | The ONE structural delivery change. See §2.2.1. |
+| **Environment** | `deployment_environments` | **PROMOTED: application_id → project_id (shipped)**, + `environment_type` (DEV/STAGING/PROD), server_id | The ONE structural delivery change. See §2.2.1. |
 | **Deployment** | `deployments` | + org_id (denormalized for fast org listings), + node_id stamp | Keeps `(application_id, environment_id)` pair — "deployed what into where". `number` stays per-application. |
 | **DeploymentStep** | `deployment_steps` | none (org via deployment) | Steps + streamed logs of a run. |
 
-### 2.2.1 Environment promotion detail
+### 2.2.1 Environment promotion detail — **shipped in Phase 2**
 
 - **Why promote:** the product model is "Project Ymart → Production" — environment is
   a property of the *project*. Per-app envs force each application to re-define
   staging/production with duplicated config; project-scoped envs give one place for
   env config + secrets, and a single anchor for environment grants ("Ali can deploy
   the staging environment of project X").
-- **What moves:** `deployment_environments.application_id` becomes `project_id`
-  (NOT NULL after backfill), unique `(project_id, slug)`. Where multiple apps in one
-  project had same-named envs, they merge into one project env; slug collisions get
-  a `production-2` suffix during migration.
+- **What moved:** migration `b2c3d4e5f6a7` promoted
+  `deployment_environments.application_id` to `project_id` — derived through
+  `environment → application → project` — dropped the old column, and added the
+  unique constraint `(project_id, slug)` plus indexes on `project_id` and
+  `(project_id, environment_type)`.
+- **Duplicate environment handling is deterministic** (same-named envs of two apps
+  in one project): grouping is `(org_id, project_id, slug)` with more than one row,
+  and the survivor is the earliest `created_at`, tie-broken by `id` — re-running
+  the migration on the same data always picks the same row. The others are
+  **merged into it**, never dropped:
+  - every duplicate's deployments are re-pointed at the survivor *before* the
+    duplicate row is deleted, so the `ON DELETE CASCADE` on
+    `deployments.environment_id` never fires and **every deployment keeps
+    resolving to a live environment**;
+  - no scalar field is lost: `server_id` and `healthcheck_path` are filled from a
+    duplicate when the survivor's value is empty, `auto_deploy` is OR-ed across
+    the group, and `config` is unioned via JSONB `||` with the survivor winning a
+    key clash;
+  - the survivor keeps its own slug, so a merge never manufactures a
+    nondeterministic `production-2`-style name. Slugs are produced by the same
+    `_slugify` rule as every other project-scoped name, and the `(project_id,
+    slug)` unique constraint (`uq_envs_project_slug`) rejects a genuine clash.
+- **Uniqueness** is `(project_id, slug)`; slugs come from the existing project
+  naming convention (`_slugify`), so `Production`, `production` and `PRODUCTION`
+  in the same project collapse onto one slug and the second such request is
+  rejected as a duplicate.
 - **Deployment rows keep** `(application_id, environment_id)` — the pair now means
-  "application deployed into project environment".
+  "application deployed into project environment". `application_id` is *not*
+  removed: an application is the thing that deploys, the environment is where.
+  The migration asserts both sides still resolve (no orphan FK).
+- **API surface:** environments are created, listed, read, updated and deleted at
+  `/api/v1/projects/{project_id}/environments`, gated by `project.read` /
+  `project.manage`. The old application-scoped route is gone — an environment is
+  never reachable through an application.
 - **Name collision fixed:** `servers.environment` is a free-text tag (default
   'production', `backend/app/models/infra.py:57`) shown as an "Environment" field in
   the node form (`frontend/src/components/ServerForm.tsx:171-174`). After promotion,
   "Environment" means the project-scoped entity — the node field is renamed **Label**
   in the Phase 1 rename sweep, and the glossary guard (§0) pins the rule.
-- **Config layering:** project config ⊕ environment config ⊕ deploy-time secret
-  refs (`${secret:KEY}`) — most specific wins. Full specification in
-  [deployment-architecture.md](deployment-architecture.md).
+- **Config layering (shipped):** `projects.config` is the base; an environment's
+  `config` holds only its **overrides**. The merge is **shallow** — a key the
+  environment defines replaces the project's value, every other project key is
+  inherited untouched (nested objects are replaced, never merged recursively).
+  Values may reference secrets as `${secret:KEY}`, resolved at deploy time at the
+  most specific scope (environment > project > organization). The three layers are
+  returned separately by the environment detail endpoint so the UI can show where
+  a value came from. Full specification in
+  [secrets-architecture.md](secrets-architecture.md) §2/§8.
 
 ### 2.3 Infrastructure — Nodes
 
@@ -208,12 +247,17 @@ overlap — Operation is not renamed to Task (collides with Celery tasks) or Act
 | **Certificate** | `certificates` | org_id, primary CN, SANs, status, issued_at, expires_at, challenge type, auto_renew, encrypted key+chain (ciphertext columns) | Issued via ACME (DNS-01 first). Private keys never leave the control plane except encrypted delivery to the serving node. Spec: [certificate-management.md](certificate-management.md). |
 | **ProxyProvider** | — | interface only | Nginx first: renders config, ships via agent operation, validates (`nginx -t`), applies atomically with rollback. Spec: [domain-routing.md](domain-routing.md). |
 
-### 2.5 Secrets (existing, re-scoped)
+### 2.5 Secrets (re-scoped — **shipped in Phase 2**)
 
 | Entity | Table | Changes | Notes |
 |---|---|---|---|
-| **Secret** | `secrets` | + org_id; scope via (org_id, project_id?, environment_id?) | Today: global or project-scoped. Target: org / project / environment layered scope. |
-| **SecretVersion** | `secret_versions` (new) | secret_id, version, ciphertext, created_by_id, created_at | Append-only history — rotation today overwrites in place; version rows enable audit + rollback of a rotation. |
+| **Secret** | `secrets` | + org_id; scope via (org_id, project_id?, environment_id?) | Org / project / environment layered scope, most specific wins. Resolution is fail-closed. |
+| **SecretVersion** | `secret_versions` | secret_id, version, ciphertext, digest, created_by_id, created_at; uq `(secret_id, version)` | Append-only history. Rotation appends a version and moves the parent's pointer; rollback re-appends an earlier value as a **new** version, so nothing is rewritten or deleted. |
+
+Authorization stays split: `secret.read` is *metadata* only, `secret.write`
+manages values, and neither is the permission that lets a deployment **consume** a
+referenced secret — that is the deploy chain (`deployment.create`). No endpoint
+returns a value. See [secrets-architecture.md](secrets-architecture.md) §4.
 
 ### 2.6 Observability (existing, org-scoped via parents)
 

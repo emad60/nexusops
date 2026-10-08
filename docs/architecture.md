@@ -44,6 +44,13 @@ by a session-scoped query guard (`with_loader_criteria`) rather than scattered
 checks; the active org is chosen per request via `X-Org-Id` — the JWT carries
 identity, not tenancy.
 
+**The delivery model is project-centric** (Phase 2, 2026-10-08): an environment
+belongs to a **project**, not to an application, and applications deploy *into*
+their project's environments. Configuration layers — `projects.config` as the base,
+an environment's `config` as overrides, a shallow merge — with `${secret:KEY}`
+references resolved at the most specific secret scope (environment > project >
+organization) and secret history kept append-only in `secret_versions`.
+
 **The tenant foundation is shipped** (Phase 1, 2026-09-24). `organizations` +
 `memberships` exist, every tenant table carries `org_id`, the session guard
 refuses scope-less DML and Core statements instead of narrowing them silently,
@@ -55,13 +62,17 @@ by membership rather than by an `org_id` column; WebSocket sockets are bound to 
 organization and cross-organization frames are dropped; workers claim a row, resolve
 its organization, then act inside it. **Shipped since:** the `server.*` → `node.*`
 rename and the `Server` → `Node` surface naming (API paths `/nodes`, with a
-schema-hidden `/servers` alias). **Not yet shipped:** every later-phase entity in
-the companion specs.
+schema-hidden `/servers` alias); the `Server` → `Node` vocabulary; and the Phase 2
+delivery promotion (project-scoped environments, config layering, secret version
+history). **Not yet shipped:** domains/routes, certificates, real node operations
+beyond the container subset, backups, teams/grants and billing — every
+later-phase entity in the companion specs.
 
 **Naming.** The existing `Server` entity is exposed as **Node** (API paths
 `/nodes`, codenames `node.*`); the `servers` table keeps its name
-until a later cleanup phase. **Environment** is promoted from application scope
-to project scope ("Ymart → Production") — the one structural delivery change.
+until a later cleanup phase. **Environment** was promoted from application scope
+to project scope ("Ymart → Production") in Phase 2 — the one structural delivery
+change, now shipped.
 **DockerEndpoint** (today `DockerHost`) stays a separate row — it models a
 *connection* to docker, not the machine — exposed as part of the Node resource.
 
@@ -322,10 +333,10 @@ Entity status against the target model:
 | Organization / Membership | `organizations` / `memberships` | new | tenant root; user↔org via Membership with role + status |
 | Node | `servers` (kept) | existing, renamed at surface | + `org_id`, capabilities + facts; codenames `node.*` (renamed from `server.*`) |
 | DockerEndpoint | `docker_hosts` (kept) | existing | exposed as part of Node; 0..1 per node |
-| Environment | `deployment_environments` | **promoted** | `application_id` → `project_id`; dev/staging/prod type; node binding |
+| Environment | `deployment_environments` | **promoted (Phase 2)** | `application_id` → `project_id`; `environment_type` DEV/STAGING/PROD; `server_id` target node; unique `(project_id, slug)` |
 | Domain / Route / Certificate | `domains` / `routes` / `certificates` | new | DNS-verified domains; hostname+path routes; ACME certs |
 | Operation | `operations` | new | whitelisted remote ops the agent pulls; permissioned + audited |
-| Secret / SecretVersion | `secrets` / `secret_versions` | existing / new | org/project/environment layered scope; append-only version history |
+| Secret / SecretVersion | `secrets` / `secret_versions` | existing / **new (Phase 2)** | org/project/environment layered scope, most specific wins; append-only version history with transactional rotation and non-destructive rollback |
 | Delivery set | `projects`, `applications`, `deployments`, `deployment_steps` | existing | + `org_id` (project; denormalized on deployment) |
 | Observability set | monitors, checks, incidents, snapshots, logs, events, audit, alerts, channels, deliveries | existing | + `org_id` on monitors/incidents/channels/audit/events |
 | Role (custom, org-scoped) | `roles` (kept) | re-scoped | + nullable `org_id` (`NULL` = system template); org custom roles come later |
@@ -576,8 +587,10 @@ FAILED through the standard `_finalize_failed` path (remaining steps `SKIPPED`,
 `failure_reason` = `Step RESOLVE_CONFIG failed: … missing: KEY`), with an audited
 `secret.resolve_failed` row naming the keys; success writes one `secret.resolve`
 audit row per reference (key name + version, never a value) and an output line
-on the step. Project-scoped `Secret` beats global. See §13 for the honest caveat
-about who consumes the resolved values.
+on the step. References come from the environment's **effective** configuration
+(project `config` merged with the environment's overrides) and resolve at the most
+specific scope that defines the key — environment, then project, then organization.
+See §13 for the honest caveat about who consumes the resolved values.
 
 ## 9. RBAC registry
 

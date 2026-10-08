@@ -151,9 +151,10 @@ describe("ProjectListPage", () => {
     get.mockImplementation(async (path: string) => {
       if (path === "/auth/me") return ME;
       if (path === "/projects") return PROJECTS_PAGE;
-      if (path === "/projects/applications/app-1/environments") return envPage(2);
-      if (path === "/projects/applications/app-2/environments") return envPage(3);
-      if (path === "/projects/applications/app-3/environments") return envPage(0);
+      // Phase 2: the environment count is per **project**, not per application.
+      if (path === "/projects/p1/environments") return envPage(5);
+      if (path === "/projects/p2/environments") return envPage(3);
+      if (path === "/projects/p3/environments") return envPage(0);
       throw new ApiError(404, "NOT_FOUND", `unexpected GET ${path}`);
     });
     post.mockResolvedValue({
@@ -171,11 +172,11 @@ describe("ProjectListPage", () => {
     renderPage();
     const alpha = await screen.findByRole("region", { name: "Project Alpha" });
     expect(within(alpha).getByText("2")).toBeInTheDocument();
-    // Environment counts arrive from per-application count queries.
+    // Environment counts are the project's own environments (Phase 2).
     await within(alpha).findByText("5");
     const beta = screen.getByRole("region", { name: "Project Beta" });
     expect(within(beta).getByText("1")).toBeInTheDocument();
-    await within(beta).findByText("0");
+    await within(beta).findByText("3");
   });
 
   it("shows the empty state when there are no projects", async () => {

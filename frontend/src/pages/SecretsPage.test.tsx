@@ -36,6 +36,7 @@ function makeSecret(overrides: Partial<SecretRow> = {}): SecretRow {
     digest: "a1b2c3d4e5f6",
     description: "Primary database password",
     project_id: null,
+    environment_id: null,
     rotated_at: "2026-09-01T12:00:00Z",
     rotated_by_email: "admin@nexusops.local",
     created_at: "2026-08-01T00:00:00Z",
@@ -63,12 +64,37 @@ beforeEach(() => {
   mockedGet.mockReset();
   mockedPost.mockReset();
   mockedDelete.mockReset();
-  mockedGet.mockResolvedValue({
-    items: [makeSecret()],
-    total: 1,
-    limit: 25,
-    offset: 0,
-  } satisfies Page<SecretRow>);
+  mockedGet.mockImplementation(async (path: string) => {
+    if (path === "/projects") {
+      return { items: [], total: 0, limit: 100, offset: 0 };
+    }
+    if (path === "/secrets/s-1/versions") {
+      return [
+        {
+          id: "v-2",
+          secret_id: "s-1",
+          version: 2,
+          digest: "a1b2c3d4e5f6",
+          created_by_email: "admin@nexusops.local",
+          created_at: "2026-09-01T12:00:00Z",
+        },
+        {
+          id: "v-1",
+          secret_id: "s-1",
+          version: 1,
+          digest: "ffffffffffff",
+          created_by_email: "admin@nexusops.local",
+          created_at: "2026-08-01T00:00:00Z",
+        },
+      ];
+    }
+    return {
+      items: [makeSecret()],
+      total: 1,
+      limit: 25,
+      offset: 0,
+    } satisfies Page<SecretRow>;
+  });
 });
 
 describe("SecretsPage", () => {
@@ -99,6 +125,8 @@ describe("SecretsPage", () => {
         key: "STRIPE_API_KEY",
         value: "hunter2",
         description: "",
+        project_id: null,
+        environment_id: null,
       }),
     );
   });
@@ -129,6 +157,26 @@ describe("SecretsPage", () => {
     expect(
       await within(screen.getByRole("status")).findByText(/VALIDATION_ERROR: Key already exists/),
     ).toBeInTheDocument();
+  });
+
+  it("shows version history and rolls back non-destructively", async () => {
+    mockedPost.mockResolvedValue(makeSecret({ version: 3 }));
+    renderPage();
+    await screen.findByText("DB_PASSWORD");
+
+    fireEvent.click(screen.getByRole("button", { name: "Version history of DB_PASSWORD" }));
+    const dialog = await screen.findByRole("dialog");
+    expect(await within(dialog).findByText("v2")).toBeInTheDocument();
+    expect(within(dialog).getByText("previous")).toBeInTheDocument();
+    // Rolling back re-appends the chosen version as a new version.
+    expect(dialog).toHaveTextContent(/nothing is deleted or overwritten/i);
+
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Roll back DB_PASSWORD to v1" }),
+    );
+    await waitFor(() =>
+      expect(mockedPost).toHaveBeenCalledWith("/secrets/s-1/rollback", { version: 1 }),
+    );
   });
 
   it("confirms before deleting a secret", async () => {

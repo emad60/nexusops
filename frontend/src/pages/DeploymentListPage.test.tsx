@@ -196,7 +196,7 @@ describe("DeploymentListPage", () => {
       if (path === "/auth/me") return ME;
       if (path === "/deployments") return PAGE_ONE;
       if (path === "/projects") return PROJECTS_PAGE;
-      if (path.startsWith("/projects/applications/")) return ENVS_PAGE;
+      if (path.startsWith("/projects/p1/environments")) return ENVS_PAGE;
       throw new ApiError(404, "NOT_FOUND", `unexpected GET ${path}`);
     });
     post.mockResolvedValue(deploymentRow({ id: "dep-9", number: 13, status: "QUEUED" }));
@@ -253,10 +253,10 @@ describe("DeploymentListPage", () => {
     // Wait for the application option before selecting it.
     await screen.findByRole("option", { name: "platform-api — Delivery Co" });
     fireEvent.change(screen.getByLabelText("Application"), { target: { value: "app-1" } });
-    // Environment options load for the selected application.
+    // Environment options load for the selected application's **project**.
     await waitFor(() =>
       expect(get).toHaveBeenCalledWith(
-        "/projects/applications/app-1/environments",
+        "/projects/p1/environments",
         expect.objectContaining({ limit: 100 }),
         expect.anything(),
       ),

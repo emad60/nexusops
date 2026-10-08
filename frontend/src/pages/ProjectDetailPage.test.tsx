@@ -1,5 +1,5 @@
-/** Tests for ProjectDetailPage: applications + environments render (config refs as-is),
- * create-environment flow and edit-application flow. */
+/** Tests for ProjectDetailPage: project-scoped environments + applications render
+ * (config refs as-is), create-environment flow, edit-application flow. */
 
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -101,33 +101,33 @@ function application(id: string, name: string, overrides: Record<string, unknown
   };
 }
 
+/** Phase 2: environments belong to the project, not to an application. */
+const PROD_ENV = {
+  id: "env-1",
+  project_id: "p1",
+  name: "production",
+  slug: "production",
+  environment_type: "PROD" as const,
+  server_id: null,
+  healthcheck_path: "/healthz",
+  auto_deploy: true,
+  config: { DATABASE_URL: "${secret:DATABASE_URL}", LOG_LEVEL: "info" },
+  created_at: "2026-01-01T00:00:00Z",
+};
+
 const PROJECT = {
   id: "p1",
   name: "Delivery Co",
   description: "Logistics platform",
   repository_url: "https://github.com/org/delivery",
   default_branch: "main",
+  config: { REGION: "eu" },
   created_at: "2026-01-01T00:00:00Z",
   applications: [
     application("app-1", "platform-api"),
     application("app-2", "worker", { latest_deployment: null, current_version: null }),
   ],
-};
-
-function envPage(items: Record<string, unknown>[]) {
-  return { items, total: items.length, limit: 100, offset: 0 };
-}
-
-const PROD_ENV = {
-  id: "env-1",
-  application_id: "app-1",
-  name: "production",
-  slug: "production",
-  server_id: null,
-  healthcheck_path: "/healthz",
-  auto_deploy: true,
-  config: { DATABASE_URL: "${secret:DATABASE_URL}", LOG_LEVEL: "info" },
-  created_at: "2026-01-01T00:00:00Z",
+  environments: [PROD_ENV],
 };
 
 const EMPTY_SERVERS = { items: [], total: 0, limit: 100, offset: 0 };
@@ -144,6 +144,10 @@ function renderPage(): ReturnType<typeof render> {
             <Routes>
               <Route path="/projects" element={<div>projects list probe</div>} />
               <Route path="/projects/:projectId" element={<ProjectDetailPage />} />
+              <Route
+                path="/projects/:projectId/environments/:environmentId"
+                element={<div>environment detail probe</div>}
+              />
             </Routes>
           </MemoryRouter>
         </AuthProvider>
@@ -158,8 +162,6 @@ describe("ProjectDetailPage", () => {
     get.mockImplementation(async (path: string) => {
       if (path === "/auth/me") return ME;
       if (path === "/projects/p1") return PROJECT;
-      if (path === "/projects/applications/app-1/environments") return envPage([PROD_ENV]);
-      if (path === "/projects/applications/app-2/environments") return envPage([]);
       if (path === "/nodes") return EMPTY_SERVERS;
       throw new ApiError(404, "NOT_FOUND", `unexpected GET ${path}`);
     });
@@ -167,6 +169,7 @@ describe("ProjectDetailPage", () => {
       ...PROD_ENV,
       id: "env-9",
       name: "staging",
+      environment_type: "STAGING",
       auto_deploy: false,
     });
     patch.mockResolvedValue({
@@ -175,30 +178,35 @@ describe("ProjectDetailPage", () => {
     });
   });
 
-  it("renders applications with environments and shows config refs as-is", async () => {
+  it("renders the project's environments and its applications", async () => {
     renderPage();
     expect(await screen.findByText("platform-api")).toBeInTheDocument();
     expect(screen.getByText("worker")).toBeInTheDocument();
-    // Environments load per application.
+    // Environments are listed for the project, once — not per application.
     expect(await screen.findByText("production")).toBeInTheDocument();
-    expect(await screen.findByText("engine-local")).toBeInTheDocument();
+    expect(screen.getByText("Production")).toBeInTheDocument();
+    expect(screen.getByText("engine-local")).toBeInTheDocument();
     // The worker application has never deployed.
     expect(screen.getByText("never deployed")).toBeInTheDocument();
     // Secret references are displayed exactly as stored — never resolved.
-    expect(
-      screen.getByText(/DATABASE_URL=\$\{secret:DATABASE_URL\}/),
-    ).toBeInTheDocument();
+    expect(screen.getByText(/DATABASE_URL=\$\{secret:DATABASE_URL\}/)).toBeInTheDocument();
     expect(screen.getByText("LOG_LEVEL=info")).toBeInTheDocument();
   });
 
-  it("creates an environment through the dialog with config parsed from KEY=VALUE lines", async () => {
+  it("links each environment to its detail page", async () => {
+    renderPage();
+    const link = await screen.findByRole("link", { name: "production" });
+    expect(link).toHaveAttribute("href", "/projects/p1/environments/env-1");
+  });
+
+  it("creates a project environment with its type and KEY=VALUE config", async () => {
     renderPage();
     await screen.findByText("platform-api");
-    const addButtons = screen.getAllByRole("button", { name: "+ Add environment" });
-    fireEvent.click(addButtons[0]);
+    fireEvent.click(screen.getByRole("button", { name: "+ Add environment" }));
 
     expect(await screen.findByRole("heading", { name: "New environment" })).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText("Name"), { target: { value: "staging" } });
+    fireEvent.change(screen.getByLabelText("Type"), { target: { value: "STAGING" } });
     fireEvent.change(screen.getByLabelText(/Config \(one KEY=VALUE per line\)/), {
       target: { value: "LOG_LEVEL=debug\nAPI_TOKEN=${secret:API_TOKEN}" },
     });
@@ -206,12 +214,36 @@ describe("ProjectDetailPage", () => {
 
     await waitFor(() =>
       expect(post).toHaveBeenCalledWith(
-        "/projects/applications/app-1/environments",
+        "/projects/p1/environments",
         expect.objectContaining({
           name: "staging",
+          environment_type: "STAGING",
           server_id: null,
           config: { LOG_LEVEL: "debug", API_TOKEN: "${secret:API_TOKEN}" },
         }),
+      ),
+    );
+
+    // The project detail owns the environment list, so creating one must
+    // refetch it — otherwise the new environment never appears until a reload.
+    const projectFetches = () => get.mock.calls.filter(([path]) => path === "/projects/p1").length;
+    await waitFor(() => expect(projectFetches()).toBeGreaterThan(1));
+  });
+
+  it("edits the project base configuration", async () => {
+    patch.mockResolvedValue({ ...PROJECT, config: { REGION: "us" } });
+    renderPage();
+    await screen.findByText("platform-api");
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit project" }));
+    await screen.findByRole("dialog");
+    fireEvent.change(screen.getByLabelText(/Project config/), { target: { value: "REGION=us" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+
+    await waitFor(() =>
+      expect(patch).toHaveBeenCalledWith(
+        "/projects/p1",
+        expect.objectContaining({ config: { REGION: "us" } }),
       ),
     );
   });

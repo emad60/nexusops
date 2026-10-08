@@ -68,11 +68,16 @@ async def _delivery_chain(client, owner) -> tuple[dict, dict]:
             },
         )
     ).json()
+    # Phase 2: the environment is created on the project, not the application.
     environment = (
         await client.post(
-            f"{API}/projects/applications/{application['id']}/environments",
+            f"{API}/projects/{project['id']}/environments",
             headers=owner["headers"],
-            json={"name": "production", "server_id": server["id"]},
+            json={
+                "name": "production",
+                "environment_type": "prod",
+                "server_id": server["id"],
+            },
         )
     ).json()
     return {"project": project, "application": application}, environment

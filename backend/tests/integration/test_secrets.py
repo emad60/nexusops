@@ -87,9 +87,10 @@ async def test_environment_resolution_substitutes_secret_refs(client, owner, org
             json={"name": "resolver-app"},
         )
     ).json()
+    # Phase 2: environments live directly under the project.
     environment = (
         await client.post(
-            f"{API}/projects/applications/{application['id']}/environments",
+            f"{API}/projects/{project['id']}/environments",
             headers=owner["headers"],
             json={
                 "name": "production",
@@ -100,6 +101,7 @@ async def test_environment_resolution_substitutes_secret_refs(client, owner, org
             },
         )
     ).json()
+    assert application["id"]  # application still exists; the env is project-scoped
 
     # A global (project_id IS NULL) secret satisfies the reference.
     row = Secret(
@@ -135,11 +137,12 @@ async def _environment_config(client, owner, config: dict) -> str:
     ).json()
     environment = (
         await client.post(
-            f"{API}/projects/applications/{application['id']}/environments",
+            f"{API}/projects/{project['id']}/environments",
             headers=owner["headers"],
             json={"name": "production", "config": config},
         )
     ).json()
+    assert application["id"]
     return environment["id"]
 
 

@@ -40,7 +40,7 @@ from app.models.observability import (
     SystemEvent,
 )
 from app.models.operations import Operation
-from app.models.secrets import Secret
+from app.models.secrets import Secret, SecretVersion
 from app.models.tenancy import Membership, Organization
 
 __all__ = [
@@ -74,6 +74,7 @@ __all__ = [
     "Role",
     "RolePermission",
     "Secret",
+    "SecretVersion",
     "Server",
     "ServerCredential",
     "ServerTag",

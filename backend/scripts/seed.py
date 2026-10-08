@@ -60,6 +60,7 @@ from app.models import (
     Permission,
     Project,
     Role,
+    SecretVersion,
     Server,
     Session,
     Tag,
@@ -67,6 +68,7 @@ from app.models import (
 )
 from app.models.enums import (
     DeploymentStatus,
+    EnvironmentType,
     IncidentSeverity,
     IncidentStatus,
     MembershipStatus,
@@ -422,8 +424,12 @@ async def _seed_monitors(db, admin: User, now: datetime) -> None:  # type: ignor
 async def _seed_delivery(db, admin: User, servers: list[Server], now: datetime):  # type: ignore[no-untyped-def]
     from app.models import Secret
 
+    # Project base config: the layer every environment inherits from. The
+    # production environment below overrides LOG_LEVEL and adds a secret ref.
     project = Project(
-        name="Demo Platform", repository_url="https://git.example.com/acme/platform.git"
+        name="Demo Platform",
+        repository_url="https://git.example.com/acme/platform.git",
+        config={"LOG_LEVEL": "info", "REGION": "eu"},
     )
     db.add(project)
     await db.flush()
@@ -435,28 +441,44 @@ async def _seed_delivery(db, admin: User, servers: list[Server], now: datetime):
     )
     db.add(app_row)
     await db.flush()
+    # Phase 2: the environment belongs to the *project*, not the application.
     env_row = DeploymentEnvironment(
-        application_id=app_row.id,
+        project_id=project.id,
         name="production",
         slug="production",
+        environment_type=EnvironmentType.PROD,
         server_id=servers[1].id,
         healthcheck_path="/healthz",
         auto_deploy=False,
         config={
             "DATABASE_URL": "${secret:PLATFORM_DB_URL}",
             "REDIS_HOST": "redis.internal",
+            "LOG_LEVEL": "debug",
         },
     )
     db.add(env_row)
+    await db.flush()
+    seeded_secret = Secret(
+        key="PLATFORM_DB_URL",
+        # Project-scoped: every environment of the project resolves it.
+        project_id=project.id,
+        ciphertext=encrypt_str("postgresql://demo:demo@db.internal/platform"),
+        version=1,
+        digest=digest_of("postgresql://demo:demo@db.internal/platform"),
+        description="Platform API production database (seed)",
+        created_by_id=admin.id,
+        rotated_at=now,
+    )
+    db.add(seeded_secret)
+    await db.flush()
+    # Version history starts complete: version 1 is the seed value.
     db.add(
-        Secret(
-            key="PLATFORM_DB_URL",
-            ciphertext=encrypt_str("postgresql://demo:demo@db.internal/platform"),
+        SecretVersion(
+            secret_id=seeded_secret.id,
             version=1,
-            digest=digest_of("postgresql://demo:demo@db.internal/platform"),
-            description="Platform API production database (seed)",
+            ciphertext=seeded_secret.ciphertext,
+            digest=seeded_secret.digest,
             created_by_id=admin.id,
-            rotated_at=now,
         )
     )
     await db.flush()

@@ -1,10 +1,9 @@
-"""Projects, applications and deployment-environments endpoints.
+"""Projects, applications and (project-scoped) deployment-environments endpoints.
 
-Routers stay thin: parse -> service call -> serialize. Two routers are
-exported because environments nest under a top-level ``/applications`` prefix:
-
-* ``router`` — ``/projects`` (projects + nested applications)
-* ``applications_router`` — ``/applications`` (nested environments)
+Routers stay thin: parse -> service call -> serialize. Environments live under
+their **project** (Phase 2): ``/projects/{project_id}/environments``. They are no
+longer reachable through an application — an environment is a property of the
+project, not of any one application.
 """
 
 from __future__ import annotations
@@ -19,16 +18,16 @@ from app.core.pagination import Page, PageParams, page_params
 from app.models import Application, Deployment
 from app.schemas.application import ApplicationCreate, ApplicationOut, ApplicationUpdate
 from app.schemas.deployment import LatestDeploymentSummary
-from app.schemas.environment import EnvironmentCreate, EnvironmentOut, EnvironmentUpdate
+from app.schemas.environment import (
+    EnvironmentCreate,
+    EnvironmentDetailOut,
+    EnvironmentOut,
+    EnvironmentUpdate,
+)
 from app.schemas.project import ProjectCreate, ProjectDetailOut, ProjectOut, ProjectUpdate
 from app.services import project_service
 
 router = APIRouter(prefix="/projects", tags=["projects"])
-applications_router = APIRouter(prefix="/applications", tags=["applications"])
-
-# main.py mounts each module's ``router`` only; nesting keeps the top-level
-# ``/applications`` routes alive without a second include_router call there.
-router.include_router(applications_router)
 
 ReadUser = Annotated[AuthContext, Depends(require_permission("project.read"))]
 ManageUser = Annotated[AuthContext, Depends(require_permission("project.manage"))]
@@ -56,7 +55,7 @@ async def create_project(
     ctx: ManageUser,
     request: Request,
 ) -> ProjectOut:
-    """Register a new project. Names are globally unique."""
+    """Register a new project. Names are unique within the organization."""
     project = await project_service.create_project(db, ctx, payload=payload, request=request)
     return ProjectOut.model_validate(project)
 
@@ -90,9 +89,12 @@ async def get_project(
         _app_out(application, latest.get(application.id))
         for application in sorted(project.applications, key=lambda item: item.name)
     ]
-    # model_validate has no `update` kwarg; validate then override the field.
+    environments = [
+        EnvironmentOut.model_validate(environment)
+        for environment in await project_service.list_project_environments(db, project_id)
+    ]
     out = ProjectDetailOut.model_validate(project)
-    return out.model_copy(update={"applications": applications})
+    return out.model_copy(update={"applications": applications, "environments": environments})
 
 
 @router.patch("/{project_id}", response_model=ProjectOut)
@@ -204,35 +206,35 @@ async def delete_application(
     )
 
 
-# --- Nested environments (top-level /applications prefix) -----------------------
+# --- Nested environments (project-scoped) ---------------------------------------
 
 
-@applications_router.post(
-    "/{application_id}/environments",
+@router.post(
+    "/{project_id}/environments",
     response_model=EnvironmentOut,
     status_code=status.HTTP_201_CREATED,
 )
 async def create_environment(
-    application_id: UUID,
+    project_id: UUID,
     payload: EnvironmentCreate,
     db: DbSessionDep,
     ctx: ManageUser,
     request: Request,
 ) -> EnvironmentOut:
     environment = await project_service.create_environment(
-        db, ctx, application_id=application_id, payload=payload, request=request
+        db, ctx, project_id=project_id, payload=payload, request=request
     )
     return EnvironmentOut.model_validate(environment)
 
 
-@applications_router.get("/{application_id}/environments", response_model=Page[EnvironmentOut])
+@router.get("/{project_id}/environments", response_model=Page[EnvironmentOut])
 async def list_environments(
-    application_id: UUID,
+    project_id: UUID,
     db: DbSessionDep,
     _: ReadUser,
     page: Annotated[PageParams, Depends(page_params)],
 ) -> Page[EnvironmentOut]:
-    rows, total = await project_service.list_environments(db, application_id, page)
+    rows, total = await project_service.list_environments(db, project_id, page)
     return Page(
         items=[EnvironmentOut.model_validate(row) for row in rows],
         total=total,
@@ -241,24 +243,28 @@ async def list_environments(
     )
 
 
-@applications_router.get(
-    "/{application_id}/environments/{environment_id}", response_model=EnvironmentOut
-)
+@router.get("/{project_id}/environments/{environment_id}", response_model=EnvironmentDetailOut)
 async def get_environment(
-    application_id: UUID,
+    project_id: UUID,
     environment_id: UUID,
     db: DbSessionDep,
     _: ReadUser,
-) -> EnvironmentOut:
-    environment = await project_service.get_scoped_environment(db, application_id, environment_id)
-    return EnvironmentOut.model_validate(environment)
+) -> EnvironmentDetailOut:
+    """Environment detail: project config, overrides, effective config, counts.
+
+    The three configuration layers are returned separately so the UI can show
+    which value comes from where. Secret **references** are key names; values are
+    never returned.
+    """
+    environment = await project_service.get_scoped_environment(db, project_id, environment_id)
+    detail = await project_service.environment_detail(db, environment)
+    base = EnvironmentDetailOut.model_validate(environment)
+    return base.model_copy(update=detail)
 
 
-@applications_router.patch(
-    "/{application_id}/environments/{environment_id}", response_model=EnvironmentOut
-)
+@router.patch("/{project_id}/environments/{environment_id}", response_model=EnvironmentOut)
 async def update_environment(
-    application_id: UUID,
+    project_id: UUID,
     environment_id: UUID,
     payload: EnvironmentUpdate,
     db: DbSessionDep,
@@ -268,7 +274,7 @@ async def update_environment(
     environment = await project_service.update_environment(
         db,
         ctx,
-        application_id=application_id,
+        project_id=project_id,
         environment_id=environment_id,
         payload=payload,
         request=request,
@@ -276,17 +282,17 @@ async def update_environment(
     return EnvironmentOut.model_validate(environment)
 
 
-@applications_router.delete(
-    "/{application_id}/environments/{environment_id}",
+@router.delete(
+    "/{project_id}/environments/{environment_id}",
     status_code=status.HTTP_204_NO_CONTENT,
 )
 async def delete_environment(
-    application_id: UUID,
+    project_id: UUID,
     environment_id: UUID,
     db: DbSessionDep,
     ctx: ManageUser,
     request: Request,
 ) -> None:
     await project_service.delete_environment(
-        db, ctx, application_id=application_id, environment_id=environment_id, request=request
+        db, ctx, project_id=project_id, environment_id=environment_id, request=request
     )

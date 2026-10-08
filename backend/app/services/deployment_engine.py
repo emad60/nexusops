@@ -181,8 +181,11 @@ async def queue_deployment(
 ) -> Deployment:
     """Create QUEUED deployment + PENDING steps; race-safe per-application number."""
     _validate_version(version)
-    if environment.application_id != application.id:
-        raise NotFound("Environment does not belong to this application")
+    # Phase 2: the environment is project-scoped, so the pair is valid when the
+    # application and the environment sit in the same project — the deployment
+    # row still records exactly which application went into which environment.
+    if environment.project_id != application.project_id:
+        raise NotFound("Environment does not belong to this application's project")
 
     await db.execute(
         select(Application.id).where(Application.id == application.id).with_for_update()

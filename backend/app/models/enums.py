@@ -94,6 +94,21 @@ class DeploymentTrigger(StrEnum):
     AUTO = "AUTO"
 
 
+class EnvironmentType(StrEnum):
+    """Kind of a project-scoped deployment environment (Phase 2).
+
+    Descriptive only — **never** an authorization dimension. Access to an
+    environment is decided by permissions and organization membership (and, in
+    a later phase, grants), not by whether it is production. Stored uppercase
+    like every other closed registry in this module; the SPA renders the labels
+    Development / Staging / Production.
+    """
+
+    DEV = "DEV"
+    STAGING = "STAGING"
+    PROD = "PROD"
+
+
 class OperationStatus(StrEnum):
     """Lifecycle of one node operation (node-agent-architecture.md §5.1).
 

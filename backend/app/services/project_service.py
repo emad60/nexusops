@@ -26,6 +26,7 @@ from app.models import (
     Deployment,
     DeploymentEnvironment,
     Project,
+    Secret,
     Server,
 )
 from app.models.enums import ActorType
@@ -33,6 +34,7 @@ from app.schemas.application import ApplicationCreate, ApplicationUpdate
 from app.schemas.environment import EnvironmentCreate, EnvironmentUpdate
 from app.schemas.project import ProjectCreate, ProjectUpdate
 from app.services import audit_service, event_bus
+from app.services.config_service import collect_secret_refs, effective_config
 
 log = get_logger("nexusops.delivery")
 
@@ -79,9 +81,20 @@ async def _unique_slug(
 
 
 async def _ensure_unique(
-    db: AsyncSession, condition: ColumnElement[bool], code: str, message: str
+    db: AsyncSession,
+    column: Any,
+    condition: ColumnElement[bool],
+    code: str,
+    message: str,
 ) -> None:
-    if await db.scalar(select(1).where(condition)) is not None:
+    """Conflict when an ORM row matching *condition* exists.
+
+    Selects a mapped **column** on purpose: the tenancy guard applies tenant
+    filtering to ORM selects and refuses a bare Core ``select(1)`` on a
+    tenant-owned table, so an existence probe has to name a mapped attribute to
+    stay inside the org scope.
+    """
+    if await db.scalar(select(column).where(condition)) is not None:
         raise Conflict(message, code=code)
 
 
@@ -125,12 +138,14 @@ async def create_project(
         repository_url=payload.repository_url,
         default_branch=payload.default_branch or "main",
         owner_id=owner_id,
+        config=dict(payload.config),
     )
     # Initialize the collection while the object is still pending: assigning an
     # unloaded relationship AFTER flush would trigger a lazy load, which is
     # illegal from sync serialization. Pending objects initialize collections
     # without IO, and the (provably empty) set stays loaded for serialization.
     project.applications = []
+    project.environments = []
     db.add(project)
     try:
         await db.flush()
@@ -171,6 +186,7 @@ async def update_project(
     if data.get("name") and data["name"] != project.name:
         await _ensure_unique(
             db,
+            Project.id,
             (Project.name == data["name"]) & (Project.id != project.id),
             "DUPLICATE_NAME",
             "A project with this name exists",
@@ -395,34 +411,101 @@ async def delete_application(
     )
 
 
-# --- Environments -------------------------------------------------------------
+# --- Environments (project-scoped, Phase 2) -------------------------------------
 
 
 async def get_environment(db: AsyncSession, environment_id: uuid.UUID) -> DeploymentEnvironment:
     environment = await db.get(DeploymentEnvironment, environment_id)
     if environment is None:
-        raise NotFound("Environment not found")
+        raise NotFound("Environment not found", code="ENVIRONMENT_NOT_FOUND")
     return environment
 
 
 async def get_scoped_environment(
-    db: AsyncSession, application_id: uuid.UUID, environment_id: uuid.UUID
+    db: AsyncSession, project_id: uuid.UUID, environment_id: uuid.UUID
 ) -> DeploymentEnvironment:
+    """Resolve an environment **through its project**.
+
+    A known environment UUID is not enough: the link to the project in the path
+    must hold, or this is a 404. That is what makes knowing an id worthless
+    across projects and, with the guard + RLS beneath it, across tenants.
+    """
     environment = await db.get(DeploymentEnvironment, environment_id)
-    if environment is None or environment.application_id != application_id:
-        raise NotFound("Environment not found for this application")
+    if environment is None or environment.project_id != project_id:
+        raise NotFound("Environment not found in this project", code="ENVIRONMENT_NOT_FOUND")
     return environment
 
 
 async def list_environments(
-    db: AsyncSession, application_id: uuid.UUID, params: PageParams
+    db: AsyncSession, project_id: uuid.UUID, params: PageParams
 ) -> tuple[list[DeploymentEnvironment], int]:
+    # Resolve the project first: an unknown or out-of-tenant project id is a 404,
+    # never a 200 with an empty list (which would confirm nothing but would also
+    # make the route's behaviour depend on whether the caller guessed right).
+    await get_project(db, project_id)
     stmt = (
         select(DeploymentEnvironment)
-        .where(DeploymentEnvironment.application_id == application_id)
+        .where(DeploymentEnvironment.project_id == project_id)
         .order_by(DeploymentEnvironment.name)
     )
     return await paginate(db, stmt, params)
+
+
+async def list_project_environments(
+    db: AsyncSession, project_id: uuid.UUID
+) -> list[DeploymentEnvironment]:
+    """Every environment of a project (unpaginated) for the project detail view."""
+    rows = (
+        await db.execute(
+            select(DeploymentEnvironment)
+            .where(DeploymentEnvironment.project_id == project_id)
+            .order_by(DeploymentEnvironment.name)
+        )
+    ).scalars()
+    return list(rows)
+
+
+async def environment_detail(db: AsyncSession, environment: DeploymentEnvironment) -> dict:
+    """Environment detail payload: layered config + counts, never secret values.
+
+    ``secret_references`` are key **names** the environment's effective config
+    names — names are not secrets. Values never leave the resolver.
+    """
+    project = await get_project(db, environment.project_id)
+    project_config = dict(project.config or {})
+    environment_config = dict(environment.config or {})
+    effective = effective_config(project_config, environment_config)
+
+    application_count = int(
+        await db.scalar(
+            select(func.count())
+            .select_from(Application)
+            .where(Application.project_id == environment.project_id)
+        )
+        or 0
+    )
+    deployment_count = int(
+        await db.scalar(
+            select(func.count())
+            .select_from(Deployment)
+            .where(Deployment.environment_id == environment.id)
+        )
+        or 0
+    )
+    secret_count = int(
+        await db.scalar(
+            select(func.count()).select_from(Secret).where(Secret.environment_id == environment.id)
+        )
+        or 0
+    )
+    return {
+        "project_config": project_config,
+        "effective_config": effective,
+        "secret_references": collect_secret_refs(effective),
+        "application_count": application_count,
+        "deployment_count": deployment_count,
+        "secret_count": secret_count,
+    }
 
 
 async def _check_server(db: AsyncSession, server_id: uuid.UUID | None) -> uuid.UUID | None:
@@ -435,25 +518,37 @@ async def create_environment(
     db: AsyncSession,
     ctx: AuthContext | None,
     *,
-    application_id: uuid.UUID,
+    project_id: uuid.UUID,
     payload: EnvironmentCreate,
     request: Request | None = None,
 ) -> DeploymentEnvironment:
-    application = await get_application(db, application_id)
+    project = await get_project(db, project_id)
     server_id = await _check_server(db, payload.server_id)
+    # A duplicate *name* in the project is a conflict, not a silent
+    # ``production-2``. Slug suffixes stay reserved for the genuine case of two
+    # different names that slugify alike.
+    await _ensure_unique(
+        db,
+        DeploymentEnvironment.id,
+        (DeploymentEnvironment.project_id == project.id)
+        & (DeploymentEnvironment.name == payload.name.strip()),
+        "DUPLICATE_NAME",
+        "An environment with this name exists in the project",
+    )
     base_slug = slugify(payload.name, "env", _NAME_MAX["environment"])
     slug = await _unique_slug(
         db,
         column=DeploymentEnvironment.slug,
-        parent_column=DeploymentEnvironment.application_id,
-        parent_id=application.id,
+        parent_column=DeploymentEnvironment.project_id,
+        parent_id=project.id,
         base=base_slug,
         kind="environment",
     )
     environment = DeploymentEnvironment(
-        application_id=application.id,
+        project_id=project.id,
         name=payload.name.strip(),
         slug=slug,
+        environment_type=payload.environment_type,
         server_id=server_id,
         healthcheck_path=payload.healthcheck_path,
         auto_deploy=payload.auto_deploy,
@@ -464,15 +559,15 @@ async def create_environment(
         await db.flush()
     except IntegrityError as exc:
         raise _integrity_conflict(
-            exc, "DUPLICATE_NAME", "An environment with this name exists for the application"
+            exc, "DUPLICATE_NAME", "An environment with this name exists in the project"
         ) from exc
     await event_bus.publish(
         db,
         type="ENVIRONMENT_CREATED",
-        message=f"Environment {environment.name} created for {application.name}",
+        message=f"Environment {environment.name} created in project {project.name}",
         resource_type="deployment_environment",
         resource_id=str(environment.id),
-        data={"application_id": str(application.id), "slug": slug},
+        data={"project_id": str(project.id), "slug": slug},
     )
     await audit_service.record(
         db,
@@ -481,7 +576,11 @@ async def create_environment(
         resource_type="deployment_environment",
         resource_id=environment.id,
         # Config holds references only; redact_mapping guards defence-in-depth.
-        metadata={"name": environment.name, "application": application.name},
+        metadata={
+            "name": environment.name,
+            "project": project.name,
+            "environment_type": str(environment.environment_type),
+        },
         request=request,
     )
     return environment
@@ -491,12 +590,12 @@ async def update_environment(
     db: AsyncSession,
     ctx: AuthContext | None,
     *,
-    application_id: uuid.UUID,
+    project_id: uuid.UUID,
     environment_id: uuid.UUID,
     payload: EnvironmentUpdate,
     request: Request | None = None,
 ) -> DeploymentEnvironment:
-    environment = await get_scoped_environment(db, application_id, environment_id)
+    environment = await get_scoped_environment(db, project_id, environment_id)
     data = payload.model_dump(exclude_unset=True, exclude_none=True)
     if "server_id" in payload.model_dump(exclude_unset=True):
         data["server_id"] = await _check_server(db, payload.server_id)
@@ -507,8 +606,8 @@ async def update_environment(
         data["slug"] = await _unique_slug(
             db,
             column=DeploymentEnvironment.slug,
-            parent_column=DeploymentEnvironment.application_id,
-            parent_id=environment.application_id,
+            parent_column=DeploymentEnvironment.project_id,
+            parent_id=environment.project_id,
             base=slugify(data["name"], "env", _NAME_MAX["environment"]),
             kind="environment",
         )
@@ -518,7 +617,7 @@ async def update_environment(
         await _apply_update(db, environment, data)
     except IntegrityError as exc:
         raise _integrity_conflict(
-            exc, "DUPLICATE_NAME", "An environment with this name exists for the application"
+            exc, "DUPLICATE_NAME", "An environment with this name exists in the project"
         ) from exc
     await audit_service.record(
         db,
@@ -536,11 +635,11 @@ async def delete_environment(
     db: AsyncSession,
     ctx: AuthContext | None,
     *,
-    application_id: uuid.UUID,
+    project_id: uuid.UUID,
     environment_id: uuid.UUID,
     request: Request | None = None,
 ) -> None:
-    environment = await get_scoped_environment(db, application_id, environment_id)
+    environment = await get_scoped_environment(db, project_id, environment_id)
     name = environment.name
     await db.delete(environment)
     await db.flush()

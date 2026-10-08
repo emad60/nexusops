@@ -1,4 +1,10 @@
-"""Delivery pipeline: projects → applications → environments → deployments."""
+"""Delivery pipeline: projects → environments → applications → deployments.
+
+Phase 2 promotes the environment to **project scope**: a project owns its
+environments (dev/staging/prod), and applications are deployed *into* them.
+A ``Deployment`` keeps its ``(application_id, environment_id)`` pair, which now
+reads "application X was deployed into project environment Y".
+"""
 
 from __future__ import annotations
 
@@ -26,7 +32,7 @@ from app.models.base import (
     status_check,
     uuid_pk,
 )
-from app.models.enums import DeploymentStatus, DeploymentTrigger, StepStatus
+from app.models.enums import DeploymentStatus, DeploymentTrigger, EnvironmentType, StepStatus
 
 
 class Project(OrgScoped, TimestampMixin, Base):
@@ -42,8 +48,15 @@ class Project(OrgScoped, TimestampMixin, Base):
     owner_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )
+    #: Base layer of the project's deploy configuration (Phase 2). Structured
+    #: data only: non-secret settings plus ``${secret:KEY}`` references. Holds no
+    #: execution semantics — nothing interpolates or evaluates the values here.
+    config: Mapped[dict] = json_column()
 
     applications: Mapped[list[Application]] = relationship(
+        back_populates="project", cascade="all, delete-orphan", lazy="selectin"
+    )
+    environments: Mapped[list[DeploymentEnvironment]] = relationship(
         back_populates="project", cascade="all, delete-orphan", lazy="selectin"
     )
 
@@ -75,22 +88,45 @@ class Application(OrgScoped, TimestampMixin, Base):
 
 
 class DeploymentEnvironment(OrgScoped, TimestampMixin, Base):
+    """A **project-scoped** deployment environment (Phase 2 promotion).
+
+    The environment belongs to the *project*, not to an application — "Project
+    Ymart → Production". Applications deploy *into* a project environment; a
+    ``Deployment`` still carries its ``(application_id, environment_id)`` pair,
+    which now reads "application X was deployed into environment Y".
+
+    Uniqueness is ``(project_id, slug)``. ``environment_type`` is descriptive:
+    it never gates access (permissions do). ``server_id`` (Node) is the target
+    machine for the environment when one is assigned; the column keeps its
+    Phase 1 name — the ``server.*``→``node.*`` rename was a surface rename and
+    the physical column rename is a later cleanup phase (domain-model.md §2.3).
+    """
+
     __tablename__ = "deployment_environments"
-    __table_args__ = (UniqueConstraint("application_id", "name", name="uq_envs_application_name"),)
+    __table_args__ = (
+        UniqueConstraint("project_id", "slug", name="uq_envs_project_slug"),
+        status_check("environment_type", EnvironmentType),
+    )
 
     id: Mapped[uuid.UUID] = uuid_pk()
-    application_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("applications.id", ondelete="CASCADE"), nullable=False, index=True
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True
     )
     name: Mapped[str] = mapped_column(String(64), nullable=False)
     slug: Mapped[str] = mapped_column(String(84), nullable=False)
+    environment_type: Mapped[EnvironmentType] = mapped_column(
+        String(16), default=EnvironmentType.DEV, nullable=False, index=True
+    )
     server_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("servers.id", ondelete="SET NULL"), nullable=True
     )
     healthcheck_path: Mapped[str] = mapped_column(String(300), default="", nullable=False)
     auto_deploy: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
-    # Secret references by key name only — values always resolve server-side.
+    # Environment *overrides* over the project config: secret references by key
+    # name only — values always resolve server-side, never through the API.
     config: Mapped[dict] = json_column()
+
+    project: Mapped[Project] = relationship(back_populates="environments")
 
 
 class Deployment(OrgScoped, TimestampMixin, Base):

@@ -22,6 +22,7 @@ const DeploymentListPage = lazy(() => import("./pages/DeploymentListPage"));
 const DeploymentDetailPage = lazy(() => import("./pages/DeploymentDetailPage"));
 const ProjectListPage = lazy(() => import("./pages/ProjectListPage"));
 const ProjectDetailPage = lazy(() => import("./pages/ProjectDetailPage"));
+const EnvironmentDetailPage = lazy(() => import("./pages/EnvironmentDetailPage"));
 const EventsPage = lazy(() => import("./pages/EventsPage"));
 const AuditLogPage = lazy(() => import("./pages/AuditLogPage"));
 const SecretsPage = lazy(() => import("./pages/SecretsPage"));
@@ -79,6 +80,10 @@ export function App() {
               <Route path="/deployments/:deploymentId" element={<DeploymentDetailPage />} />
               <Route path="/projects" element={<ProjectListPage />} />
               <Route path="/projects/:projectId" element={<ProjectDetailPage />} />
+              <Route
+                path="/projects/:projectId/environments/:environmentId"
+                element={<EnvironmentDetailPage />}
+              />
               <Route path="/events" element={<EventsPage />} />
               <Route path="/audit-logs" element={<AuditLogPage />} />
               <Route path="/secrets" element={<SecretsPage />} />

@@ -262,7 +262,11 @@ export interface ProjectOut {
   description: string;
   repository_url: string;
   default_branch: string;
+  /** Project base config (flat string→string); environment overrides win per key. */
+  config?: Record<string, string>;
   applications?: ApplicationOut[];
+  /** Phase 2: environments are project-scoped and listed on project detail. */
+  environments?: EnvironmentOut[];
   created_at: string;
 }
 
@@ -291,16 +295,46 @@ export type DeploymentStatus =
   | "CANCELLED"
   | "ROLLBACK";
 
+/** Environment kinds. Descriptive only — never an authorization dimension. */
+export type EnvironmentType = "DEV" | "STAGING" | "PROD";
+
+/** UI labels for the stored environment type. */
+export const ENVIRONMENT_TYPE_LABELS: Record<EnvironmentType, string> = {
+  DEV: "Development",
+  STAGING: "Staging",
+  PROD: "Production",
+};
+
+/**
+ * A project-scoped deployment environment (Phase 2). It belongs to a
+ * **project**, not an application; `config` holds this environment's overrides
+ * over the project base config.
+ */
 export interface EnvironmentOut {
   id: string;
-  application_id: string;
+  project_id: string;
   name: string;
   slug: string;
+  environment_type: EnvironmentType;
   server_id: string | null;
   healthcheck_path: string;
   auto_deploy: boolean;
-  config: Record<string, unknown>;
+  config: Record<string, string>;
   created_at: string;
+}
+
+/**
+ * Environment detail. The three configuration layers are returned separately so
+ * the UI can show where a value comes from. `secret_references` are key names
+ * only — secret values are never returned by any endpoint.
+ */
+export interface EnvironmentDetailOut extends EnvironmentOut {
+  project_config: Record<string, string>;
+  effective_config: Record<string, string>;
+  secret_references: string[];
+  application_count: number;
+  deployment_count: number;
+  secret_count: number;
 }
 
 export interface DeploymentStepOut {
@@ -379,10 +413,21 @@ export interface SecretRow {
   digest: string;
   description: string;
   project_id: string | null;
+  environment_id: string | null;
   rotated_at: string | null;
   rotated_by_email?: string | null;
   created_at: string;
   updated_at: string;
+}
+
+/** One immutable secret version's metadata. Never carries a value or ciphertext. */
+export interface SecretVersionRow {
+  id: string;
+  secret_id: string;
+  version: number;
+  digest: string;
+  created_by_email?: string | null;
+  created_at: string;
 }
 
 export interface MetricPoint {

@@ -2,17 +2,23 @@
  * SecretsPage — encrypted secrets manager (route: /secrets).
  *
  * The API never returns secret values: reads are metadata only (key, version,
- * digest prefix, timestamps) and plaintext is accepted solely on create/rotate.
- * This page therefore renders no value column, no reveal controls, and warns
- * that submitted values are unrecoverable.
+ * digest prefix, timestamps, scope) and plaintext is accepted solely on
+ * create/rotate. This page therefore renders no value column, no reveal controls,
+ * and warns that submitted values are unrecoverable.
  *
- * Data: GET /secrets · POST /secrets · POST /secrets/{id}/rotate · DELETE /secrets/{id}.
+ * Phase 2: a secret may be scoped to the organization, a project, or a single
+ * project environment. Resolution prefers the most specific scope. Version
+ * history (rotate / non-destructive rollback) lives in {@link SecretHistoryModal}.
+ *
+ * Data: GET /secrets · POST /secrets · GET /secrets/{id}/versions ·
+ *       POST /secrets/{id}/rotate · POST /secrets/{id}/rollback · DELETE /secrets/{id}.
  */
 
 import { useState, type FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ApiError, apiDelete, apiGet, apiPost } from "../api/client";
-import type { Page, SecretRow } from "../api/types";
+import type { EnvironmentOut, Page, ProjectOut, SecretRow } from "../api/types";
+import { SecretHistoryModal, SecretScopeBadge } from "../components/SecretHistory";
 import { EmptyState, ErrorBlock, Modal } from "../components/ui";
 import { TableSkeleton } from "../components/Skeleton";
 import { InfoHint } from "../components/InfoHint";
@@ -44,19 +50,49 @@ function formatTimestamp(iso: string | null | undefined): string {
   });
 }
 
+type SecretScope = "organization" | "project" | "environment";
+
+interface CreateSecretPayload {
+  key: string;
+  value: string;
+  description: string;
+  project_id: string | null;
+  environment_id: string | null;
+}
+
 function CreateSecretModal({ open, onClose }: { open: boolean; onClose: () => void }) {
   const notify = useToast();
   const queryClient = useQueryClient();
   const [key, setKey] = useState("");
   const [value, setValue] = useState("");
   const [description, setDescription] = useState("");
+  const [scope, setScope] = useState<SecretScope>("organization");
+  const [projectId, setProjectId] = useState("");
+  const [environmentId, setEnvironmentId] = useState("");
   const [keyError, setKeyError] = useState<string | null>(null);
   const [valueError, setValueError] = useState<string | null>(null);
+  const [scopeError, setScopeError] = useState<string | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
 
+  // Scope pickers: only fetched once a scope actually needs them.
+  const projectsQ = useQuery({
+    queryKey: ["projects", "secret-scope"],
+    queryFn: ({ signal }) => apiGet<Page<ProjectOut>>("/projects", { limit: 100 }, signal),
+    enabled: open && scope !== "organization",
+  });
+  const environmentsQ = useQuery({
+    queryKey: ["environments", projectId, "secret-scope"],
+    queryFn: ({ signal }) =>
+      apiGet<Page<EnvironmentOut>>(
+        `/projects/${projectId}/environments`,
+        { limit: 100 },
+        signal,
+      ),
+    enabled: open && scope === "environment" && projectId !== "",
+  });
+
   const createMutation = useMutation({
-    mutationFn: (payload: { key: string; value: string; description: string }) =>
-      apiPost<SecretRow>("/secrets", payload),
+    mutationFn: (payload: CreateSecretPayload) => apiPost<SecretRow>("/secrets", payload),
     onSuccess: (created) => {
       void queryClient.invalidateQueries({ queryKey: ["secrets"] });
       notify(`Secret ${created.key} created (v${created.version}).`, "success");
@@ -76,10 +112,23 @@ function CreateSecretModal({ open, onClose }: { open: boolean; onClose: () => vo
       ? null
       : "Key must be UPPERCASE — letters, digits, underscore, dot or dash (e.g. DB_PASSWORD).";
     const nextValueError = value.length === 0 ? "A value is required." : null;
+    const nextScopeError =
+      scope !== "organization" && projectId === ""
+        ? "Choose the project this secret belongs to."
+        : scope === "environment" && environmentId === ""
+          ? "Choose the environment this secret belongs to."
+          : null;
     setKeyError(nextKeyError);
     setValueError(nextValueError);
-    if (nextKeyError || nextValueError) return;
-    createMutation.mutate({ key: key.trim(), value, description: description.trim() });
+    setScopeError(nextScopeError);
+    if (nextKeyError || nextValueError || nextScopeError) return;
+    createMutation.mutate({
+      key: key.trim(),
+      value,
+      description: description.trim(),
+      project_id: scope === "organization" ? null : projectId,
+      environment_id: scope === "environment" ? environmentId : null,
+    });
   }
 
   return (
@@ -121,6 +170,73 @@ function CreateSecretModal({ open, onClose }: { open: boolean; onClose: () => vo
           value={description}
           onChange={(event) => setDescription(event.target.value)}
         />
+        <div className="field">
+          <label htmlFor="secret-scope">Scope</label>
+          <select
+            id="secret-scope"
+            className="input"
+            value={scope}
+            onChange={(event) => {
+              setScope(event.target.value as SecretScope);
+              setScopeError(null);
+            }}
+          >
+            <option value="organization">Whole organization</option>
+            <option value="project">One project</option>
+            <option value="environment">One project environment</option>
+          </select>
+          <span className="faint small">
+            Resolution prefers the most specific scope: environment, then project, then
+            organization.
+          </span>
+        </div>
+        {scope !== "organization" ? (
+          <div className="field-row">
+            <div className="field">
+              <label htmlFor="secret-scope-project">Project</label>
+              <select
+                id="secret-scope-project"
+                className="input"
+                value={projectId}
+                onChange={(event) => {
+                  setProjectId(event.target.value);
+                  setEnvironmentId("");
+                }}
+              >
+                <option value="">Select a project…</option>
+                {(projectsQ.data?.items ?? []).map((project) => (
+                  <option key={project.id} value={project.id}>
+                    {project.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+            {scope === "environment" ? (
+              <div className="field">
+                <label htmlFor="secret-scope-environment">Environment</label>
+                <select
+                  id="secret-scope-environment"
+                  className="input"
+                  value={environmentId}
+                  disabled={projectId === ""}
+                  onChange={(event) => setEnvironmentId(event.target.value)}
+                >
+                  <option value="">Select an environment…</option>
+                  {(environmentsQ.data?.items ?? []).map((environment) => (
+                    <option key={environment.id} value={environment.id}>
+                      {environment.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            ) : null}
+          </div>
+        ) : null}
+        {scopeError ? (
+          <p className="form-error" role="alert">
+            {scopeError}
+          </p>
+        ) : null}
         {formError ? (
           <p className="form-error" role="alert">
             {formError}
@@ -132,76 +248,6 @@ function CreateSecretModal({ open, onClose }: { open: boolean; onClose: () => vo
           </button>
           <button type="submit" className="btn primary" disabled={createMutation.isPending}>
             Create secret
-          </button>
-        </div>
-      </form>
-    </Modal>
-  );
-}
-
-function RotateSecretModal({ secret, onClose }: { secret: SecretRow; onClose: () => void }) {
-  const notify = useToast();
-  const queryClient = useQueryClient();
-  const [value, setValue] = useState("");
-  const [valueError, setValueError] = useState<string | null>(null);
-  const [formError, setFormError] = useState<string | null>(null);
-
-  const rotateMutation = useMutation({
-    mutationFn: (newValue: string) =>
-      apiPost<SecretRow>(`/secrets/${secret.id}/rotate`, { value: newValue }),
-    onSuccess: (rotated) => {
-      void queryClient.invalidateQueries({ queryKey: ["secrets"] });
-      notify(`Secret ${rotated.key} rotated to v${rotated.version}.`, "success");
-      onClose();
-    },
-    onError: (cause) => {
-      const message = errorMessage(cause);
-      notify(message, "error");
-      setFormError(message);
-    },
-  });
-
-  function submit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    setFormError(null);
-    if (value.length === 0) {
-      setValueError("A new value is required.");
-      return;
-    }
-    setValueError(null);
-    rotateMutation.mutate(value);
-  }
-
-  return (
-    <Modal open title={`Rotate ${secret.key}`} onClose={onClose}>
-      <form onSubmit={submit}>
-        <p className="form-error mb-8" role="note">
-          The current value is permanently overwritten and bumps the version to v
-          {secret.version + 1}. Like every secret value, the replacement can never be viewed
-          again after submission.
-        </p>
-        <PasswordField
-          id="rotate-value"
-          label="New value"
-          mono
-          required
-          error={valueError}
-          value={value}
-          onChange={(event) => setValue(event.target.value)}
-          autoComplete="new-password"
-          autoFocus
-        />
-        {formError ? (
-          <p className="form-error" role="alert">
-            {formError}
-          </p>
-        ) : null}
-        <div className="modal-actions">
-          <button type="button" className="btn" onClick={onClose}>
-            Cancel
-          </button>
-          <button type="submit" className="btn primary" disabled={rotateMutation.isPending}>
-            Rotate secret
           </button>
         </div>
       </form>
@@ -265,8 +311,18 @@ export default function SecretsPage() {
   const [keyDraft, setKeyDraft] = useState("");
   const [keyFilter, setKeyFilter] = useState("");
   const [createOpen, setCreateOpen] = useState(false);
-  const [rotateTarget, setRotateTarget] = useState<SecretRow | null>(null);
+  const [historyTarget, setHistoryTarget] = useState<SecretRow | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<SecretRow | null>(null);
+
+  // Scope labels in the list: project names (environment rows show their kind).
+  const projectsQ = useQuery({
+    queryKey: ["projects", "secret-scope-labels"],
+    queryFn: ({ signal }) => apiGet<Page<ProjectOut>>("/projects", { limit: 100 }, signal),
+    staleTime: 60_000,
+  });
+  const projectNames = new Map(
+    (projectsQ.data?.items ?? []).map((project) => [project.id, project.name]),
+  );
 
   const query = useQuery({
     queryKey: ["secrets", offset, keyFilter],
@@ -293,7 +349,8 @@ export default function SecretsPage() {
           <h1>Secrets</h1>
           <p className="page-sub">
             Encrypted configuration values — metadata only. Values are write-only and never
-            displayed.
+            displayed. Every secret is scoped to the organization, a project, or a single
+            environment.
           </p>
         </div>
         <div className="page-actions">
@@ -342,17 +399,24 @@ export default function SecretsPage() {
             <thead>
               <tr>
                 <th>Key</th>
+                <th>Scope</th>
                 <th>Description</th>
                 <th>Version</th>
                 <th>Digest</th>
                 <th>Updated</th>
-                {canWrite ? <th>Actions</th> : null}
+                <th>Actions</th>
               </tr>
             </thead>
             <tbody>
               {rows.map((row) => (
                 <tr key={row.id}>
                   <td className="mono">{row.key}</td>
+                  <td>
+                    <SecretScopeBadge
+                      secret={row}
+                      projectName={row.project_id ? projectNames.get(row.project_id) : undefined}
+                    />
+                  </td>
                   <td className="muted">{row.description || <span className="faint">—</span>}</td>
                   <td>
                     <span className="badge no-dot NEUTRAL">v{row.version}</span>
@@ -388,17 +452,17 @@ export default function SecretsPage() {
                   >
                     {formatTimestamp(row.updated_at)}
                   </td>
-                  {canWrite ? (
-                    <td>
-                      <div className="flex gap-8">
-                        <button
-                          type="button"
-                          className="btn sm"
-                          aria-label={`Rotate ${row.key}`}
-                          onClick={() => setRotateTarget(row)}
-                        >
-                          Rotate
-                        </button>
+                  <td>
+                    <div className="flex gap-8">
+                      <button
+                        type="button"
+                        className="btn sm"
+                        aria-label={`Version history of ${row.key}`}
+                        onClick={() => setHistoryTarget(row)}
+                      >
+                        History
+                      </button>
+                      {canWrite ? (
                         <button
                           type="button"
                           className="btn sm danger"
@@ -407,9 +471,9 @@ export default function SecretsPage() {
                         >
                           Delete
                         </button>
-                      </div>
-                    </td>
-                  ) : null}
+                      ) : null}
+                    </div>
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -422,8 +486,12 @@ export default function SecretsPage() {
       ) : null}
 
       <CreateSecretModal open={createOpen} onClose={() => setCreateOpen(false)} />
-      {rotateTarget ? (
-        <RotateSecretModal secret={rotateTarget} onClose={() => setRotateTarget(null)} />
+      {historyTarget ? (
+        <SecretHistoryModal
+          secret={historyTarget}
+          canWrite={canWrite}
+          onClose={() => setHistoryTarget(null)}
+        />
       ) : null}
       {deleteTarget ? (
         <DeleteSecretModal secret={deleteTarget} onClose={() => setDeleteTarget(null)} />

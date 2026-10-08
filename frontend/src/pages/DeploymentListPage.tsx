@@ -47,6 +47,8 @@ interface AppOption {
   id: string;
   name: string;
   projectName: string;
+  /** Phase 2: environments hang off the application's **project**, not the app. */
+  projectId: string;
 }
 
 /** Dialog that queues a new deployment for an application/environment pair. */
@@ -79,20 +81,24 @@ function TriggerDeploymentModal({
           id: app.id,
           name: app.name,
           projectName: project.name,
+          projectId: project.id,
         })),
       ),
     [projectsQ.data],
   );
 
+  // An application deploys *into* an environment of its own project.
+  const projectId = applications.find((app) => app.id === applicationId)?.projectId ?? "";
+
   const environmentsQ = useQuery({
-    queryKey: ["environments", applicationId],
+    queryKey: ["environments", projectId, "trigger"],
     queryFn: ({ signal }) =>
       apiGet<Page<EnvironmentOut>>(
-        `/projects/applications/${applicationId}/environments`,
+        `/projects/${projectId}/environments`,
         { limit: 100 },
         signal,
       ),
-    enabled: open && applicationId !== "",
+    enabled: open && projectId !== "",
   });
 
   const triggerMutation = useMutation({

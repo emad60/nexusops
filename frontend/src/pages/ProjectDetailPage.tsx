@@ -1,54 +1,44 @@
 /**
- * /projects/:projectId — project overview, its applications (each with a
- * per-application environments table and config summary) and create/edit/
- * delete dialogs for project, application and environment.
+ * /projects/:projectId — the project's **environments** (Phase 2: they belong to
+ * the project, not to an application), its applications, and the create/edit/
+ * delete dialogs for project, environment and application.
  *
- * Environment config values are stored REFERENCES — `${secret:KEY}` strings —
- * and are always rendered as-is; secret values are never returned or resolved
- * client-side.
+ * Config values are stored REFERENCES — `${secret:KEY}` strings — and are always
+ * rendered as-is; secret values are never returned or resolved client-side.
  */
 
 import { useEffect, useState, type FormEvent } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ApiError, apiDelete, apiGet, apiPatch, apiPost } from "../api/client";
-import type { ApplicationOut, EnvironmentOut, Page, ProjectOut, ServerSummary } from "../api/types";
+import {
+  ENVIRONMENT_TYPE_LABELS,
+  type ApplicationOut,
+  type EnvironmentOut,
+  type EnvironmentType,
+  type Page,
+  type ProjectOut,
+  type ServerSummary,
+} from "../api/types";
 import { useAuth } from "../auth/AuthContext";
 import { EmptyState, ErrorBlock, LoadingBlock, Modal, StatusBadge } from "../components/ui";
 import { useToast } from "../components/toast";
+import { SECRET_REF_RE, configToText, parseConfigText } from "../lib/configText";
 import { formatRelative, truncate } from "../lib/format";
 
 /** Backend sends repository_url on applications; the shared type omits it. */
 type ApplicationRow = ApplicationOut & { repository_url?: string };
 
-type ProjectDetailRow = Omit<ProjectOut, "applications"> & { applications: ApplicationRow[] };
-
-const SECRET_REF_RE = /^\$\{secret:[A-Za-z0-9_]+\}$/;
+type ProjectDetailRow = Omit<ProjectOut, "applications" | "environments"> & {
+  applications: ApplicationRow[];
+  /** Project-scoped environments — the project is their parent (Phase 2). */
+  environments: EnvironmentOut[];
+};
 
 function errorMessage(err: unknown): string {
   if (err instanceof ApiError) return `${err.code}: ${err.message}`;
   if (err instanceof Error) return err.message;
   return "Request failed";
-}
-
-function parseConfigText(text: string): { config: Record<string, string>; error: string | null } {
-  const config: Record<string, string> = {};
-  for (const raw of text.split("\n")) {
-    const line = raw.trim();
-    if (line === "") continue;
-    const eq = line.indexOf("=");
-    if (eq <= 0) {
-      return { config: {}, error: `Invalid line "${truncate(line, 40)}" — expected KEY=VALUE` };
-    }
-    config[line.slice(0, eq).trim()] = line.slice(eq + 1);
-  }
-  return { config, error: null };
-}
-
-function configToText(config: Record<string, unknown>): string {
-  return Object.entries(config)
-    .map(([key, value]) => `${key}=${String(value)}`)
-    .join("\n");
 }
 
 /** Two-step destructive button (click → armed → confirm). */
@@ -116,6 +106,7 @@ function ConfigSummary({ config }: { config: Record<string, unknown> }) {
 
 interface EnvironmentFormValues {
   name: string;
+  environmentType: EnvironmentType;
   serverId: string;
   healthcheckPath: string;
   autoDeploy: boolean;
@@ -123,12 +114,12 @@ interface EnvironmentFormValues {
 }
 
 function EnvironmentFormModal({
-  applicationId,
+  projectId,
   environment,
   servers,
   onClose,
 }: {
-  applicationId: string;
+  projectId: string;
   environment: EnvironmentOut | null;
   servers: ServerSummary[];
   onClose: () => void;
@@ -138,6 +129,7 @@ function EnvironmentFormModal({
   const editing = environment !== null;
   const [values, setValues] = useState<EnvironmentFormValues>({
     name: environment?.name ?? "",
+    environmentType: environment?.environment_type ?? "DEV",
     serverId: environment?.server_id ?? "",
     healthcheckPath: environment?.healthcheck_path ?? "",
     autoDeploy: environment?.auto_deploy ?? false,
@@ -146,20 +138,21 @@ function EnvironmentFormModal({
   const [configError, setConfigError] = useState<string | null>(null);
 
   const saveMutation = useMutation({
+    // Phase 2: environments are created and edited under their project.
     mutationFn: (payload: Record<string, unknown>) =>
       editing
         ? apiPatch<EnvironmentOut>(
-            `/projects/applications/${applicationId}/environments/${environment.id}`,
+            `/projects/${projectId}/environments/${environment.id}`,
             payload,
           )
-        : apiPost<EnvironmentOut>(
-            `/projects/applications/${applicationId}/environments`,
-            payload,
-          ),
+        : apiPost<EnvironmentOut>(`/projects/${projectId}/environments`, payload),
     onSuccess: (saved) => {
       notify(`Environment "${saved.name}" ${editing ? "updated" : "created"}`, "success");
-      void qc.invalidateQueries({ queryKey: ["environments"] });
+      // The project detail owns the environment list, so it — not a per-application
+      // query — is what has to refetch.
+      void qc.invalidateQueries({ queryKey: ["project", projectId] });
       void qc.invalidateQueries({ queryKey: ["projects"] });
+      void qc.invalidateQueries({ queryKey: ["environments"] });
       onClose();
     },
     onError: (err) => notify(errorMessage(err), "error"),
@@ -173,6 +166,7 @@ function EnvironmentFormModal({
     if (parsed.error !== null) return;
     saveMutation.mutate({
       name: values.name.trim(),
+      environment_type: values.environmentType,
       server_id: values.serverId === "" ? null : values.serverId,
       healthcheck_path: values.healthcheckPath.trim(),
       auto_deploy: values.autoDeploy,
@@ -199,6 +193,26 @@ function EnvironmentFormModal({
               autoFocus
             />
           </div>
+          <div className="field">
+            <label htmlFor="env-type">Type</label>
+            <select
+              id="env-type"
+              className="input"
+              value={values.environmentType}
+              onChange={(event) =>
+                setValues((v) => ({
+                  ...v,
+                  environmentType: event.target.value as EnvironmentType,
+                }))
+              }
+            >
+              <option value="DEV">Development</option>
+              <option value="STAGING">Staging</option>
+              <option value="PROD">Production</option>
+            </select>
+          </div>
+        </div>
+        <div className="field-row">
           <div className="field">
             <label htmlFor="env-server">Target server</label>
             <select
@@ -414,51 +428,23 @@ function ApplicationFormModal({
   );
 }
 
-/** One application card: metadata, latest deployment, environments table. */
+/** One application card: metadata and latest deployment.
+ *
+ * Applications no longer own environments: they deploy *into* the project's
+ * environments, which the page lists above this card.
+ */
 function ApplicationCard({
   projectId,
   application,
   canManage,
-  servers,
-  serverName,
 }: {
   projectId: string;
   application: ApplicationRow;
   canManage: boolean;
-  servers: ServerSummary[];
-  serverName: (serverId: string | null) => string;
 }) {
   const notify = useToast();
   const qc = useQueryClient();
   const [appEditOpen, setAppEditOpen] = useState(false);
-  const [envModal, setEnvModal] = useState<{ environment: EnvironmentOut | null } | null>(null);
-
-  const environmentsQ = useQuery({
-    queryKey: ["environments", application.id, "list"],
-    queryFn: ({ signal }) =>
-      apiGet<Page<EnvironmentOut>>(
-        `/projects/applications/${application.id}/environments`,
-        { limit: 100 },
-        signal,
-      ),
-  });
-
-  function invalidateEnvironments() {
-    void qc.invalidateQueries({ queryKey: ["environments"] });
-    void qc.invalidateQueries({ queryKey: ["projects"] });
-  }
-
-  const deleteEnvMutation = useMutation({
-    mutationFn: (environmentId: string) =>
-      apiDelete<void>(
-        `/projects/applications/${application.id}/environments/${environmentId}`,
-      ),
-    onSuccess: () => {
-      notify("Environment deleted", "success");
-      invalidateEnvironments();
-    },
-    onError: (err) => notify(errorMessage(err), "error"),
-  });
 
   const deleteAppMutation = useMutation({
     mutationFn: () => apiDelete<void>(`/projects/${projectId}/applications/${application.id}`),
@@ -470,7 +456,6 @@ function ApplicationCard({
     onError: (err) => notify(errorMessage(err), "error"),
   });
 
-  const environments = environmentsQ.data?.items ?? [];
   const buildConfigKeys = Object.keys(application.build_config ?? {}).length;
   const latest = application.latest_deployment ?? null;
 
@@ -538,8 +523,69 @@ function ApplicationCard({
       </dl>
 
       <h3 className="mt-16 mb-8">Environments</h3>
-      {canManage ? (
-        <p className="mb-8">
+      <p className="faint small">
+        This application deploys into the project's environments, listed at the top of this page.
+      </p>
+
+      {appEditOpen ? (
+        <ApplicationFormModal
+          projectId={projectId}
+          application={application}
+          onClose={() => setAppEditOpen(false)}
+        />
+      ) : null}
+    </section>
+  );
+}
+
+/**
+ * Project → Environments.
+ *
+ * Environments are project-scoped (Phase 2): the project is their parent and
+ * each application of the project deploys *into* them. Rows link to the
+ * environment detail page, which owns the override editor and secret history.
+ */
+function ProjectEnvironmentsSection({
+  projectId,
+  projectName,
+  environments,
+  canManage,
+  servers,
+  serverName,
+}: {
+  projectId: string;
+  projectName: string;
+  environments: EnvironmentOut[];
+  canManage: boolean;
+  servers: ServerSummary[];
+  serverName: (serverId: string | null) => string;
+}) {
+  const notify = useToast();
+  const qc = useQueryClient();
+  const [envModal, setEnvModal] = useState<{ environment: EnvironmentOut | null } | null>(null);
+
+  function invalidate() {
+    void qc.invalidateQueries({ queryKey: ["project", projectId] });
+    void qc.invalidateQueries({ queryKey: ["projects"] });
+  }
+
+  const deleteMutation = useMutation({
+    mutationFn: (environmentId: string) =>
+      apiDelete<void>(`/projects/${projectId}/environments/${environmentId}`),
+    onSuccess: () => {
+      notify("Environment deleted", "success");
+      invalidate();
+    },
+    onError: (err) => notify(errorMessage(err), "error"),
+  });
+
+  const ordered = [...environments].sort((a, b) => a.name.localeCompare(b.name));
+
+  return (
+    <section className="card" aria-label="Environments">
+      <div className="card-title">
+        <h2>Environments</h2>
+        {canManage ? (
           <button
             type="button"
             className="btn sm"
@@ -547,44 +593,55 @@ function ApplicationCard({
           >
             + Add environment
           </button>
-        </p>
-      ) : null}
-      {environmentsQ.isPending ? (
-        <LoadingBlock label="Loading environments…" />
-      ) : environmentsQ.isError ? (
-        <ErrorBlock error={environmentsQ.error} />
-      ) : environments.length === 0 ? (
+        ) : null}
+      </div>
+      <p className="faint small">
+        Environments belong to this project. Its applications deploy into them, so a project can
+        promote the same application from Development to Staging to Production.
+      </p>
+
+      {ordered.length === 0 ? (
         <EmptyState
           title="No environments"
-          hint="Add an environment to make this application deployable."
+          hint={
+            canManage
+              ? "Add Development, Staging and Production to make this project deployable."
+              : "An administrator can add environments to this project."
+          }
         />
       ) : (
         <div className="table-wrap">
           <table className="data">
             <thead>
               <tr>
-                <th>Name</th>
+                <th>Environment</th>
+                <th>Type</th>
                 <th>Server</th>
-                <th>Healthcheck</th>
+                <th>Overrides</th>
                 <th>Auto-deploy</th>
-                <th>Config</th>
                 {canManage ? <th aria-label="Actions" /> : null}
               </tr>
             </thead>
             <tbody>
-              {environments.map((env) => (
+              {ordered.map((env) => (
                 <tr key={env.id}>
                   <td>
-                    <strong>{env.name}</strong>
+                    <Link to={`/projects/${projectId}/environments/${env.id}`}>
+                      <strong>{env.name}</strong>
+                    </Link>
                     <span className="faint small"> · {env.slug}</span>
                   </td>
-                  <td className="small">{serverName(env.server_id)}</td>
-                  <td className="mono small">{env.healthcheck_path || "—"}</td>
                   <td>
-                    <StatusBadge value={env.auto_deploy ? "ACTIVE" : "NEUTRAL"} />
+                    <span className="badge no-dot NEUTRAL">
+                      {ENVIRONMENT_TYPE_LABELS[env.environment_type]}
+                    </span>
                   </td>
+                  <td className="small">{serverName(env.server_id)}</td>
                   <td>
                     <ConfigSummary config={env.config} />
+                  </td>
+                  <td>
+                    <StatusBadge value={env.auto_deploy ? "ACTIVE" : "NEUTRAL"} />
                   </td>
                   {canManage ? (
                     <td>
@@ -601,8 +658,8 @@ function ApplicationCard({
                           label="Delete"
                           confirmLabel="Confirm?"
                           ariaLabel={`Delete environment ${env.name}`}
-                          onConfirm={() => deleteEnvMutation.mutate(env.id)}
-                          disabled={deleteEnvMutation.isPending}
+                          onConfirm={() => deleteMutation.mutate(env.id)}
+                          disabled={deleteMutation.isPending}
                         />
                       </div>
                     </td>
@@ -614,21 +671,15 @@ function ApplicationCard({
         </div>
       )}
 
-      {appEditOpen ? (
-        <ApplicationFormModal
-          projectId={projectId}
-          application={application}
-          onClose={() => setAppEditOpen(false)}
-        />
-      ) : null}
       {envModal ? (
         <EnvironmentFormModal
-          applicationId={application.id}
+          projectId={projectId}
           environment={envModal.environment}
           servers={servers}
           onClose={() => setEnvModal(null)}
         />
       ) : null}
+      <p className="faint small mt-8">Tip: {projectName}'s overrides are edited on each environment page.</p>
     </section>
   );
 }
@@ -746,6 +797,16 @@ export default function ProjectDetailPage() {
         </div>
       </div>
 
+      <ProjectEnvironmentsSection
+        projectId={project.id}
+        projectName={project.name}
+        environments={project.environments}
+        canManage={canManage}
+        servers={servers}
+        serverName={serverName}
+      />
+
+      <h2 className="mt-16">Applications</h2>
       {project.applications.length === 0 ? (
         <EmptyState
           icon="▤"
@@ -764,8 +825,6 @@ export default function ProjectDetailPage() {
               projectId={project.id}
               application={application}
               canManage={canManage}
-              servers={servers}
-              serverName={serverName}
             />
           ))}
         </>
@@ -794,9 +853,14 @@ function ProjectEditModal({ project, onClose }: { project: ProjectDetailRow; onC
     repository_url: project.repository_url,
     default_branch: project.default_branch,
   });
+  // Base configuration: flat KEY=VALUE lines, applied to every environment of
+  // the project. Environment overrides win per key.
+  const [configText, setConfigText] = useState(configToText(project.config ?? {}));
+  const [configError, setConfigError] = useState<string | null>(null);
 
   const saveMutation = useMutation({
-    mutationFn: (payload: typeof values) => apiPatch<ProjectOut>(`/projects/${project.id}`, payload),
+    mutationFn: (payload: typeof values & { config: Record<string, string> }) =>
+      apiPatch<ProjectOut>(`/projects/${project.id}`, payload),
     onSuccess: () => {
       notify("Project updated", "success");
       void qc.invalidateQueries({ queryKey: ["project", project.id] });
@@ -811,7 +875,11 @@ function ProjectEditModal({ project, onClose }: { project: ProjectDetailRow; onC
       <form
         onSubmit={(event) => {
           event.preventDefault();
-          if (values.name.trim() !== "" && !saveMutation.isPending) saveMutation.mutate(values);
+          if (values.name.trim() === "" || saveMutation.isPending) return;
+          const parsed = parseConfigText(configText);
+          setConfigError(parsed.error);
+          if (parsed.error !== null) return;
+          saveMutation.mutate({ ...values, config: parsed.config });
         }}
         noValidate
       >
@@ -856,6 +924,27 @@ function ProjectEditModal({ project, onClose }: { project: ProjectDetailRow; onC
             />
           </div>
         </div>
+        <div className="field">
+          <label htmlFor="project-edit-config">Project config (one KEY=VALUE per line)</label>
+          <textarea
+            id="project-edit-config"
+            className="input mono"
+            rows={5}
+            value={configText}
+            onChange={(event) => setConfigText(event.target.value)}
+            placeholder={"LOG_LEVEL=info\nREGION=eu\nDATABASE_URL=${secret:DATABASE_URL}"}
+          />
+          <span className="faint small">
+            Base configuration for every environment of this project. Each environment may
+            override individual keys. Reference secrets as {"${secret:KEY_NAME}"} — raw secret
+            values are rejected by the API and resolved only at deploy time.
+          </span>
+        </div>
+        {configError ? (
+          <p className="form-error" role="alert">
+            {configError}
+          </p>
+        ) : null}
         {saveMutation.isError ? (
           <p className="form-error" role="alert">
             {errorMessage(saveMutation.error)}

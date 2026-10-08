@@ -5,7 +5,7 @@
 
 import { useState, type FormEvent } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ApiError, apiGet, apiPost } from "../api/client";
 import type { EnvironmentOut, Page, ProjectOut } from "../api/types";
 import { useAuth } from "../auth/AuthContext";
@@ -23,26 +23,27 @@ function errorMessage(err: unknown): string {
   return "Request failed";
 }
 
-/** Aggregate environment count across a project's applications. */
-function EnvironmentCount({ applicationIds }: { applicationIds: string[] }) {
-  const enabled = applicationIds.length > 0;
-  const queries = useQueries({
-    queries: applicationIds.map((id) => ({
-      queryKey: ["environments", id, "count"],
-      queryFn: ({ signal }: { signal?: AbortSignal }) =>
-        apiGet<Page<EnvironmentOut>>(
-          `/projects/applications/${id}/environments`,
-          { limit: 1 },
-          signal,
-        ),
-      enabled,
-      staleTime: 15_000,
-    })),
+/**
+ * This project's environment count.
+ *
+ * Phase 2: environments belong to the **project**, so the count is one scoped
+ * list call for the project — not a sum over its applications' environments
+ * (an application no longer has any of its own).
+ */
+function EnvironmentCount({ projectId }: { projectId: string }) {
+  const query = useQuery({
+    queryKey: ["environments", projectId, "count"],
+    queryFn: ({ signal }) =>
+      apiGet<Page<EnvironmentOut>>(
+        `/projects/${projectId}/environments`,
+        { limit: 1 },
+        signal,
+      ),
+    staleTime: 15_000,
   });
-  if (!enabled) return <strong>0</strong>;
-  if (queries.some((q) => q.isPending)) return <span className="faint">…</span>;
-  const total = queries.reduce((sum, q) => sum + (q.data?.total ?? 0), 0);
-  return <strong>{total}</strong>;
+  if (query.isPending) return <span className="faint">…</span>;
+  if (query.isError) return <strong>—</strong>;
+  return <strong>{query.data?.total ?? 0}</strong>;
 }
 
 interface ProjectFormValues {
@@ -165,7 +166,6 @@ export function ProjectFormModal({
 
 function ProjectCard({ project }: { project: ProjectOut }) {
   const applications = project.applications ?? [];
-  const applicationIds = applications.map((app) => app.id);
   return (
     <section className="card" aria-label={`Project ${project.name}`}>
       <div className="card-title">
@@ -189,7 +189,7 @@ function ProjectCard({ project }: { project: ProjectOut }) {
           <strong>{applications.length}</strong> application{applications.length === 1 ? "" : "s"}
         </span>
         <span>
-          <EnvironmentCount applicationIds={applicationIds} /> environments
+          <EnvironmentCount projectId={project.id} /> environments
         </span>
         <span className="faint">created {formatRelative(project.created_at)}</span>
       </div>

@@ -661,7 +661,8 @@ route returns all three layers separately so a client can show provenance:
 environment kind. Environments created before this field existed were defaulted
 to `DEV` and were corrected in Phase 2.1 by an explicit, case-insensitive mapping
 of the exact slug/name aliases (`production`/`prod` → `PROD`, `staging`/`stage` →
-`STAGING`; `dev`/`development` and anything unknown stay `DEV`).
+`STAGING`; `dev`/`development` and anything unknown stay `DEV`); when a legacy
+row's slug and name disagreed, the recognised slug alias decided the type.
 
 Secret resolution at deploy time prefers the most specific scope —
 **environment > project > organization** — and **fails closed**: an unresolvable

@@ -180,6 +180,11 @@ so the guarantee lived only in the service layer having no mutation path.
 **Residual / open:** history is retained only for the life of its Secret —
 deleting the Secret destroys it (and is audited). A tombstone/grace period remains
 an open question, not a shipped control; the §3 prune job still does not exist.
+**Boundary:** the guard constrains row-level DML for *every* role, but it is not a
+defense against a privileged database administrator — an owner/superuser can
+disable the trigger, `TRUNCATE`, or read ciphertext directly (secrets-architecture.md
+§3). It is a correctness control against application bugs and compromised
+application credentials, not a control against control of the database server.
 
 ## Transport and headers
 

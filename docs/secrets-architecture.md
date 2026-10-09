@@ -266,6 +266,22 @@ database:**
 - the uq `(secret_id, version)` constraint remains the backstop against a rewound
   write.
 
+**Protection boundary — what this covers and what it does not.** The guarantee is
+a PostgreSQL constraint on *row-level DML*: it holds for every role that writes
+rows — the runtime role, the owner role, any future application credential — and
+cannot be defeated through ordinary SQL (`UPDATE`, `DELETE`, an ORM bug, a rogue
+worker). It is **not** a defense against a privileged database administrator.
+A role that owns `secret_versions` (or is a superuser) can still run DDL —
+`ALTER TABLE secret_versions DISABLE TRIGGER secret_versions_no_mutation`, drop or
+replace the trigger/function, or `TRUNCATE` the table (row triggers do not fire on
+`TRUNCATE`) — and can read the ciphertext columns directly and, holding
+`ENCRYPTION_KEY`, decrypt them. This is the same boundary as the audit trail's
+trigger (platform-security-model.md S7): it protects against application bugs,
+compromised application credentials and ordinary SQL, not against control of the
+database server. Two concrete edges are closed for the runtime specifically: the
+app role holds no `TRUNCATE` privilege on the table, and it cannot disable the
+trigger (that is DDL, owned by the migration role).
+
 **Deletion policy (explicit).** Deleting a Secret is a hard delete that cascades
 its entire version history — history is retained for the lifetime of the Secret,
 **not** in perpetuity, and the docs no longer imply otherwise. The purge itself

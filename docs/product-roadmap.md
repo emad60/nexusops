@@ -1,7 +1,9 @@
 # Product Roadmap — NexusOps Multi-Tenant Platform
 
-**Status:** Phase 1 delivered; the later phases are proposals for review, not yet approved.
-**Date:** 2026-09-20 (status updated 2026-10-07)
+**Status:** Phases 0–2.1 **delivered** (0 on 2026-09-22, 1 on 2026-09-24, 2 on
+2026-10-08, 2.1 on 2026-10-09). Phases 3–9 are **proposals for review** — none is
+approved or implemented.
+**Date:** 2026-09-20 (status updated 2026-10-09)
 **Companions:** [platform-vision.md](platform-vision.md) · [domain-model.md](domain-model.md) · [multi-tenancy.md](multi-tenancy.md) · [authorization.md](authorization.md) · [platform-security-model.md](platform-security-model.md)
 
 ## 0. Stance
@@ -12,8 +14,9 @@ authoritative for all companion docs (domains/certs/ops/deployments reference it
 
 ## 1. Migration strategy: what happens to what
 
-Four-way classification, grounded in the subsystem analysis (evidence in
-`.claude/workflows/findings.json` and the companion docs).
+Four-way classification, grounded in the subsystem analysis (the harness under
+`.claude/workflows/` — `nexusops-understand.mjs`, `nexusops-draft.mjs`,
+`nexusops-challenge.mjs` — and the companion docs).
 
 **Remains as-is (verified real, load-bearing):**
 
@@ -98,6 +101,11 @@ Four-way classification, grounded in the subsystem analysis (evidence in
 | 7 | Teams, grants & custom roles | teams, resource-level grants, custom roles | 2 |
 | 8 | Backups | policies/runs/destinations, verify + restore drill | 3, 7 |
 | 9 | Billing & metering | usage-counter enforcement, plan gates | 1, 2 |
+
+**Status of the plan:** phases 0–2.1 are **delivered**. Phases 3–9 are
+**proposals** — not approved and not implemented; their "Ships" cells describe
+intended work, not current behaviour. The only code that exists is what the
+delivered sections below record.
 
 ## 3. Phase 0 — Truth pass & hardening
 
@@ -261,6 +269,38 @@ Spec: domain-model.md §2.2.1.
 
 **Exit:** "Ymart → Production" config in one place; non-destructive rotation with
 rollback proven; tenant isolation and RLS extended to the new tables.
+
+## 5.1 Phase 2.1 — Hardening — **DELIVERED 2026-10-09**
+
+A narrowly scoped hardening pass on top of Phase 2; no product features. What
+landed (migrations `c3d4e5f6a7b8`, `d4e5f6a7b8c9`, `e5f6a7b8c9d0`):
+
+- **`secret_versions` immutability is enforced by the database**, not only by the
+  service layer. The runtime app role's `UPDATE`/`DELETE` were revoked (it keeps
+  `SELECT`/`INSERT`) and a cascade-aware `BEFORE UPDATE OR DELETE` trigger refuses
+  `UPDATE` for every role and refuses `DELETE` unless the parent Secret is being
+  deleted. The deletion policy is now explicit: deleting a Secret is a hard delete
+  that cascades its history (audited as `secret.delete`) — history is retained for
+  the lifetime of the Secret, not in perpetuity. RLS and the runtime/migration role
+  split are untouched. See secrets-architecture.md §3.
+- **Legacy environment typing corrected.** Phase 2 had defaulted every pre-existing
+  environment to `DEV`; `d4e5f6a7b8c9` reclassified the unambiguous slug/name
+  aliases, and `e5f6a7b8c9d0` corrected it to the documented **slug-first**
+  precedence (a recognised slug alias wins over a conflicting name; otherwise the
+  name decides; otherwise `DEV`). Only rows still carrying the migration's own
+  output are rewritten, so an operator's explicit value is preserved. See
+  domain-model.md §2.2.1.
+- **Deployment-secret authorization gate** recorded as a hard prerequisite on
+  real deployments/secret delivery (§9.0): the four boundaries — view secret
+  metadata, create a deployment, deploy to a specific environment, consume that
+  environment's secrets — must be reviewed and enforced before 6a ships.
+- **Consistency follow-up (2.2):** roadmap phases/sources of truth corrected;
+  the immutability docs now state the protection boundary and its privileged
+  database-administrator limits.
+
+**Exit:** the append-only guarantee holds against ordinary SQL for every role;
+confirmed by runtime-role and owner-role database probes, migration round-trips,
+the drift check, the full backend suite and a fresh-volume E2E run.
 
 ## 6. Phase 3 — Nodes & agent v2
 

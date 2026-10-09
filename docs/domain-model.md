@@ -206,9 +206,14 @@ active-org header, and an `active` membership in that org is required. Consequen
   small, explicit, case-normalised mapping — `production`/`prod` → `PROD`,
   `staging`/`stage` → `STAGING`, `dev`/`development` and anything unknown → `DEV`
   — matching exact slug/name aliases (trimmed, case-insensitive; the slug wins
-  when slug and name disagree). Only rows still carrying the Phase 2 `DEV`
-  default are candidates, so an operator's explicit post-Phase-2 classification
-  is never overwritten. The correction updates one descriptive column in place:
+  when slug and name disagree). Migration `e5f6a7b8c9d0` makes the implementation
+  match that precedence: `d4e5f6a7b8c9` used a flat `slug OR name` test and so
+  typed a `staging` slug with a `production` name as `PROD`; the follow-up
+  rewrites only that stale `PROD` output (leaving a value the operator has since
+  set to anything else), so slug-first now holds end to end. Only rows still
+  carrying the Phase 2 `DEV` default are candidates for the initial pass, so an
+  operator's explicit post-Phase-2 classification is never overwritten. The
+  corrections update one descriptive column in place:
   environment ids, deployments, uniqueness, organization ownership and RLS are
   untouched. `environment_type` remains descriptive only — never an authorization
   dimension.

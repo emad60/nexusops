@@ -333,7 +333,7 @@ Entity status against the target model:
 | Organization / Membership | `organizations` / `memberships` | new | tenant root; user↔org via Membership with role + status |
 | Node | `servers` (kept) | existing, renamed at surface | + `org_id`, capabilities + facts; codenames `node.*` (renamed from `server.*`) |
 | DockerEndpoint | `docker_hosts` (kept) | existing | exposed as part of Node; 0..1 per node |
-| Environment | `deployment_environments` | **promoted (Phase 2)** | `application_id` → `project_id`; `environment_type` DEV/STAGING/PROD (legacy rows corrected in Phase 2.1, migration `d4e5f6a7b8c9`); `server_id` target node; unique `(project_id, slug)` |
+| Environment | `deployment_environments` | **promoted (Phase 2)** | `application_id` → `project_id`; `environment_type` DEV/STAGING/PROD (legacy rows corrected in Phase 2.1 by `d4e5f6a7b8c9`, precedence fixed in 2.2 by `e5f6a7b8c9d0`); `server_id` target node; unique `(project_id, slug)` |
 | Domain / Route / Certificate | `domains` / `routes` / `certificates` | new | DNS-verified domains; hostname+path routes; ACME certs |
 | Operation | `operations` | new | whitelisted remote ops the agent pulls; permissioned + audited |
 | Secret / SecretVersion | `secrets` / `secret_versions` | existing / **new (Phase 2)** | org/project/environment layered scope, most specific wins; append-only version history (DB-enforced since Phase 2.1, §10.1) with transactional rotation and non-destructive rollback |
@@ -692,6 +692,10 @@ parent is gone" is true only inside the cascade — a direct `DELETE FROM
 secret_versions` is refused even for the table owner. Deleting a Secret remains a
 hard delete that purges its history (secrets-architecture.md §3, domain-model.md
 §2.5).
+
+As with the audit trigger, this constrains **row-level DML for every role**; it is
+not a defense against a privileged database administrator, who can disable the
+trigger, `TRUNCATE`, or read ciphertext directly (secrets-architecture.md §3).
 
 ## 11. Scheduling and simulation mode
 

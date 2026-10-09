@@ -237,13 +237,21 @@ no update or delete path, and the database trigger that blocks `UPDATE`/`DELETE`
 
 ## The agent (least privilege by construction)
 
-`agent/nexusops_agent.py` uses only the Python standard library, authenticates with a
-per-server enrollment token, and executes **no arbitrary commands** — its capabilities
-are heartbeat metrics, container inventory, and log tailing of containers it can see.
-It refuses cleartext `http://` transport unless `--allow-insecure-transport` is passed
-explicitly (documented for lab use; TLS terminates at the edge in real deployments).
-`agent/install.sh` writes the token file with `umask 077` semantics and `chmod 600`
-*before* the secret is written into it.
+`agent/nexusops_agent.py` uses only the Python standard library and authenticates
+with a per-node `nxa_` credential (minted by redeeming an organization-scoped,
+single-use, expiring `nxk_` enrollment token). It executes **no arbitrary commands**:
+metrics, container inventory and log tailing are reads, and the only writes are the
+closed registry (`container.start/stop/restart/remove`, `logs.tail`) — each a fixed
+Docker API call over the unix socket, re-validated locally against the same shape
+the server checked. There is no `shell=True`, no `/containers/{id}/exec`, and no way
+for a control-plane payload to introduce a new type. Transport is **HTTPS-only**: a
+non-loopback plain `http://` URL is refused *before* any credential is sent, the
+`--insecure` TLS-bypass flag is gone, and a private CA is trusted via
+`NEXUSOPS_CA_BUNDLE` (verification is never disabled). Docker capability is proven
+by a real `/version` call, not by a binary on PATH.
+`agent/install.sh` writes the credential file with `umask 077` semantics and
+`chmod 600` *before* the secret is written into it, and reads the token from the
+environment (never argv, which `ps` exposes).
 
 ## Production hardening checklist
 
@@ -252,7 +260,7 @@ explicitly (documented for lab use; TLS terminates at the edge in real deploymen
 3. Do not seed: `make seed` requires explicit `NEXUSOPS_ALLOW_SEED=1` and is meant for demo stacks. Seeded demo credentials (documented in the README) must never exist in production.
 4. Keep `SIMULATION_MODE=false` — the badge in the UI must be off so operators know they are looking at live data.
 5. Terminate TLS in front of the edge (the compose file exposes plain HTTP on `:8080` for lab use).
-6. Rotate: refresh tokens rotate automatically; rotate API keys and agent tokens from their settings pages (issuing a new agent token invalidates the old one immediately).
+6. Rotate: refresh tokens rotate automatically; rotate API keys and agent credentials from their settings pages, or revoke a node credential immediately (`POST /nodes/{id}/agent-token/revoke`, no grace). A **rotation** keeps the previous credential valid for a bounded grace window so a running agent can pick up the replacement on its next heartbeat; a **revocation** stops acceptance at once.
 
 ## Security audit (2026-09)
 
@@ -276,7 +284,7 @@ report accompanying this release.
 ## Known limitations
 
 - The compose stack ships for lab/self-hosted use: TLS termination, external WAF, and SMTP relay hardening are deployment concerns (documented in `docs/deployment.md`).
-- Rate limiting is per-IP at the application layer; a reverse proxy must forward real client IPs (`X-Forwarded-For` handling in `backend/app/middleware/`).
+- Rate limiting is per-IP at the application layer for human routes — a reverse proxy must forward real client IPs (`X-Forwarded-For` handling). Authenticated agent routes instead key on the resolved **node**, so NAT'd fleets do not share a bucket (Phase 3).
 - Notification-channel and secret values are masked but the database stores them encrypted-at-rest only via disk-level encryption of the host volume; application-level envelope encryption is future work.
 - **Deploying is not grant-narrowed.** `deployment.create` authorizes a deployment into any environment of the organization; resource-level grants ("Ali deploys staging but not production") are a later phase. Until then, permission to deploy implies permission to consume the secrets that environment references.
 - **Secret history is unbounded.** There is no prune policy for `secret_versions` — retention beats an arbitrary window for now; a maintenance job is a follow-up (secrets-architecture.md §3).

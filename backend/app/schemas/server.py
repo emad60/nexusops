@@ -115,6 +115,15 @@ class ServerOut(OutModel):
     offline_after_seconds: int | None
     uptime_seconds: int
     simulated: bool
+    #: Negotiated wire protocol; ``None`` means a pre-v2 agent (treated as v1).
+    protocol_version: int | None = None
+    #: Self-reported capability map. Empty means *unreported* — the UI and the
+    #: dispatch gate must both read it that way, never as "has everything".
+    capabilities: dict[str, Any] = Field(default_factory=dict)
+    #: Open-ended facts reported at hello v2 (disks, network, kernel).
+    facts: dict[str, Any] = Field(default_factory=dict)
+    #: Set when an operator revoked this node's credential (kill switch).
+    credential_revoked_at: datetime | None = None
     tags: list[TagRef] = Field(default_factory=list)
     docker_host: DockerHostSummary | None = None
 
@@ -122,6 +131,17 @@ class ServerOut(OutModel):
     @property
     def enrolled(self) -> bool:
         return self.agent_enrolled_at is not None
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def capabilities_reported(self) -> bool:
+        """Whether the node has reported capabilities at all (v2 hello)."""
+        return bool(self.capabilities)
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def agent_revoked(self) -> bool:
+        return self.credential_revoked_at is not None
 
 
 class SystemEventOut(APIModel):

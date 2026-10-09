@@ -31,13 +31,14 @@ from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import AuthContext
+from app.core.config import get_settings
 from app.core.errors import BadRequest, Conflict, NotFound
 from app.core.logging import get_logger
 from app.models import Operation, Server
 from app.models.enums import OperationStatus, ServerStatus
 from app.schemas.operation import (
+    KNOWN_CAPABILITIES,
     OPERATION_SPECS,
-    UNIVERSAL_CAPABILITIES,
     OperationCreate,
     validate_params,
 )
@@ -62,24 +63,52 @@ def spec_for(op_type: Any) -> Any:
 
 
 def ensure_dispatchable(op_type: Any) -> Any:
-    """Refuse a type whose capability this deployment cannot confirm.
+    """Refuse a type whose capability is outside the known vocabulary.
 
-    The capability gate proper belongs to the (unbuilt) enrollment negotiation,
-    which is what would let the control plane ask whether a *specific* node
-    provides the capability. Until that exists, the only honest check is the
-    universal one: a type is dispatchable when every enrolled agent of the
-    current contract is known to provide its capability, and refused with a 409
-    otherwise. That keeps the boundary fail-closed — adding an operation type
-    that needs a new capability cannot quietly start dispatching to nodes that
-    may not have it.
+    This is the registry-level check (a programming error, not a node property).
+    The per-node gate is :func:`ensure_node_can_run`, which reads the capability
+    map the node reported at hello.
     """
     spec = spec_for(op_type)
-    if spec.capability not in UNIVERSAL_CAPABILITIES:
+    if spec.capability not in KNOWN_CAPABILITIES:
         raise Conflict(
             f"Operation type '{op_type}' requires node capability "
-            f"'{spec.capability}', which is not verified for any node yet; "
-            "per-node capability advertisement ships with agent enrollment",
+            f"'{spec.capability}', which is not a known capability; add it to "
+            "KNOWN_CAPABILITIES and have the agent report it before dispatch",
             code="NODE_CAPABILITY_UNVERIFIED",
+        )
+    return spec
+
+
+def ensure_node_can_run(node: Server, op_type: Any) -> Any:
+    """Per-node capability gate. Refuses unless the node reported the capability.
+
+    Fail-closed on both axes, and they are different failures:
+
+    * **Unreported** (``capabilities`` empty — a v1 agent or a node that has not
+      completed a v2 hello) is ``NODE_CAPABILITY_UNVERIFIED``. Absence of data is
+      never read as "has the capability".
+    * **Reported absent** (``docker: {present: false}``) or malformed is
+      ``NODE_CAPABILITY_MISSING``.
+
+    A stale or falsely-reported capability is not a safety hole on the agent
+    side: the agent re-checks its own registry and local capability before
+    executing, so a lie fails the operation rather than running something unsafe.
+    """
+    spec = spec_for(op_type)
+    reported = node.capabilities or {}
+    if not reported:
+        raise Conflict(
+            f"Node '{node.name}' has not reported capabilities, so it cannot be "
+            f"sent a {op_type} operation; upgrade its agent to protocol 2",
+            code="NODE_CAPABILITY_UNVERIFIED",
+        )
+    report = reported.get(spec.capability)
+    if not isinstance(report, dict) or not report.get("present"):
+        raise Conflict(
+            f"Node '{node.name}' does not report capability '{spec.capability}'; "
+            f"refusing {op_type}",
+            code="NODE_CAPABILITY_MISSING",
         )
     return spec
 
@@ -120,7 +149,21 @@ async def create_operation(
         )
 
     spec = ensure_dispatchable(payload.type)
+    ensure_node_can_run(node, payload.type)
     params = validate_params(payload.type, payload.params)
+
+    now = _utcnow()
+    # The queue deadline is deliberately *not* the operation's execution timeout.
+    # Delivery rides the heartbeat, so an operation created immediately after a
+    # beat must survive at least until the next one (plus jitter). The window is
+    # the largest of: the type's own timeout, three heartbeat intervals, and a
+    # configured floor.
+    window = max(
+        spec.timeout_seconds,
+        3 * max(node.heartbeat_interval_seconds, 5),
+        get_settings().agent_delivery_min_seconds,
+    )
+    available_until = now + timedelta(seconds=window)
 
     operation = Operation(
         node_id=node.id,
@@ -128,7 +171,10 @@ async def create_operation(
         status=OperationStatus.PENDING,
         params=params,
         requested_by_id=ctx.user_id,
-        expires_at=_utcnow() + timedelta(seconds=spec.timeout_seconds),
+        available_until=available_until,
+        # While pending, the hard deadline is the queue deadline; claiming moves
+        # it to the execution deadline plus the result-reporting grace.
+        expires_at=available_until,
     )
     db.add(operation)
     await db.flush()
@@ -243,9 +289,9 @@ async def pending_ids_for_node(db: AsyncSession, server: Server, *, limit: int =
                 .where(
                     Operation.node_id == server.id,
                     Operation.status == OperationStatus.PENDING,
-                    Operation.expires_at > now,
+                    Operation.available_until > now,
                 )
-                .order_by(Operation.expires_at.asc())
+                .order_by(Operation.available_until.asc())
                 .limit(limit)
             )
         )
@@ -263,8 +309,34 @@ async def claim_operation(
     ``attempts`` is incremented inside the same statement, so the counter cannot
     drift from the number of successful claims. A second claimant sees zero rows
     matched and is told the current state rather than silently losing.
+
+    The claim is gated on ``available_until`` (the queue deadline) and opens the
+    execution clock: ``execution_deadline = now + type timeout``, with
+    ``expires_at`` moved out to ``execution_deadline + result grace`` so a slow
+    node can still report a result for one heartbeat after its deadline. The
+    operation never becomes executable indefinitely: the agent enforces its own
+    deadline, and the sweep expires the row at the hard deadline regardless.
     """
     now = _utcnow()
+    # Read the type to size the execution deadline. This read is not the
+    # authority — the CAS below is — and it cannot go stale in a way that
+    # matters because a row's ``type`` is immutable once written (nothing in the
+    # system updates it). It also answers a foreign id with a 404 before any
+    # write is attempted.
+    op_type = (
+        await db.execute(
+            select(Operation.type).where(
+                Operation.id == operation_id,
+                Operation.org_id == server.org_id,
+                Operation.node_id == server.id,
+            )
+        )
+    ).scalar_one_or_none()
+    if op_type is None:
+        raise NotFound("Operation not found", code="OPERATION_NOT_FOUND")
+    spec = spec_for(op_type)
+    execution_deadline = now + timedelta(seconds=spec.timeout_seconds)
+    expires_at = execution_deadline + timedelta(seconds=get_settings().agent_result_grace_seconds)
     result = await db.execute(
         update(Operation)
         .where(
@@ -272,11 +344,13 @@ async def claim_operation(
             Operation.org_id == server.org_id,
             Operation.node_id == server.id,
             Operation.status == OperationStatus.PENDING,
-            Operation.expires_at > now,
+            Operation.available_until > now,
         )
         .values(
             status=OperationStatus.CLAIMED,
             claimed_at=now,
+            execution_deadline=execution_deadline,
+            expires_at=expires_at,
             attempts=Operation.attempts + 1,
             updated_at=now,
         )
@@ -301,7 +375,7 @@ async def _explain_failed_claim(
             f"Operation is already {operation.status}",
             code="OPERATION_ALREADY_CLAIMED",
         )
-    raise Conflict("Operation has expired", code="OPERATION_EXPIRED")
+    raise Conflict("Operation is past its queue deadline", code="OPERATION_EXPIRED")
 
 
 async def record_result(

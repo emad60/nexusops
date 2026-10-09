@@ -17,6 +17,11 @@ from app.api.deps import AuthContext, require_permission
 from app.core.db import get_session
 from app.core.pagination import Page, PageParams, page_params
 from app.models.enums import ServerStatus
+from app.schemas.enrollment import (
+    EnrollmentTokenCreate,
+    EnrollmentTokenCreated,
+    EnrollmentTokenOut,
+)
 from app.schemas.server import (
     EnrollTokenOut,
     ServerCreate,
@@ -26,7 +31,7 @@ from app.schemas.server import (
     SystemEventOut,
 )
 from app.schemas.tag import TagOut, TagUpsertIn
-from app.services import audit_service, server_service
+from app.services import audit_service, enrollment_service, server_service
 
 #: Prefix-less inner router: the paths below are declared once and mounted under
 #: both the canonical ``/nodes`` surface and the temporary ``/servers`` alias.
@@ -36,6 +41,9 @@ ReadCtx = Annotated[AuthContext, Depends(require_permission("node.read"))]
 CreateCtx = Annotated[AuthContext, Depends(require_permission("node.create"))]
 UpdateCtx = Annotated[AuthContext, Depends(require_permission("node.update"))]
 DeleteCtx = Annotated[AuthContext, Depends(require_permission("node.delete"))]
+#: Credential lifecycle actions (rotate/revoke/enrollment-token revoke) reuse the
+#: existing ``node.credential.write`` codename — no new grant is invented.
+CredentialCtx = Annotated[AuthContext, Depends(require_permission("node.credential.write"))]
 
 DbDep = Annotated[AsyncSession, Depends(get_session)]
 
@@ -131,6 +139,77 @@ async def upsert_tag(db: DbDep, ctx: UpdateCtx, data: TagUpsertIn) -> TagOut:
     )
 
 
+# --- Enrollment tokens (organization-scoped) --------------------------------
+# Declared before ``/{server_id}`` so the literal path is not consumed as a node
+# id — the same ordering ``/tags`` relies on.
+
+
+@_router.post(
+    "/enrollment-tokens",
+    response_model=EnrollmentTokenCreated,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_enrollment_token(
+    data: EnrollmentTokenCreate, request: Request, db: DbDep, ctx: CreateCtx
+) -> EnrollmentTokenCreated:
+    """Mint one single-use enrollment token in the caller's organization.
+
+    The org comes from the caller's active membership (unknown to the request
+    body), so a token can never be minted into another tenant. The raw token is
+    returned exactly once and stored only as a hash.
+    """
+    raw, token = await enrollment_service.create_token(db, ctx, data)
+    await audit_service.record(
+        db,
+        ctx,
+        action="enrollment_token.create",
+        resource_type="enrollment_token",
+        resource_id=token.id,
+        metadata={"name": token.name, "expires_at": token.expires_at.isoformat()},
+        request=request,
+    )
+    return _enrollment_created(raw, token)
+
+
+@_router.get("/enrollment-tokens", response_model=Page[EnrollmentTokenOut])
+async def list_enrollment_tokens(
+    db: DbDep,
+    ctx: ReadCtx,
+    params: Annotated[PageParams, Depends(page_params)],
+) -> Page[EnrollmentTokenOut]:
+    """Enrollment tokens in the active organization, newest first.
+
+    The response type has no token field, so a raw value can never be re-read.
+    """
+    tokens, total = await enrollment_service.list_tokens(
+        db, limit=params.limit, offset=params.offset
+    )
+    return Page(
+        items=[_enrollment_out(token) for token in tokens],
+        total=total,
+        limit=params.limit,
+        offset=params.offset,
+    )
+
+
+@_router.post("/enrollment-tokens/{token_id}/revoke", response_model=EnrollmentTokenOut)
+async def revoke_enrollment_token(
+    token_id: uuid.UUID, request: Request, db: DbDep, ctx: CredentialCtx
+) -> EnrollmentTokenOut:
+    """Revoke an unused enrollment token immediately."""
+    token = await enrollment_service.revoke_token(db, token_id, ctx=ctx)
+    await audit_service.record(
+        db,
+        ctx,
+        action="enrollment_token.revoke",
+        resource_type="enrollment_token",
+        resource_id=token.id,
+        metadata={"name": token.name},
+        request=request,
+    )
+    return _enrollment_out(token)
+
+
 @_router.get("/{server_id}", response_model=ServerDetail)
 async def get_server(db: DbDep, ctx: ReadCtx, server_id: uuid.UUID) -> ServerDetail:
     """Full server view with recent timeline events and container counts."""
@@ -178,9 +257,12 @@ async def delete_server(server_id: uuid.UUID, request: Request, db: DbDep, ctx: 
 async def rotate_agent_token(
     server_id: uuid.UUID, request: Request, db: DbDep, ctx: UpdateCtx
 ) -> EnrollTokenOut:
-    """Issue a fresh agent enrollment token. Any previous token stops working.
+    """Rotate a node's credential with a bounded dual-token grace window.
 
-    The raw token is shown exactly once and only ever stored hashed.
+    The previous token keeps authenticating for the configured grace period so a
+    running agent can pick up the replacement on its next heartbeat; the raw new
+    token is shown exactly once here. This is *rotation*, not revocation — see
+    ``POST /nodes/{id}/agent-token/revoke`` for the immediate kill switch.
     """
     raw, _server = await server_service.rotate_agent_token(db, server_id=server_id, ctx=ctx)
     await audit_service.record(
@@ -189,18 +271,54 @@ async def rotate_agent_token(
         action="node.rotate_token",
         resource_type="node",
         resource_id=server_id,
+        # Metadata is names and ids only: never the raw token or its hash.
         metadata={"name": _server.name},
         request=request,
     )
-    # The hint must name the variables the agent and installer actually read.
-    # It used to advertise NEXUSOPS_URL, which neither of them consults —
-    # following it produced an agent that never enrolled. install.sh writes
-    # NEXUSOPS_SERVER/NEXUSOPS_TOKEN/NEXUSOPS_INTERVAL into its env file.
+    # The hint names the variables the agent and installer actually read, and
+    # delivers the token through the environment so it never lands in shell
+    # history or the target's process list (argument vectors are observable).
     install_hint = (
-        "sudo bash agent/install.sh --server <platform-url> "
-        f"--token {raw}   # or set NEXUSOPS_SERVER / NEXUSOPS_TOKEN"
+        "sudo NEXUSOPS_TOKEN=<token> NEXUSOPS_SERVER=<platform-url> bash agent/install.sh"
     )
     return EnrollTokenOut(agent_token=raw, install_hint=install_hint)
+
+
+@_router.post("/{server_id}/agent-token/revoke", response_model=ServerOut)
+async def revoke_agent_token(
+    server_id: uuid.UUID, request: Request, db: DbDep, ctx: CredentialCtx
+) -> ServerOut:
+    """Immediately stop accepting this node's credential. No grace, no delivery.
+
+    This is the compromise path: a stolen token cannot fetch a replacement, and
+    the node stops being addressed at once. Recovery is a re-enrollment with a
+    fresh organization-scoped token, not a reinstall.
+    """
+    node = await server_service.revoke_agent_token(db, server_id=server_id, ctx=ctx)
+    await audit_service.record(
+        db,
+        ctx,
+        action="node.revoke_token",
+        resource_type="node",
+        resource_id=server_id,
+        metadata={"name": node.name},
+        request=request,
+    )
+    return ServerOut.model_validate(node)
+
+
+def _enrollment_out(token: object) -> EnrollmentTokenOut:
+    return EnrollmentTokenOut.model_validate(token)
+
+
+def _enrollment_created(raw: str, token: object) -> EnrollmentTokenCreated:
+    # ``state`` is a computed field on the schema, so validating the row is
+    # enough; drop the derived value (extra="forbid") and add the one-time raw
+    # token and its hint.
+    data = EnrollmentTokenOut.model_validate(token).model_dump()
+    data.pop("state", None)
+    data.update(token=raw, install_hint=enrollment_service.install_hint(raw))
+    return EnrollmentTokenCreated(**data)
 
 
 # Canonical surface. New clients discover only ``/nodes`` (see the package docs).

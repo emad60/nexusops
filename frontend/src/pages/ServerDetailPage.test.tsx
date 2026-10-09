@@ -67,6 +67,12 @@ function makeDetail(): ServerDetail {
     docker_host: null,
     last_heartbeat_at: new Date(Date.now() - 30_000).toISOString(),
     created_at: "2026-01-01T00:00:00Z",
+    protocol_version: 2,
+    capabilities: { docker: { present: true, api_version: "1.43" } },
+    capabilities_reported: true,
+    facts: {},
+    credential_revoked_at: null,
+    agent_revoked: false,
   };
   return {
     ...summary,
@@ -166,6 +172,12 @@ function primeApiGet() {
         offset: 0,
       } satisfies Page<ContainerOut>);
     }
+    if (path === "/operations") {
+      return Promise.resolve({ items: [], total: 0, limit: 10, offset: 0 });
+    }
+    if (path === "/nodes/enrollment-tokens") {
+      return Promise.resolve({ items: [], total: 0, limit: 20, offset: 0 });
+    }
     return Promise.reject(new Error(`unexpected path: ${path}`));
   });
 }
@@ -237,7 +249,7 @@ describe("ServerDetailPage", () => {
     });
 
     renderDetail();
-    fireEvent.click(await screen.findByRole("button", { name: "Issue agent token" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Rotate credential" }));
 
     expect(await screen.findByText(/shown only once/)).toBeInTheDocument();
     expect(screen.getByDisplayValue("nxs_live_secret_abc123")).toBeInTheDocument();
@@ -256,7 +268,70 @@ describe("ServerDetailPage", () => {
 
     renderDetail();
 
-    const alert = await screen.findByRole("alert");
-    expect(alert).toHaveTextContent(/No such server/);
+    const alerts = await screen.findAllByRole("alert");
+    expect(alerts.some((node) => /No such server/.test(node.textContent ?? ""))).toBe(true);
+  });
+
+  it("shows the negotiated protocol and reported capabilities", async () => {
+    renderDetail();
+
+    expect(await screen.findByText("v2")).toBeInTheDocument();
+    expect(screen.getByText("docker: available")).toBeInTheDocument();
+  });
+
+  it("queues a container operation and never calls it succeeded", async () => {
+    const queued = {
+      items: [
+        {
+          id: "op-1",
+          node_id: SERVER_ID,
+          type: "container.start" as const,
+          status: "PENDING" as const,
+          params: { container_id: "abc123def456" },
+          result: null,
+          error_code: null,
+          error_message: null,
+          requested_by_id: null,
+          attempts: 0,
+          claimed_at: null,
+          available_until: new Date().toISOString(),
+          execution_deadline: null,
+          expires_at: new Date().toISOString(),
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        },
+      ],
+      total: 1,
+      limit: 10,
+      offset: 0,
+    };
+    mocks.apiPost.mockResolvedValue(queued.items[0]);
+    mocks.apiGet.mockImplementation((path: string) => {
+      if (path === "/operations") return Promise.resolve(queued);
+      if (path === "/nodes/enrollment-tokens") {
+        return Promise.resolve({ items: [], total: 0, limit: 20, offset: 0 });
+      }
+      if (path === `/nodes/${SERVER_ID}`) return Promise.resolve(makeDetail());
+      if (path === `/nodes/${SERVER_ID}/metrics/latest`) return Promise.resolve(snapshot);
+      if (path.startsWith(`/nodes/${SERVER_ID}/metrics`)) return Promise.resolve(timeseries);
+      if (path === "/containers") {
+        return Promise.resolve({ items: [container], total: 1, limit: 8, offset: 0 });
+      }
+      return Promise.reject(new Error(`unexpected path: ${path}`));
+    });
+
+    renderDetail();
+    // The container is RUNNING, so start is disabled but stop is offered.
+    const stop = await screen.findByRole("button", { name: "Stop" });
+    fireEvent.click(stop);
+
+    await waitFor(() => {
+      expect(mocks.apiPost).toHaveBeenCalledWith(
+        "/operations",
+        expect.objectContaining({ node_id: SERVER_ID, type: "container.stop" }),
+      );
+    });
+    // A queued operation is shown as PENDING with the explicit "queued" marker.
+    expect(await screen.findByText("queued")).toBeInTheDocument();
   });
 });

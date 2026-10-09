@@ -812,32 +812,64 @@ async def test_agent_token_is_bound_to_its_own_node_and_tenant(client, owner, or
     in_a = await client.get(f"{API}/nodes", headers=org_a["headers"])
     assert node_b["id"] not in {row["id"] for row in in_a.json()["items"]}
 
-    # Rotating A's token does not touch B's node, and the old token stops working.
     token_a = (
         await client.post(
             f"{API}/nodes/{org_a['server']['id']}/agent-token", headers=org_a["headers"]
         )
     ).json()["agent_token"]
-    stale = await client.post(
+    first = await client.post(
         f"{API}/agent/hello",
         headers={"X-Agent-Token": token_a},
         json={"agent_version": "test-agent/0.1", "hostname": "org-a-node.integration.test"},
     )
-    assert stale.status_code == 200, stale.text
+    assert first.status_code == 200, first.text
 
+    # Rotating A's token does not touch B's node. The old token keeps
+    # authenticating for the rotation grace window so a running agent can fetch
+    # its replacement on the next beat — that is the whole point of rotation
+    # versus revocation.
     rotated = (
         await client.post(
             f"{API}/nodes/{org_a['server']['id']}/agent-token", headers=org_a["headers"]
         )
     ).json()["agent_token"]
     assert rotated != token_a
-    retired = await client.post(
+    during_grace = await client.post(
         f"{API}/agent/hello",
         headers={"X-Agent-Token": token_a},
         json={"agent_version": "test-agent/0.1", "hostname": "org-a-node.integration.test"},
     )
-    assert retired.status_code == 401
-    assert_error_code(retired.json(), "AGENT_TOKEN_INVALID")
+    assert during_grace.status_code == 200, during_grace.text
+    with_new = await client.post(
+        f"{API}/agent/hello",
+        headers={"X-Agent-Token": rotated},
+        json={"agent_version": "test-agent/0.1", "hostname": "org-a-node.integration.test"},
+    )
+    assert with_new.status_code == 200, with_new.text
+
+    # The immediate kill switch is revoke, not rotate: after it, *both* tokens
+    # are rejected, with an explicit code so the agent's log is actionable.
+    revoked = await client.post(
+        f"{API}/nodes/{org_a['server']['id']}/agent-token/revoke", headers=org_a["headers"]
+    )
+    assert revoked.status_code == 200, revoked.text
+    for dead in (token_a, rotated):
+        rejected = await client.post(
+            f"{API}/agent/hello",
+            headers={"X-Agent-Token": dead},
+            json={"agent_version": "test-agent/0.1", "hostname": "org-a-node.integration.test"},
+        )
+        assert rejected.status_code == 401, rejected.text
+        assert_error_code(rejected.json(), "AGENT_TOKEN_REVOKED")
+
+    # A token that never existed is a different, deliberately distinct code.
+    unknown = await client.post(
+        f"{API}/agent/hello",
+        headers={"X-Agent-Token": "nxa_does-not-exist"},
+        json={"agent_version": "test-agent/0.1", "hostname": "nope"},
+    )
+    assert unknown.status_code == 401
+    assert_error_code(unknown.json(), "AGENT_TOKEN_UNKNOWN")
 
     # B's token is untouched by A's rotation.
     heartbeat = await client.post(

@@ -284,14 +284,18 @@ data.
 
 ## 6. Agents
 
-- Enrollment tokens become org-scoped rows (`enrollment_tokens`: org_id, single-use
-  or multi-use flag, expires_at, created_by_id, revoked_at). Today's enrollment is
-  already per-server — an `nxa_` token minted via the servers API and delivered to
-  the agent through its env var on the node; tenancy adds org scoping and lifecycle
-  (single-use, expiry, revocation) to those tokens.
+- **Shipped (Phase 3):** enrollment tokens are org-scoped `enrollment_tokens` rows
+  (`org_id`, `single_use`, `expires_at`, `created_by_id`, `revoked_at`, `used_at`,
+  `used_by_node_id`, optional claim `node_id`), stored as SHA-256 hashes and shown
+  once. They carry the same two RLS policies as every tenant table and an app-role
+  grant. Redemption is a single compare-and-set, so two concurrent attempts cannot
+  both win, and the node's org is the **token's** org — never the payload's.
 - The agent's org is derived from the authenticated node row — never from payload.
 - Agent ingestion (hello/heartbeat/ops) executes under the node's org scope, so
   writes, events, and emitted audit rows are tenant-correct.
+- The by-hash enrollment lookup must run *before* an org is known, so it executes in
+  a logged system scope (the same documented carve-out `api_keys`/`agent_credentials`
+  use); the org it returns is authoritative and everything after runs inside it.
 - Revocation: revoking a node kills its token's acceptance immediately (token hash
   lookup is per-node); the org's other nodes are unaffected.
 

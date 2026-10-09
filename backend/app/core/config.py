@@ -85,6 +85,20 @@ class Settings(BaseSettings):
 
     # --- Heartbeats & scheduling ---------------------------------------
     server_offline_after_seconds: int = Field(default=90, ge=30)
+
+    # --- Agent credential rotation & operation timing -------------------
+    #: Dual-token grace after a rotation (docs/node-agent-architecture.md §3.3).
+    #: The old token keeps authenticating for this long so a running agent can
+    #: fetch its replacement on the next beat. 0 disables the grace entirely
+    #: (immediate switch). Compromise response is *revoke*, not a long grace.
+    agent_rotation_grace_seconds: int = Field(default=24 * 3600, ge=0, le=7 * 86400)
+    #: How long a claimed operation may still report a result after its execution
+    #: deadline, absorbing one slow heartbeat without letting a node act forever.
+    agent_result_grace_seconds: int = Field(default=30, ge=0, le=3600)
+    #: Floor for the operation *availability* window: the queue deadline is never
+    #: shorter than this even for a fast-heartbeat node, which is what guarantees
+    #: an operation created just after a beat survives until the next one.
+    agent_delivery_min_seconds: int = Field(default=120, ge=10, le=86400)
     monitor_dispatch_interval_seconds: int = Field(default=10, ge=5)
     metrics_aggregation_interval_seconds: int = Field(default=60, ge=10)
     raw_metric_retention_hours: int = Field(default=24, ge=1)

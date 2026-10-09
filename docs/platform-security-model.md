@@ -203,14 +203,11 @@ accepted for v1:
 ---
 
 ## 6. Current-code hardening listEvery item below was a defect in the code as of this document's date, evidenced
-at path:line. **H1 and the agent half of H4 are now fixed (Phase 0, marked ✅/◐
-below); the rest are still open.** The roadmap's Phase 0 hardening table (roadmap
-§3) mirrors these items **except H2**, which it omits — H2's fix can only land
-with Phase 6 real deployments, past the tenancy migration. The roadmap's "Lands in"
-column schedules the items across phases: Phase 0 kicks off (H1 fail-closed, H4 backoff, H8
-fail-closed), H3/H6/H7/H9 land with the Phase 1 tenancy migration, H4's full revocation
-semantics and H5/H10 with Phase 3 agent v2, and H8's deploy-chain authorization with Phase 2.
-Keep the two lists synchronized when either changes.
+at path:line. **H1 (Phase 0); H3, H7, H9 (Phase 1); H4, H5, H6 (agent routes),
+H10 (Phase 3) are fixed; H2 and H8 remain open.** The roadmap's Phase 0 hardening
+table (roadmap §3) mirrors these items **except H2**, which it omits — H2's fix can
+only land with Phase 6 real deployments, past the tenancy migration. Keep the two
+lists synchronized when either changes.
 
 ### 6.1 Core items
 
@@ -219,13 +216,13 @@ Keep the two lists synchronized when either changes.
 | H1 ✅ **FIXED (Phase 0)** | ~~**Silent secret-resolution degradation** — missing or undecryptable `${secret:KEY}` refs resolved to `""` with only a log warning; deploys proceeded without credentials~~ | Was: backend/app/services/secret_service.py:314-324; engine wrapper swallowed all exceptions → `{}` | Shipped: `resolve_secrets_for_environment` raises `SecretResolutionError`; the engine-owned `RESOLVE_CONFIG` step (planned first, refused by runners) fails through `_finalize_failed` with the remaining steps `SKIPPED`, and audits `secret.resolve_failed` + one `secret.resolve` per resolved key/version |
 | H2 | **Real deployments never receive secrets** — `docker_real.py` has zero `ctx.secrets` references; only the simulated runner consumes them | backend/app/providers/deployment_runner.py:70,210 (sim runner) vs backend/app/providers/docker_real.py (no reference) | Wire resolved secrets into the real runner's container creation; contract test pinning the behavior |
 | H3 | **WS global channel exposure** — `global` and `incidents` channels fan EVERY event instance-wide to any `event.read`/`monitor.read` holder | backend/app/ws/hub.py:462-475 | Org-prefix channels + publish helpers stamping org (multi-tenancy.md §5); ship with the tenancy phase, not after |
-| H4 ◐ **agent side FIXED (Phase 0)** | **Agent token non-revocation + 401 hot-loop** — revoke = rotate = running agent 401-exited; systemd restarted it every 10s forever; no dual-token grace | backend/app/services/server_service.py:255-264 (rotation only); agent/nexusops_agent.py (was 401→exit 1); agent/nexusops-agent.service (Restart=always, RestartSec=10) | **Done:** the agent parks in `REVOKED_POLL_SECONDS` (900) with a once-per-entry notice instead of exiting, so no restart storm. **Still open (Phase 3):** the revoke-only path and bounded dual-token grace window |
-| H5 | **Agent plain-HTTP transport option** — token sniffable on the path; only a stderr warning | agent/nexusops_agent.py:328-353 | Default-deny plain HTTP to non-loopback targets; keep explicit opt-in flag with audible warning; TLS termination guidance in install flow |
-| H6 | **Rate limits keyed by IP only** — NAT'd agent fleets share one 600/min heartbeat bucket; no per-user/org dimension on user routes | backend/app/core/rate_limit.py:69; agent limits backend/app/api/v1/agent.py:31-32 | Two-dimension keys: per-node for agent routes, per-org/per-user for authenticated routes (§9) |
+| H4 ✅ **FIXED (Phase 0 agent backoff; Phase 3 revocation)** | **Agent token non-revocation + 401 hot-loop** — revoke = rotate = running agent 401-exited; systemd restarted it every 10s forever; no dual-token grace | agent/nexusops_agent.py (was 401→exit 1) | **Done:** the agent parks in `REVOKED_POLL_SECONDS` (900) with a once-per-entry notice instead of exiting. Phase 3 added the **revoke-only path** (`POST /nodes/{id}/agent-token/revoke`, immediate, no grace) and the **bounded dual-token grace window** (`agent_credentials.previous_token_hash` / `previous_expires_at`) with the replacement delivered on the next heartbeat |
+| H5 ✅ **FIXED (Phase 3)** | ~~**Agent plain-HTTP transport option** — token sniffable on the path; only a stderr warning~~ | agent/nexusops_agent.py | Shipped: plain HTTP to a non-loopback target is **refused before any credential is sent**, with no override flag; install.sh enforces the same rule |
+| H6 ◐ **agent routes FIXED (Phase 3)** | **Rate limits keyed by IP only** — NAT'd agent fleets shared one 600/min heartbeat bucket | backend/app/core/rate_limit.py | **Done:** authenticated agent routes (heartbeat/claim/result) key on the resolved **node**, so NAT'd fleets no longer share a bucket; a cheap per-IP ceiling still covers unauthenticated floods. **Open:** per-org/per-user keys on human routes (§9) |
 | H7 | **Global unique names** — `Server.name` (and `projects.name`, tags) unique platform-wide; one tenant blocks another's names; enables name-squatting | backend/app/models/infra.py:51; backend/app/models/delivery.py:29; backend/app/models/infra.py:38 | Composite `(org_id, name)` uniques with the tenancy migration (findings, data-model report) |
 | H8 | **Secrets resolution lacks per-user authorization on the engine path** — deployment engine resolves every referenced secret with no per-user secret permission; anyone with `deployment.create` pulls all referenced values into a run | backend/app/services/deployment_engine.py:374-388; flat `secret.read`/`secret.write` (backend/app/api/v1/secrets.py:27-52) | Resolution checks the caller's secret permission for the scope, or values egress only through a service identity with audit; scope layering (org/project/environment) per domain-model.md §2.5 |
 | H9 | **Audit rows lack org + request-id** — no tenant attribution, no request correlation on the row | backend/app/models/observability.py:249-278; request_id exists only in error envelope/log lines (backend/app/core/middleware.py:23-26) | Add `org_id` + `request_id` columns with the tenancy migration (domain-model.md §2.6); stamp from middleware contextvar |
-| H10 | **Agent `--insecure` disables TLS verification** — one-flag bypass of the HTTPS-only posture (mirrors H5): an on-path attacker can impersonate the control plane over `https://` and harvest the node/enrollment token | agent/nexusops_agent.py:319-324 | Hard-fail for non-loopback server URLs behind the same demo/lab override discipline as H5; never allowed during enrollment or rotation delivery (node-agent-architecture.md §6.3) |
+| H10 ✅ **FIXED (Phase 3)** | ~~**Agent `--insecure` disables TLS verification** — one-flag bypass of the HTTPS-only posture (mirrors H5)~~ | agent/nexusops_agent.py | Shipped: the `--insecure` flag and the `ssl._create_unverified_context()` path are **removed**; verification is never disabled. A private CA is trusted via `NEXUSOPS_CA_BUNDLE` (node-agent-architecture.md §6.3) |
 
 ### 6.2 Further findings-sourced items (tracked in this doc only — not in the roadmap's hardening table)
 

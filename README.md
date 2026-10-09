@@ -9,8 +9,12 @@ notification, and deploy → step logs → rollback.
 ## Features
 
 - **Servers & agent heartbeats** — a dependency-free Python agent (`agent/nexusops_agent.py`)
-  reports CPU, memory, disk, load and Docker container state; servers go OFFLINE after
-  90 s without a heartbeat (configurable via `SERVER_OFFLINE_AFTER_SECONDS`).
+  reports CPU, memory, disk, load, network throughput and Docker container state, plus
+  self-reported **capabilities** and open-ended facts; servers go OFFLINE after 90 s
+  without a heartbeat (configurable via `SERVER_OFFLINE_AFTER_SECONDS`). A machine is
+  enrolled with an organization-scoped, single-use, expiring enrollment token
+  (`POST /api/v1/nodes/enrollment-tokens`); its node credential is stored 0600 and can
+  be rotated or revoked without a reinstall. Transport is HTTPS-only.
 - **Docker containers & live log streaming** — container lifecycle actions and log
   streaming over WebSocket (`container-logs` channel), through configured Docker
   endpoints (real Docker SDK provider or simulation).
@@ -39,11 +43,13 @@ notification, and deploy → step logs → rollback.
   start|stop|restart|remove`, `logs.tail`) are enqueued through
   `POST /api/v1/operations` under an existing permission codename, then claimed and
   reported by an enrolled node through a compare-and-set queue bound to one
-  `(node, organization)` — no `node.execute`, no push tunnel
-  (`docs/node-agent-architecture.md` §5, `docs/authorization.md`). Scope note: this
-  is the **control plane**; nothing hands an agent its pending operation ids yet, and
-  a type whose capability enrollment cannot guarantee is refused
-  `409 NODE_CAPABILITY_UNVERIFIED` rather than dispatched unverified.
+  `(node, organization)` — no `node.execute`, no push tunnel. Delivery is pull-based:
+  a protocol-2 agent receives its pending ids in the heartbeat response, executes them
+  through a closed local registry (no shell) and reports the result
+  (`docs/node-agent-architecture.md` §5, `docs/authorization.md`). Dispatch is
+  capability-gated: a node that has not reported the required capability is refused
+  `409 NODE_CAPABILITY_UNVERIFIED` (reported absent → `409 NODE_CAPABILITY_MISSING`)
+  rather than dispatched unverified.
 - **Operations dashboard** — fleet counters plus a live event feed on the `global`
   WebSocket channel. Note: there is no fleet-wide metrics history endpoint yet, so the
   dashboard charts nothing; per-server timeseries live on each server's detail page.

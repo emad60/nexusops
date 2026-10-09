@@ -87,9 +87,11 @@ not added:** listing and reading operations uses `node.read`, since an operation
 is a node-scoped artifact and no separate read grant is needed yet. Only the
 `container.*` types are whitelisted; `nginx.*` and the reserved secret/cert types
 ship with their subsystems. Dispatch is additionally **capability-gated,
-fail-closed**: until per-node capability advertisement lands (Phase 3), a type
-whose capability cannot be verified is refused `409 NODE_CAPABILITY_UNVERIFIED`
-(see node-agent-architecture.md §5.4).
+fail-closed** (Phase 3): a node that has not reported a capability is refused
+`409 NODE_CAPABILITY_UNVERIFIED`, and a node that reports it absent is refused
+`409 NODE_CAPABILITY_MISSING` (see node-agent-architecture.md §5.4). The agent
+re-checks its own registry and local capability before executing, so a stale
+server-side claim cannot cause an unsafe run.
 
 **One name: DevOps.** *(Not shipped.)* The stored system-role row will be renamed
 `Operator` → `DevOps` (the FK-facing change is the `roles.name` value on the

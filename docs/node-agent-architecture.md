@@ -1,14 +1,17 @@
 # Node & Agent Architecture
 
-**Status:** Phase 1 shipped (§5), target design for the rest — see §5.4.
-**Date:** 2026-09-20 (status updated 2026-10-07)
+**Status:** Phases 1 and 3 shipped — the node control plane below is real, bar §7.3.
+**Date:** 2026-09-20 (status updated 2026-10-09)
 **Companions:** [platform-vision.md](platform-vision.md) · [domain-model.md](domain-model.md) · [multi-tenancy.md](multi-tenancy.md) · [authorization.md](authorization.md)
 
-The **operations control plane** (§5 — creation, claim, result, cancel, expiry) is
-implemented and tested: that part is Phase 1, not a proposal. Everything else here —
-enrollment v2, the heartbeat v2 additions, per-node capability advertisement, delivery
-of operations to the agent, versioning/self-update and the install UX — is the target
-design for Phase 2/3 and is **not** built. §5.4 states that boundary explicitly.
+The **operations control plane** (§5 — creation, claim, result, cancel, expiry) shipped
+in Phase 1. Phase 3 shipped the rest of this document: organization-scoped enrollment
+tokens (§3.2), the heartbeat v2 additions and per-node capability advertisement (§2.3,
+§4.2), pull-based delivery of operations to the agent (§5.1, §5.4), credential rotation
+and revocation (§3.3–§3.4), HTTPS-only transport (§6.3) and the install UX (§8.2).
+The one section that remains a **target design** is §7.3 (agent self-update) — upgrades
+are still a re-run of `install.sh`. Where a subsection below still reads as a proposal,
+the *Implemented* note in it states what actually ships.
 
 ---
 
@@ -29,10 +32,11 @@ the design:
 
 | Capability | State |
 |---|---|
-| Agent hello/heartbeat, host metrics, docker observation, container inventory, token rotation | **Real** (`agent/nexusops_agent.py:302-494`, `server_service.py:267-626`) |
+| Agent hello/heartbeat, host metrics, docker observation, container inventory, token rotation | **Real** (`agent/nexusops_agent.py`, `server_service.py`) |
+| Enrollment v2 (`nxk_` tokens), capabilities, operation delivery + execution, rotation/revocation, HTTPS-only | **Real** (Phase 3) — see §3.2, §4.2, §5, §6.3 |
 | Deployment runner | **Simulated** — `SimulatedDeploymentRunner` renders fake docker-style step logs, no real work (`backend/app/providers/deployment_runner.py:107`) |
 | `sim://` monitor transports, `docker_sim` provider | **Simulated** demo/CI tooling (`backend/app/providers/docker_sim.py:39-100`) |
-| Operations framework (§5) / nginx capability | **Designed, not built** — no nginx subsystem exists today |
+| nginx capability (`nginx.*` ops) | **Not built** — reserved for Phase 4; no nginx subsystem exists (`nginx/` serves only the dashboard) |
 
 ## 2. The Node concept
 
@@ -45,30 +49,35 @@ API surface is `/nodes` (with a temporary `/servers` alias).
 
 | Field group | Columns (table `servers`, `backend/app/models/infra.py:42-87`) |
 |---|---|
-| Identity | id, name (**unique platform-wide today** — becomes per-org under tenancy), hostname, ip_address, environment, location, description |
+| Identity | id, org_id, name (**unique per organization** — `uq_servers_org_name`), hostname, ip_address, environment, location, description |
 | Facts | os_name, os_version, arch, cpu_cores, memory_total_mb, disk_total_gb |
-| Agent identity | agent_version, agent_token_hash, agent_enrolled_at, last_heartbeat_at, heartbeat_interval_seconds (default 30, CHECK ≥5 at `infra.py:46`), offline_after_seconds |
-| Status | status (`UNKNOWN/ONLINE/OFFLINE`), uptime_seconds, simulated flag |
-| Extra facts | `extra` JSONB (`infra.py:82`) — exists, unused by the agent today; **missing vs target:** org_id, capabilities |
+| Agent identity | agent_version (persisted), protocol_version (`NULL` = pre-v2), credential_revoked_at, agent_enrolled_at, last_heartbeat_at, heartbeat_interval_seconds (default 30, CHECK ≥5), offline_after_seconds. The token hash itself lives in `agent_credentials` (one row per node) because auth must resolve the node before an organization is known. |
+| Status | status (`UNKNOWN/ONLINE/OFFLINE`), uptime_seconds, simulated flag (`false` for every agent-enrolled node) |
+| Extra facts | `extra` JSONB, exposed over the API as `facts` (open-ended agent telemetry: disks, interfaces, kernel); `capabilities` JSONB — self-reported at hello, `{}` = unreported |
 
 ### 2.2 Changes for the target model
 
 | Change | Detail |
 |---|---|
-| `+ org_id` | Tenancy root binding (multi-tenancy.md §9). |
-| `+ capabilities JSONB` | Self-reported at hello, stored server-side; **dispatch gating input** — ops are dispatched only to nodes reporting the required capability (platform-vision.md principle 6). |
-| Name uniqueness | `servers.name` unique → **per-org unique** (findings agent-4 tenancy gaps: platform-wide unique collides across tenants). |
-| `simulated` flag fix | `_apply_agent_entry` sets `row.simulated=True` on real agent data (`server_service.py:498`); flag becomes false for real agents and true only for sim-source rows. |
+| `+ org_id` | Tenancy root binding (multi-tenancy.md §9). **Implemented.** |
+| `+ capabilities JSONB` | Self-reported at hello, stored server-side; **dispatch gating input** — ops are dispatched only to nodes reporting the required capability (platform-vision.md principle 6). **Implemented.** |
+| Name uniqueness | `servers.name` unique → **per-org unique** (`uq_servers_org_name`). **Implemented.** |
+| `simulated` flag fix | Real agent telemetry cleared the `simulated` flag (`_apply_agent_entry` set `row.simulated=True`); an enrolled node is now `simulated=false` from enrollment onward. **Implemented.** |
 
-### 2.3 Capabilities (target)
+### 2.3 Capabilities (implemented, Phase 3)
 
 Self-reported in hello v2 (§4.2), stored in `servers.capabilities` JSONB:
 
 | Capability | Meaning | Gates ops (§5.2) |
 |---|---|---|
-| `docker` | docker.sock reachable and API-negotiated | container.* ops |
-| `nginx` | agent manages host nginx | nginx.* ops |
-| `systemd` | systemd present (future) | service ops (future) |
+| `docker` | docker.sock **connects and `/version` answers** — a binary on PATH is not enough | container.* ops, `logs.tail` |
+| `systemd` | `/run/systemd/system` exists (init is systemd) | service ops (future) |
+| `nginx` | *reserved* — reports honestly once an nginx provider exists | nginx.* ops (Phase 4) |
+
+The map is a JSONB blob with a bounded key count (`CAPABILITY_MAP_MAX_KEYS`) and
+per-entry `{present, version?, api_version?}`; a new capability is a key, not a
+column. An absent key or `present: false` is **unreported/unavailable**, never
+"has it" — server-side dispatch and the agent's local re-check both refuse.
 
 Capabilities are advisory-reported, **server-enforced at dispatch**: the control
 plane checks `capabilities` before creating/dispatching an op, and the agent
@@ -85,28 +94,43 @@ per node, exposed as part of the Node resource. Two origins:
 | Agent-backed (this doc) | `ensure_docker_host` auto-creates one `agent://` host per server on first container telemetry (`server_service.py:459-474`) | `agent://<server-name>` |
 | Manual TCP | user-configured, SSRF-guarded (`backend/app/core/ssrf.py:141-177`) | `tcp://...` |
 
-Known gap from findings: ensure_docker_host's select-then-insert lacks a
-`UNIQUE(DockerHost.server_id)`; v2 adds the DB constraint.
+`UNIQUE(docker_hosts.server_id)` closed the select-then-insert race in
+`ensure_docker_host`: at most one Docker connection per node, enforced by the
+database (`uq_docker_hosts_server_id`, Phase 3 migration).
 
 ## 3. Agent lifecycle
 
 ### 3.1 Current state (real)
 
-| Stage | Today | Evidence |
+| Stage | Behavior | Evidence |
 |---|---|---|
 | Enroll | User creates `Server` row (POST /nodes), then `POST /nodes/{id}/agent-token` issues a per-server `nxa_` token (`token_urlsafe(30)`, only the SHA-256 hash stored, raw shown once) handed to `install.sh` by hand | `backend/app/api/v1/servers.py:170-192`, `backend/app/core/security.py:103-110` |
 | Install | `install.sh --server URL --token nxa_...` copies agent to `/usr/local/lib/nexusops-agent`, writes `/etc/default/nexusops-agent` at 0600 **before** the token is written | `agent/install.sh:12-41` |
 | First contact | `POST /agent/hello` once at startup; server sets `agent_enrolled_at`, overwrites static facts, returns `AgentHelloOut{name, heartbeat_interval_seconds, offline_after_seconds}` | `agent/nexusops_agent.py:446-461`, `server_service.py:267-294`, `backend/app/schemas/agent.py:24-43` |
 | Steady state | Heartbeat every negotiated interval (default 30s); exponential backoff `interval * 2^min(failures,4)` capped 300s on failures | `agent/nexusops_agent.py:462-490` |
-| Rotation | Rotate = new token, old dead instantly, `agent_enrolled_at` reset | `server_service.py:255-264` |
-| Revocation | None — revoke = rotate; running agent 401s and `exit(1)`s | `agent/nexusops_agent.py:480-482` |
+| Rotation | `POST /nodes/{id}/agent-token` issues a new `nxa_` token and opens a bounded dual-token grace; the running agent collects it on its next heartbeat and persists it atomically | `server_service.rotate_agent_token`, §3.3 |
+| Revocation | `POST /nodes/{id}/agent-token/revoke` — immediate, no grace, no delivery; the parked agent reports the state and stops burning requests | `server_service.revoke_agent_token`, §3.4 |
+
+**Enrollment v2 (Phase 3, implemented).** A node is now enrolled with an
+organization-scoped single-use `nxk_` token instead of a hand-carried `nxa_`:
+`POST /nodes/enrollment-tokens` mints it, `POST /agent/enroll` redeems it inside
+the token's organization (never the payload's), and the response's raw `nxa_`
+credential is written to `/etc/nexusops-agent/token` at 0600. The legacy
+`POST /nodes/{id}/agent-token` per-node token still exists for the backward-
+compatibility path (§5 of the Phase 3 report); new installs use enrollment tokens.
 
 ### 3.2 Enrollment v2
 
-Today there is **no org dimension at all** — `require_server` resolves the token
-hash to a platform-global Server row (`backend/app/api/v1/agent.py:33-49`), and the
-"enrollment token" is the per-server token handed over manually. The target:
-dedicated org-scoped enrollment-token rows (multi-tenancy.md §6).
+**Implemented (Phase 3).** Enrollment is now an organization-scoped,
+single-use, expiring, revocable `nxk_` token stored only as a SHA-256 hash
+(`enrollment_tokens`, RLS-enforced). The consume is a single compare-and-set
+(`used_at IS NULL AND revoked_at IS NULL AND expires_at > now()`), so two
+concurrent redemptions cannot both win, and the node's organization is taken from
+the token row — the payload has no org field to lie about. Endpoints:
+`POST/GET /nodes/enrollment-tokens`, `POST /nodes/enrollment-tokens/{id}/revoke`,
+`POST /agent/enroll`. The organization-scoped lookup runs in an audited system
+scope (the same documented carve-out `api_keys`/`agent_credentials` use) because
+the hash must resolve *before* an organization is known.
 
 > **Reconciliation note:** multi-tenancy.md §6 says "the current global
 > enrollment token (env var)" is deprecated in the tenancy phase; no such global
@@ -128,12 +152,12 @@ dedicated org-scoped enrollment-token rows (multi-tenancy.md §6).
 | node_id? | Optional: claim a pre-created placeholder Node |
 | used_at, used_by_node_id | Consumed at successful enroll; format `nxk_` (distinct from node tokens `nxa_`) |
 
-**Rules:** the agent's org comes from the token row — never from payload, header,
-or untrusted lookup (multi-tenancy.md §2). Enrollment creates or claims the Node
-row (name from hostname, per-org dedup, `ONLINE` on first hello); single-use
-enforcement shares the transaction that marks the node enrolled. Enrollment and
-every agent call are audited with `ActorType.AGENT` + node attribution (fixes the
-gap where agent writes carry no tenant attribution, `server_service.py:334,596`).
+**Rules (all implemented):** the agent's org comes from the token row — never
+from payload, header, or untrusted lookup (multi-tenancy.md §2). Enrollment
+creates or claims the Node row (name from hostname, per-org dedup, `ONLINE` on
+first hello) in the same transaction that consumes the token. Enrollment is
+audited (`enrollment_token.create` / `.revoke`, `node.enroll`); node credential
+use is attributed to the node.
 
 **Sequence — enrollment v2:**
 
@@ -159,13 +183,13 @@ sequenceDiagram
 
 ### 3.3 Token storage & rotation with dual-token grace
 
-| Side / aspect | Today | Target |
+| Side / aspect | Before | Phase 3 (implemented) |
 |---|---|---|
-| Control plane | SHA-256 hex hash only; raw shown once (`security.py:103-110`) | unchanged + `agent_token_hash_previous` + `token_rotated_at` columns for the grace window |
-| Agent file | `/etc/default/nexusops-agent` written 0600 **before** the token lands (`agent/install.sh:29-41`) | `/etc/nexusops-agent/token` 0600 root:root; atomic `os.replace` (temp + rename + fsync); old token kept as fallback file during grace |
-| Agent env | `NEXUSOPS_SERVER` / `NEXUSOPS_TOKEN` / `NEXUSOPS_INTERVAL` env file (`agent/nexusops_agent.py:420-424`) | same env names kept; install.sh flow unchanged for compat |
+| Control plane | SHA-256 hex hash only; raw shown once (`security.py:103-110`) | unchanged + `agent_credentials.previous_token_hash`, `previous_expires_at`, `pending_token_ciphertext` (encrypted) and `rotation_applied_at` for the grace window |
+| Agent file | `/etc/default/nexusops-agent` written 0600 **before** the token lands (`agent/install.sh`) | `/etc/nexusops-agent/token` 0600 root:root; atomic `os.replace` (temp + rename + fsync) |
+| Agent env | `NEXUSOPS_SERVER` / `NEXUSOPS_TOKEN` / `NEXUSOPS_INTERVAL` env file | same names kept (`NEXUSOPS_TOKEN_FILE`, `NEXUSOPS_CA_BUNDLE` added); install.sh flow unchanged for compat |
 | Rotation | kills the old token instantly (`server_service.py:255-264`) — running agents 401 at next beat and need manual reinstall | dual-token grace, default 24h (settings; per-rotation override incl. `grace=0` for compromise); pending new token delivered in the **heartbeat response** while the old token still authenticates (hello happens only at process start — §3.5 — so the heartbeat is the only channel a running agent polls); old token accepted for heartbeats + rotation delivery until the deadline |
-| Revoke | not an action (revoke = rotate) | **separate action**: kill now, no grace, no delivery |
+| Revoke | not an action (revoke = rotate) | **separate action** (`POST /nodes/{id}/agent-token/revoke`): kill now, no grace, no delivery |
 
 **Why delivery-via-heartbeat:** hello re-negotiation happens only on process
 restart (§3.5) and the agent hellos exactly once at startup, so the heartbeat is
@@ -187,10 +211,10 @@ therefore self-heals on the following beat.
 
 ### 3.4 Revocation semantics — fixing the 401 hot-loop
 
-Today a revoked/rotated-over agent 401s and `exit(1)`s
-(`agent/nexusops_agent.py:480-482`); systemd `Restart=always` + `RestartSec=10`
-(`agent/nexusops-agent.service:11-12`) restarts it every 10s **forever** — a hot
-loop of rejected requests contradicting docs/agent.md:75. Fix, both sides:
+**Implemented (Phase 3).** A revoked/rotated-over agent once 401'd and
+`exit(1)`'d; systemd `Restart=always` + `RestartSec=10`
+(`agent/nexusops-agent.service`) then restarted it every 10s **forever** — a hot
+loop of rejected requests. Both sides were fixed:
 
 | Side | Change |
 |---|---|
@@ -220,7 +244,7 @@ the hostname or IP on an existing node.
 | `ONLINE` | heartbeat accepted | status set per beat (`server_service.py:300-358`) |
 | `OFFLINE` | no heartbeat within `offline_after_seconds` (per-node override, else `settings.server_offline_after_seconds` = 90s, `backend/app/core/config.py:76`) | status-guarded bulk sweeper vs DB `func.now()` + one CRITICAL alert per transition (`server_service.py:379-453`) |
 | Reconnect | next accepted beat | back to `ONLINE` + once-per-day deduped event (`server_service.py:334`) |
-| `TOKEN_STALE` / `REVOKED` (target) | grace deadline passed with no accepted heartbeat (rotation never delivered) / explicit revoke | ops-side flag on the node row; agent idles in `revoked` polling (§3.4) |
+| `TOKEN_STALE` / `REVOKED` | grace deadline passed with no accepted heartbeat (rotation never delivered) / explicit revoke (`credential_revoked_at`) | `credential_revoked_at` on the node row surfaced to the UI; the agent idles in `revoked` polling — `REVOKED_POLL_SECONDS` = 900 (§3.4) |
 
 Agent-side reconnect is unchanged: backoff caps at 300s
 (`agent/nexusops_agent.py:490`); hello re-negotiation happens only on process
@@ -236,8 +260,8 @@ validates its payloads against the real schemas — wire drift fails CI.
 
 | Call | Payload (schema) | Response | Auth + limits |
 |---|---|---|---|
-| `POST /agent/hello` | `AgentHelloIn`: agent_version, os_name, os_version, arch, cpu_cores, memory_total_mb, disk_total_gb, hostname (`schemas/agent.py:24-43`) | `AgentHelloOut{server_id, name, heartbeat_interval_seconds, offline_after_seconds}` | nxa_ token; 30/min per IP (`api/v1/agent.py:31-32`) |
-| `POST /agent/heartbeat` | `AgentHeartbeatIn`: cpu/mem/disk/load/uptime + net_rx_kb_s/net_tx_kb_s + containers[] (`schemas/agent.py:71-85`) | 204 | nxa_ token; 600/min per IP |
+| `POST /agent/hello` | `AgentHelloIn`: agent_version, **protocol_version**, os_name, os_version, arch, cpu_cores, memory_total_mb, disk_total_gb, hostname, **capabilities**, **facts** | `AgentHelloOut{server_id, name, heartbeat_interval_seconds, offline_after_seconds, protocol_version, min_agent_version}` | nxa_ token; 30/min per IP |
+| `POST /agent/heartbeat` | `AgentHeartbeatIn`: cpu/mem/disk/load/uptime + net_rx_kb_s/net_tx_kb_s (nullable) + rotation_applied + containers[] | **204 for a protocol-1 agent**; **200 + `pending_operations` + `token_rotation` for a protocol-2 agent** | nxa_ token; per-node limit (§4.2) |
 
 Wire facts that matter:
 
@@ -248,50 +272,56 @@ Wire facts that matter:
 | Caps | agent list 50, inspect 10, stats 12, schema max 200; absence trusted as removal **only** when payload < 50 | `AGENT_CONTAINER_CAP` `schemas/agent.py:21`, `agent/nexusops_agent.py:147,185,197`, `server_service.py:607` |
 | health must be null | `""` 422s the beat | `test_agent_contract.py:6-9` |
 | No client timestamps | `observed_at`/`last_heartbeat_at` are server receive times — no clock-skew surface | `server_service.py:312-315,521` |
-| `net_rx_kb_s`/`net_tx_kb_s` | **hardcoded 0.0** in every beat; rendered as real by dashboards | `agent/nexusops_agent.py:398-399` — placeholder, must be implemented or removed in v2 |
-| Dead code | heartbeat schema accepts optional os_name/arch/cpu_cores, agent never sends them | `server_service.py:318-325` |
+| `net_rx_kb_s`/`net_tx_kb_s` | **measured** from `/proc/net/dev` deltas over non-loopback interfaces; **`null`** when not measurable (first sample, no interface, counter reset/negative delta) — never a fabricated `0.0` | `agent/nexusops_agent.py` `network_rates()` |
+| `rotation_applied` | v2 only: the agent's ack that it persisted a rotated credential; ends re-delivery and closes the grace window. Ignored (absent) for v1. | `schemas/agent.py` `AgentHeartbeatIn` |
 
-### 4.2 v2 additions
+### 4.2 v2 additions (implemented, Phase 3)
 
 | Change | Direction | Notes |
 |---|---|---|
 | `capabilities` block in hello | agent → server | `{docker: {present, api_version}, nginx: {present, version}, ...}`; persisted to `servers.capabilities` (§2.3) |
-| `agent_version` actually persisted | agent → server | hello already sends it (`agent/nexusops_agent.py:449`); server drops it today (§7) |
+| `agent_version` actually persisted | agent → server | hello sends it and the control plane now stores it on `servers.agent_version` (§7.1) |
 | User-Agent telemetry | agent → server | `nexusops-agent/{version}` sent on every call (`agent:366`), ignored server-side — record it on every ingest as a cheap cross-check |
 | `net_rx_kb_s`/`net_tx_kb_s` honest | agent → server | implement via `/proc/net/dev` deltas (stdlib) or drop the fields — never render zeros as data |
 | `AgentHelloOut` negotiation | server → agent | the existing negotiation channel (`schemas/agent.py:37-43`) gains: `min_agent_version`, future feature flags; `token_rotation` (§3.3) rides the **heartbeat response** instead — hello happens only at process start (§3.5), so a running agent would never see it |
 | Facts merge policy | server | hello continues to overwrite static facts (`server_service.py:271-286`) but writes additionally into `extra` (disks, GPU, systemd units) instead of inventing columns per fact — domain-model.md §2.3's "+ facts columns" is realized as fact keys on the existing `extra` JSONB (one flexible column populated, not new physical columns) |
 | Rate-limit fairness | server | moves from per-client-IP (`backend/app/core/rate_limit.py:69` — NAT'd fleets share one 600/min bucket) to **per-node after auth** |
 
-**Protocol floor, pinned now:** today's wire protocol has no version field —
-`AgentHelloOut` carries only the intervals (`schemas/agent.py:37-43`). When a
-`protocol_version` is introduced, the AGENT refuses any negotiated protocol
-below its shipped maximum; the server may only raise the floor. The existing
-strength this builds on: the agent's op whitelist is compile-time (§5.2, §6.4),
-so a malicious server cannot make an old agent accept new op types —
-negotiation governs cadence and fields, never capability.
+**Protocol negotiation (implemented).** The wire now carries
+`protocol_version`: `AGENT_PROTOCOL_VERSION = 2` is what the control plane speaks,
+`MIN_SUPPORTED_AGENT_PROTOCOL = 1` is the oldest agent still accepted (the pre-v2
+contract), and `MIN_AGENT_VERSION` is the security-floor agent build. A v1 agent
+omits `protocol_version` (the field defaults to `1`, never to "supports the new
+one") and keeps receiving `204` from `/agent/heartbeat`; a v2 agent sends `2` and
+receives the `200` body with `pending_operations` and `token_rotation`. Because
+`extra="forbid"` 422s unknown fields, the transition is negotiated at hello
+rather than discovered — the server lowers itself to the agent's version for
+cadence and fields. The strength this preserves: the agent's op whitelist is
+compile-time (§5.2, §6.4), so a malicious server cannot make an old agent accept
+new op types — negotiation governs cadence and fields, **never capability**.
 
 ## 5. The Operations framework
 
-> **Status (2026-10-04): the control plane is shipped; the delivery path is not.**
-> The `operations` table, the CAS state machine (claim / result / cancel / expiry),
-> the whitelist registry, the per-type permissions and the audit rows below are
-> implemented and covered by `tests/integration/test_operations.py` and
-> `tests/unit/test_operation_registry.py`. Two parts of this section remain
-> unimplemented, deliberately: **per-node capability advertisement** (the target
-> §2.3/§5.2 gate — `servers` has no capabilities column yet; see §5.4 for the
-> fail-closed boundary that stands in for it), and **heartbeat delivery** of
-> pending op ids (§5.1 would change the heartbeat's 204 contract, and the agent
-> router is required to have no GET endpoints). Therefore the whitelisted types
-> have **no executing agent** — the reference agent does not poll or run
-> operations. The approved codenames are reused exactly as specified; no
-> `node.execute` grant was added.
+> **Status (2026-10-09): shipped end to end.** The `operations` table, the CAS
+> state machine (claim / result / cancel / expiry), the whitelist registry, the
+> per-type permissions and the audit rows are Phase 1 work. Phase 3 added the two
+> pieces this section previously marked unimplemented: **per-node capability
+> advertisement** (`servers.capabilities`, reported at hello, gating dispatch —
+> §2.3) and **heartbeat delivery** of pending op ids (the v2 heartbeat response
+> carries `pending_operations`; a v1 agent keeps the 204 contract unchanged). The
+> reference agent now claims, executes and reports the whitelisted types through a
+> closed local registry (`agent/nexusops_agent.py`), so the framework is exercised
+> `Dashboard → pending → claim → Docker call → result` by
+> `tests/integration/test_phase3_nodes.py` and the agent's own unit tests. The
+> approved codenames are reused exactly as specified; no `node.execute` grant was
+> added.
 
 ### 5.1 Model and lifecycle
 
 One new table, `operations` (domain-model.md §2.3): org_id, node_id, type
 (whitelist), params JSONB, status, requested_by_id, result JSONB, timestamps,
-expires_at.
+`available_until` (queue deadline), `execution_deadline` (post-claim), and
+`expires_at` (hard deadline — see the deadline rules below).
 
 | Status | Meaning |
 |---|---|
@@ -311,10 +341,24 @@ Lifecycle rules:
 - **Claim is a single compare-and-set.** `pending → claimed` happens in one
   conditional update recording `claimed_at` and an `attempts` counter; a second
   claimant loses the CAS and sees the current state.
-- **`expires_at` gates every transition.** Claim AND result refuse any op whose
-  `expires_at` is past, regardless of stored status (`expires_at` = creation +
-  per-type timeout, e.g. 60s). This bounds replay of a backup-restored `pending`
-  Operation row to the timeout window with zero new infrastructure.
+- **Four separate deadlines, not one** (Phase 3 fixed a queue-vs-execution
+  conflict: a 30s type timeout and a 30s heartbeat meant an op created just after
+  a beat could expire before it was ever collected).
+  - **Queue deadline** — `available_until` = `max(type timeout, 3 × heartbeat
+    interval, agent_delivery_min_seconds)`, set at creation. Claim is gated on
+    `available_until > now`, so a delayed heartbeat still collects a queued op.
+  - **Execution deadline** — set when the claim wins: `execution_deadline = now +
+    type timeout`, the bound the agent enforces locally.
+  - **Result-reporting grace** — on claim, `expires_at` moves out to
+    `execution_deadline + agent_result_grace_seconds`, so a slow node can report a
+    result for one extra heartbeat after its own deadline; the sweep still expires
+    at `expires_at`.
+  - **While pending**, `expires_at` equals `available_until` (the hard queue
+    bound). Claim and result both refuse a row past `expires_at` regardless of
+    stored status; the sweep expires at `expires_at`. This bounds replay of a
+    backup-restored `pending` row and guarantees an operation is never executable
+    indefinitely. Deterministic tests cover just-after-heartbeat creation, a
+    delayed heartbeat, a late claim, a slow execution and a late result.
 - **Results only from claimed/running; terminal states immutable.** A result
   against a `pending`, `expired`, or `cancelled` row is refused; once
   `succeeded`/`failed`/`expired`/`cancelled`, the row never transitions again. A
@@ -326,9 +370,10 @@ Lifecycle rules:
   is left to expire (`expired` + audit `operation.expire`) and the operator
   re-issues a fresh op. The `attempts` counter stays in the schema to bound any
   future re-queue and to make claim-retry storms visible.
-- **Timeouts** per-type (§5.2), enforced control-plane-side via `expires_at`
-  checked by the ops sweeper; the agent also enforces a local deadline and
-  reports a timeout failure rather than hanging.
+- **Timeouts** per-type (§5.2), enforced control-plane-side via the deadlines
+  above and the ops sweeper; the agent also enforces a local deadline
+  (`min(type timeout, remaining)`) and reports a timeout failure rather than
+  hanging.
 
 **Sequence — operation dispatch end-to-end:**
 
@@ -385,9 +430,8 @@ Notes:
 
 - Codenames per authorization.md §2 — **`node.execute` is deliberately not added**;
   container ops reuse the existing `container.lifecycle`/`container.remove`/
-  `container.logs` codenames, nginx ops sit under `domain.manage`. Until per-node
-  capabilities exist, dispatch refuses any type whose capability is not universal
-  (§5.4) — the target-state wording is §2.3.
+  `container.logs` codenames, nginx ops sit under `domain.manage`. Dispatch
+  refuses any type whose capability the node has not reported (§5.4, §2.3).
 - nginx ops presuppose the routing subsystem (domain-routing.md, future); the
   agent validates configs with `nginx -t` before apply and keeps the previous
   config for rollback (ProxyProvider contract, domain-model.md §2.4). `nginx -t`
@@ -396,10 +440,10 @@ Notes:
   the injection defense is domain-routing.md §6.2's allowlists: hostnames
   anchored to verified Domains, structured fields under `extra=forbid` schemas,
   rendered config as a projection of DB state.
-- Today's control-plane container actions (`container_service.trigger_action`,
-  `backend/app/services/container_service.py:141-207`) work only for
-  provider-backed hosts — under the ops framework they become Operation rows for
-  agent-backed nodes: same permission, same audit, one path.
+- The control-plane container actions for provider-backed hosts
+  (`container_service.trigger_action`) remain separate; for agent-backed nodes the
+  path is now Operation rows through this framework: same permission, same audit,
+  one delivery mechanism.
 
 ### 5.3 Result reporting and audit
 
@@ -428,7 +472,7 @@ generic execution grant.
 |---|---|---|---|
 | **Creation** | a human operator | a **per-type permission** in the active organization (`container.lifecycle` / `container.remove` / `container.logs` — *not* a generic `node.execute`), on a node that exists in that org, is enrolled and is not OFFLINE | `api/v1/operations.py` (`_require_type_permission`), `operation_service.create_operation` |
 | **Claim / result** | a node agent | its `X-Agent-Token` only. The token resolves to exactly one `(node, org)`; claim and result carry **both** `node_id` and `org_id` in their CAS, so a token can never touch another node's work — even inside its own tenant | `api/v1/agent.py` (`require_server`), `operation_service.claim_operation` / `record_result` |
-| **Delivery** | nobody yet | *unimplemented* — see the status note. No path hands a pending id to an agent, and the agent router exposes no GET | — |
+| **Delivery** | the node's own agent | it pulls: the v2 heartbeat response carries `pending_operations` ids for **that** node, the agent claims each (a per-node CAS), executes locally and reports. The control plane never opens an inbound connection; the agent router exposes no GET | `api/v1/agent.py` heartbeat (`pending_operations`), `operation_service.available_for_node` / `claim_operation` |
 
 **Why it cannot escalate.**
 
@@ -454,16 +498,17 @@ generic execution grant.
   policies as every tenant table, so the database refuses a cross-tenant read or
   write even if the ORM guard were bypassed.
 
-**The capability boundary (Phase 2).** Dispatch cannot yet ask "does *this*
-node have capability C?". Rather than assume the answer, it refuses any type
-whose capability is not in `UNIVERSAL_CAPABILITIES` (`docker`, which enrollment
-itself guarantees) with `409 NODE_CAPABILITY_UNVERIFIED`. Every currently
-shipped type needs only `docker`, so none is affected; a future type needing
-`nginx`/`tls` is refused until the enrollment negotiation that advertises
-per-node capabilities exists. That is the boundary: **do not widen
-`UNIVERSAL_CAPABILITIES` without either the negotiation or a written argument
-that the capability is universal** — and the refused case is pinned by
-`test_dispatch_refuses_a_type_whose_capability_cannot_be_verified`.
+**The capability boundary (Phase 3, implemented).** Dispatch now asks "does
+*this* node have capability C?" and refuses otherwise, fail-closed on two
+axes with distinct codes: **unreported** (`capabilities` empty — a v1 agent or a
+node that never completed a v2 hello) is `409 NODE_CAPABILITY_UNVERIFIED`, and
+**reported absent/malformed** (`docker: {present: false}`) is `409
+NODE_CAPABILITY_MISSING`. Absence of data is never read as "has the capability".
+The registry-level companion check rejects a type whose capability is not in
+`KNOWN_CAPABILITIES`. A stale or falsely-reported server-side claim is not a
+safety hole: the agent re-checks its own closed registry and local capability
+before executing, so a lie fails the operation rather than running something
+unsafe.
 
 **Reserved types are not shipped.** `nginx.*`, `certificate.*` and
 `secret.env.apply` remain in §5.2 as reserved rows only; they are absent from the
@@ -476,45 +521,41 @@ by the `ck_operations_type_valid` CHECK
 
 ### 6.1 Token scope
 
-| Property | Today | Target |
+| Property | Before | Phase 3 (implemented) |
 |---|---|---|
-| Scope | one token = one server's telemetry writes; no GET endpoints on the agent router, no cross-server reach, no command channel (`docs/agent.md:23-29`) | unchanged in kind, widened surface: + ops claim/result, still node-scoped only |
-| Blast radius | stolen `nxa_` token = **permanent, non-expiring write credential to one server**: overwrite host facts unvalidated, forge metrics, upsert fake containers, force ONLINE (`api/v1/agent.py:52-81`, `server_service.py:267-358`) | same one-node bound, but: rotation grace deadlines, immediate revocation, audit with agent + node attribution |
-| Org derivation | none exists | org always from the authenticated node row — never payload/header (`multi-tenancy.md` §2, §6) |
-| Rate-limit fairness | per client IP — NAT'd fleets share buckets (`core/rate_limit.py:69`) | per-node after auth (§4.2) |
+| Scope | one token = one server's telemetry writes; no GET endpoints on the agent router, no cross-server reach, no command channel (`docs/agent.md:23-29`) | unchanged in kind, widened surface: + op claim/result + credential delivery, still node-scoped only |
+| Blast radius | stolen `nxa_` token = **permanent, non-expiring write credential to one server**: overwrite host facts unvalidated, forge metrics, upsert fake containers, force ONLINE | same one-node bound, but: rotation grace deadline, immediate revocation (no grace), node-attributed audit |
+| Org derivation | none exists | org always from the token's node row — never payload/header (`multi-tenancy.md` §2, §6) |
+| Rate-limit fairness | per client IP — NAT'd fleets shared buckets (`core/rate_limit.py:69`) | **per-node after auth** for authenticated agent routes; a cheap per-IP ceiling still covers pre-auth floods (§4.2) |
 
 ### 6.2 docker.sock is root-equivalent
 
 The systemd unit grants `SupplementaryGroups=docker`
-(`agent/nexusops-agent.service:19`) — anything the daemon can do, the agent's
-context can do, i.e. root on the host. The agent issues only GETs today
-(`agent/nexusops_agent.py:133-296`), but the Operations executor (§5) extends this
-to lifecycle calls. Containment is therefore **protocol-level, not OS-level**:
+(`agent/nexusops-agent.service`) — anything the daemon can do, the agent's
+context can do, i.e. root on the host. The agent now issues lifecycle
+(start/stop/restart/remove) and log calls through the closed registry (§5.2,
+§6.4). Containment is therefore **protocol-level, not OS-level**:
 
 | Layer | Control |
 |---|---|
 | Control plane | whitelist (§5.2) + capability gate + permission codename + audit before an op ever reaches a node |
-| Agent | fixed type→API-call map (docker HTTP over the socket, no `exec`, no `create`, no `/sbin` shelling); params re-validated against the same per-type schema; local per-op deadline |
+| Agent | fixed type→API-call map (`OPERATION_REGISTRY`, docker HTTP over the socket, no `exec`, no `create`, no `/sbin` shelling); params re-validated against the same per-type shape plus a local capability re-check; local per-op deadline |
 | Never | `/containers/{id}/exec`, arbitrary image pulls, host mounts, privileged creates — not in the map, not parameterizable |
 
 ### 6.3 Transport: HTTPS-only
 
-Today the agent warns and continues over plain HTTP unless
-`--allow-insecure-transport` is passed; loopback/link-local targets are exempt
-(`agent/nexusops_agent.py:328-353`). Target: **HTTPS required for any non-local
-server URL** — the warning becomes a hard error without an explicit env override
-(demo/lab only), and install.sh only enrolls against `https://`. The token
-authenticates every call, and the enrollment token (§3.2) is more sensitive still:
-it mints node identities.
-
-The `--insecure` flag is the TLS-side twin of that hole: it swaps in
-`ssl._create_unverified_context()` (`agent/nexusops_agent.py:319-324`) and
-disables server-cert verification entirely, so an on-path attacker can
-impersonate the control plane over `https://` and harvest the node/enrollment
-token. Rule: disabled TLS verification is treated exactly like plain HTTP —
-hard-fail for any non-loopback server URL under the same demo/lab override
-discipline as the HTTP rule above, and never allowed during enrollment (§3.2)
-or rotation delivery (§3.3).
+**Implemented (Phase 3).** The agent refuses to send *any* credential over plain
+HTTP to a non-local server, **before** a request is constructed — there is no
+override flag. `--allow-insecure-transport` and the `--insecure`
+`ssl._create_unverified_context()` path were removed in accordance with the
+roadmap: certificate verification is never disabled, and a private/self-hosted CA
+is trusted through `NEXUSOPS_CA_BUNDLE` (or the system trust store). Only
+loopback/link-local targets are exempt from the HTTPS requirement (the credential
+cannot leave the host). The token authenticates every call, and the enrollment
+token (§3.2) is more sensitive still — it mints node identities — so the same rule
+applies to enrollment (§3.2) and rotation delivery (§3.3). install.sh only enrolls
+against `https://`, and it reports an untrusted-cert failure with the exact
+CA-install instruction rather than downgrading.
 
 ### 6.4 No arbitrary exec
 
@@ -529,19 +570,19 @@ or rotation delivery (§3.3).
 
 ## 7. Versioning & upgrades
 
-### 7.1 Version visibility (fix the stub)
+### 7.1 Version visibility (implemented)
 
-`servers.agent_version` exists (`models/infra.py:69`) but is never persisted —
-`register_agent_hello` drops the field (`server_service.py:267-294`) and the
-heartbeat route omits the kwarg `process_heartbeat` accepts (`api/v1/agent.py:80`
-vs `server_service.py:305`). Fix:
+`servers.agent_version` is now persisted from hello (and refreshed from the
+`User-Agent` on ingest as a cheap cross-check); `protocol_version` records what
+was negotiated. The node resource exposes both, and `AgentHelloOut` carries
+`min_agent_version` so the agent learns the security floor at hello.
 
 | Step | Change |
 |---|---|
-| Persist | hello persists `agent_version`; every ingest updates it from User-Agent (`nexusops-agent/{version}`, `agent:366`) as a fallback |
-| Surface | Node detail shows agent version + enrolled-at; node list gains a version column |
-| Fleet view | version distribution on the nodes page — drift is visible at a glance |
-| Negotiate | `AgentHelloOut.min_agent_version` (§4.2): the agent learns the floor at hello and reports `update_available` in its heartbeat |
+| Persist | hello persists `agent_version`; every ingest updates it from User-Agent (`nexusops-agent/{version}`) as a fallback. **Implemented.** |
+| Surface | Node detail shows agent version, protocol version and enrolled-at. **Implemented.** |
+| Negotiate | `AgentHelloOut.min_agent_version` (§4.2): the agent learns the floor at hello. **Implemented.** |
+| Fleet view | *Not built* — version distribution across the nodes page is deferred; version drift is visible per node today. |
 
 ### 7.2 Out-of-date handling
 
@@ -573,33 +614,35 @@ systemd unit with `enable --now`; non-systemd systems print the manual command.
 users to set `NEXUSOPS_URL` (`backend/app/api/v1/servers.py`), which neither the
 agent (`NEXUSOPS_SERVER`, `agent/nexusops_agent.py`) nor install.sh reads, so
 following the hint enrolled nothing. It now prints the real install.sh
-invocation (`--server` / `--token`) and names the env vars it writes. The
-org-scoped single-use enrollment token and the no-argv one-liner (§8.2) remain
-the v2 target.
+invocation and names the env vars it writes. install.sh now also accepts
+`NEXUSOPS_ENROLL_TOKEN` (an org-scoped single-use `nxk_` token) and reads the
+credential from the environment rather than argv (§8.2).
 
-### 8.2 Target one-liner
+### 8.2 One-liner and token delivery (implemented bar the curl step)
 
 ```
-curl -fsSL https://<control-plane>/install.sh | sudo bash -s --
+sudo NEXUSOPS_ENROLL_TOKEN=nxk_... NEXUSOPS_SERVER=https://<control-plane> \
+     bash agent/install.sh
 ```
 
-| Property | Design |
+The control plane does not yet serve `install.sh` over HTTPS (so the
+`curl … | sudo bash` self-serve fetch is still a target); the operator ships the
+script to the node and runs it with the environment above.
+
+| Property | Status |
 |---|---|
-| Server URL | derived from the download host (override `--server` for proxies) |
-| Token | org-scoped single-use enrollment token (§3.2) minted in the dashboard "Add node" dialog, TTL 1h default; delivered via `NEXUSOPS_ENROLL_TOKEN` or a hidden interactive prompt — never a CLI argument (argv leaks into shell history and the target's process list) |
-| Flow | script installs agent → `POST /agent/enroll` exchanges `nxk_` for the node `nxa_` token → hello v2 reports facts + capabilities → node appears live |
-| Post-install | printed node name + dashboard deep link; re-run = repair/upgrade in place (token preserved) |
+| Server URL | passed as `NEXUSOPS_SERVER` (or `--server`); deriving it from a download host lands with the curl step |
+| Token | org-scoped single-use enrollment token (§3.2) minted in the dashboard "Add node" dialog, TTL 1h default; delivered via `NEXUSOPS_ENROLL_TOKEN` or a hidden `read -rs` prompt — never a CLI argument (argv leaks into shell history and the target's process list). **Implemented.** |
+| Flow | script installs agent → `POST /agent/enroll` exchanges `nxk_` for the node `nxa_` token → hello v2 reports facts + capabilities → node appears live. **Implemented.** |
+| Post-install | re-run = repair/upgrade in place; an already-stored node credential wins over a re-presented `nxk_` token, so a restart never burns the enrollment token twice. A printed dashboard deep link is not built yet. |
 
 Two bootstrap details pinned here: **token delivery** — the enrollment token
 never appears as a command-line argument; the script reads
 `NEXUSOPS_ENROLL_TOKEN` from the environment or falls back to a hidden
 `read -rs` prompt, keeping the pasted command clean in shell history and `ps`.
-**TLS bootstrap** — under HTTPS-only (§6.3) the curl step trusts only public
-CAs; a self-hosted control plane with a private CA requires the operator to
-install that CA into the system trust store before first install (the agent's
-demo/lab insecure-transport override does not apply to the curl step), and
-install.sh detects the untrusted-cert failure and prints the exact CA-install
-instruction.
+**TLS bootstrap** — under HTTPS-only (§6.3) there is no insecure-transport
+override; a self-hosted control plane with a private CA is trusted by installing
+that CA into the system trust store or by pointing `NEXUSOPS_CA_BUNDLE` at it.
 
 This one-liner plus heartbeat v2 **is** the wedge demo (platform-vision.md §2.2):
 "install agent on your box → node appears with live stats."

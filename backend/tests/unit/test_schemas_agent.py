@@ -36,10 +36,20 @@ def test_minimal_heartbeat_accepted() -> None:
     hb = AgentHeartbeatIn(**_heartbeat())
     assert hb.containers == []
     assert hb.cpu_percent == 12.5
-    assert hb.net_rx_kb_s == 0
+    # Network rates are optional and default to **unavailable** (None), not 0.0:
+    # a fabricated zero is indistinguishable from a genuinely idle interface, so
+    # the schema refuses to invent one.
+    assert hb.net_rx_kb_s is None
+    assert hb.net_tx_kb_s is None
     assert hb.load1 == 0
     assert hb.uptime_seconds == 0
     assert hb.os_name is None
+
+
+def test_measured_network_rates_round_trip() -> None:
+    hb = AgentHeartbeatIn(**_heartbeat(net_rx_kb_s=12.5, net_tx_kb_s=3.25))
+    assert hb.net_rx_kb_s == 12.5
+    assert hb.net_tx_kb_s == 3.25
 
 
 def test_missing_required_metric_rejected() -> None:
@@ -145,3 +155,57 @@ def test_agent_hello_bounds() -> None:
         AgentHelloIn(agent_version="1.0", hostname="")
     with pytest.raises(ValidationError):
         AgentHelloIn(agent_version="1.0", hostname="h", cpu_cores=4097)
+
+
+def test_v1_hello_defaults_to_protocol_one_with_no_capabilities() -> None:
+    """An absent protocol version is the oldest contract, never v2."""
+    hello = AgentHelloIn(agent_version="1.0.0", hostname="legacy")
+    assert hello.protocol_version == 1
+    assert hello.capabilities == {}
+    assert hello.facts == {}
+
+
+def test_v2_hello_carries_capabilities_and_facts() -> None:
+    hello = AgentHelloIn(
+        agent_version="1.1.0",
+        hostname="edge",
+        protocol_version=2,
+        capabilities={
+            "docker": {"present": True, "api_version": "1.43"},
+            "nginx": {"present": False},
+        },
+        facts={"disks": [{"mount": "/", "free_gb": 42}], "kernel": "6.8.0"},
+    )
+    assert hello.capabilities["docker"].present is True
+    assert hello.capabilities["docker"].api_version == "1.43"
+    assert hello.capabilities["nginx"].present is False
+    assert hello.facts["kernel"] == "6.8.0"
+
+
+def test_unknown_capability_extra_field_is_rejected() -> None:
+    """A capability report forbids unknown keys, so its shape is closed."""
+    with pytest.raises(ValidationError):
+        AgentHelloIn(
+            agent_version="1.1.0",
+            hostname="edge",
+            protocol_version=2,
+            capabilities={"docker": {"present": True, "secret": "x"}},
+        )
+
+
+def test_capability_map_is_bounded() -> None:
+    too_many = {f"cap{i}": {"present": True} for i in range(17)}
+    with pytest.raises(ValidationError):
+        AgentHelloIn(
+            agent_version="1.1.0", hostname="edge", protocol_version=2, capabilities=too_many
+        )
+
+
+def test_overlarge_facts_blob_is_rejected() -> None:
+    with pytest.raises(ValidationError):
+        AgentHelloIn(
+            agent_version="1.1.0",
+            hostname="edge",
+            protocol_version=2,
+            facts={"blob": "x" * 9000},
+        )

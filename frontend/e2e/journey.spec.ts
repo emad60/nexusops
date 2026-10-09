@@ -189,10 +189,25 @@ test.describe.serial("NexusOps end-to-end journey", () => {
     await page.getByRole("button", { name: /register node/i }).click();
     await expect(page.getByText(name).first()).toBeVisible();
 
-    // Enrollment token is revealed exactly once on the detail view.
+    // A single-use, org-scoped enrollment token is revealed exactly once on the
+    // detail view (`nxk_`), distinct from a node credential (`nxa_`).
     await page.getByText(name).first().click();
-    await page.getByRole("button", { name: /issue agent token/i }).click();
-    agentToken = await page.getByLabel("Token", { exact: true }).inputValue();
+    await page.getByRole("button", { name: /create enrollment token/i }).click();
+    const enrollmentToken = await page.getByLabel("Token", { exact: true }).inputValue();
+    expect(enrollmentToken).toMatch(/^nxk_/);
+
+    // Redeem it for this node's own credential — the same exchange the agent
+    // makes — then do a real ingest round-trip with the heartbeat contract.
+    const enroll = await request.post("/api/v1/agent/enroll", {
+      data: {
+        enrollment_token: enrollmentToken,
+        hostname: `${name}.test`,
+        agent_version: "1.0.0",
+      },
+    });
+    expect(enroll.status(), await enroll.text()).toBe(201);
+    const enrolled = (await enroll.json()) as { agent_token: string; node_id: string };
+    agentToken = enrolled.agent_token;
     expect(agentToken).toMatch(/^nxa_/);
 
     // A real ingest round-trip with the same payload contract as the agent.
@@ -220,8 +235,12 @@ test.describe.serial("NexusOps end-to-end journey", () => {
         ],
       },
     });
+    // Never sent a hello, so the node is treated as protocol 1: the original
+    // 204 heartbeat contract is unchanged.
     expect(beat.status()).toBe(204);
 
+    // Enrollment created the node under the token's organization; open it.
+    await uiGoto(page, `/nodes/${enrolled.node_id}`);
     await expect(page.getByText("ONLINE").first()).toBeVisible({ timeout: 30_000 });
     // The containers table refetches on a 10s poll (rows arrive out-of-band
     // via the heartbeat), so allow more than one full poll interval here.

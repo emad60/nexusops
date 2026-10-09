@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import orjson
@@ -254,21 +254,40 @@ async def delete_server(
 
 
 async def rotate_agent_token(
-    db: AsyncSession, *, server_id: uuid.UUID, ctx: AuthContext | None = None
+    db: AsyncSession,
+    *,
+    server_id: uuid.UUID,
+    ctx: AuthContext | None = None,
+    grace_seconds: int | None = None,
 ) -> tuple[str, Server]:
-    """Regenerate the enrollment token. The previous token stops working.
+    """Rotate a node's credential with a bounded dual-token grace window.
 
-    The hash lives in ``agent_credentials`` (the pre-org routing table), not on
-    the node row: agent authentication has to resolve *which* organization a
-    node belongs to before any tenant scope exists, and the node table is under
-    RLS. One row per node means replacing the hash revokes the old token
-    immediately — there is no window in which two tokens are valid.
+    Rotation is **not** revocation (``revoke_agent_token``): a running agent must
+    survive a rotation without a reinstall. The mechanics:
+
+    * the *new* hash becomes ``token_hash``;
+    * the agent's current hash moves to ``previous_token_hash`` and stays
+      accepted until ``previous_expires_at``;
+    * the new raw token is stored Fernet-encrypted in
+      ``pending_token_ciphertext`` so the next heartbeat authenticated with the
+      **old** token can receive it (hello only happens at process start, so the
+      heartbeat is the only channel a running agent keeps).
+    * ``grace_seconds=0`` produces an immediate switch — the compromise path is
+      still ``revoke``, but a zero grace is available for an operator who wants
+      rotation semantics without a window.
+
+    Only hashes and ciphertext are persisted; the raw value exists solely in
+    this return value and the client response.
     """
-    from app.core.security import generate_agent_token
+    from app.core.config import get_settings
+    from app.core.security import encrypt_str, generate_agent_token
 
     server = await get_server(db, server_id)
     raw, _prefix, token_hash = generate_agent_token()
     now = datetime.now(UTC)
+    effective_grace = (
+        get_settings().agent_rotation_grace_seconds if grace_seconds is None else grace_seconds
+    )
     credential = await db.get(AgentCredential, server.id)
     if credential is None:
         db.add(
@@ -280,21 +299,134 @@ async def rotate_agent_token(
             )
         )
     else:
-        # Re-enrollment clears a previous revocation rather than stacking rows:
-        # the row *is* the node's single credential.
+        # A rotation always starts from the agent's *current* token, even if a
+        # previous rotation's grace is still open: the plaintext the agent will
+        # present next is the one that becomes the fallback.
+        credential.previous_token_hash = credential.token_hash
+        credential.previous_expires_at = now + timedelta(seconds=effective_grace)
         credential.token_hash = token_hash
+        credential.pending_token_ciphertext = encrypt_str(raw)
+        credential.rotation_applied_at = None
         credential.rotated_at = now
         credential.revoked_at = None
+    # Real credentials are being issued: the node is enrolled again, and a
+    # previous explicit revocation is lifted by issuing a working token.
     server.agent_enrolled_at = None
+    server.credential_revoked_at = None
     await db.flush()
     return raw, server
+
+
+async def revoke_agent_token(
+    db: AsyncSession, *, server_id: uuid.UUID, ctx: AuthContext | None = None
+) -> Server:
+    """Immediate kill switch: the credential stops authenticating at once.
+
+    No grace window and no delivery — the pending rotation ciphertext is dropped
+    so a stolen token cannot fetch a replacement, and both the current and
+    previous hashes are cleared so any in-flight old token is dead too.
+    """
+    server = await get_server(db, server_id)
+    now = datetime.now(UTC)
+    credential = await db.get(AgentCredential, server.id)
+    if credential is None:
+        raise NotFound("Node has no agent credential to revoke", code="AGENT_CREDENTIAL_MISSING")
+    # Both hashes are kept, not blanked: the row must still be *found* so a
+    # running agent — whether it is still on the old token or already on the new
+    # one — receives an explicit ``AGENT_TOKEN_REVOKED`` instead of an ambiguous
+    # ``AGENT_TOKEN_UNKNOWN``, and so the node keeps reading as revoked. What
+    # makes revocation immediate is the revoked_at check, which runs *before*
+    # the rotation-grace path. The pending rotation ciphertext is dropped so a
+    # stolen token cannot fetch a replacement during a revoke.
+    credential.pending_token_ciphertext = None
+    credential.rotation_applied_at = None
+    credential.revoked_at = now
+    server.credential_revoked_at = now
+    await db.flush()
+    return server
+
+
+async def pending_rotation(
+    db: AsyncSession, *, server: Server, authenticated_with_previous: bool
+) -> Any:
+    """The pending rotation to deliver, or ``None``.
+
+    Served **only** to a request authenticated with the previous hash — never to
+    one bearing the new token, and never after the agent acknowledged it. That is
+    the whole delivery contract; a crash between receive and persist re-delivers
+    on the next beat because the ciphertext is retained until acknowledged.
+    """
+    from app.core.security import decrypt_str
+    from app.schemas.agent import AgentTokenRotation
+
+    if not authenticated_with_previous:
+        return None
+    credential = await db.get(AgentCredential, server.id)
+    if credential is None or credential.pending_token_ciphertext is None:
+        return None
+    if credential.rotation_applied_at is not None:
+        return None
+    if credential.previous_expires_at is None or credential.previous_expires_at <= datetime.now(
+        UTC
+    ):
+        return None
+    try:
+        raw = decrypt_str(credential.pending_token_ciphertext)
+    except ValueError:
+        # A ciphertext the platform cannot decrypt is a platform problem, not a
+        # reason to hand the agent something wrong: withhold and log.
+        log.error("agent_rotation_decrypt_failed", server_id=str(server.id))
+        return None
+    return AgentTokenRotation(token=raw, grace_expires_at=credential.previous_expires_at)
+
+
+async def acknowledge_rotation(db: AsyncSession, *, server: Server) -> None:
+    """End the grace window after the agent confirms it persisted the new token.
+
+    Clearing ``previous_token_hash`` makes the old credential stop working
+    immediately, which is the safe direction: the agent already holds the new
+    one.
+    """
+    credential = await db.get(AgentCredential, server.id)
+    if credential is None:
+        return
+    credential.pending_token_ciphertext = None
+    credential.previous_token_hash = None
+    credential.previous_expires_at = None
+    credential.rotation_applied_at = datetime.now(UTC)
+    await db.flush()
+
+
+def _negotiate_protocol(agent_protocol: int) -> int:
+    """The wire version this node will use: the lower of the two sides."""
+    from app.schemas.agent import AGENT_PROTOCOL_VERSION, MIN_SUPPORTED_AGENT_PROTOCOL
+
+    if agent_protocol < MIN_SUPPORTED_AGENT_PROTOCOL:
+        raise BadRequest(
+            f"Agent protocol {agent_protocol} is below the supported floor "
+            f"({MIN_SUPPORTED_AGENT_PROTOCOL}); upgrade the agent",
+            code="AGENT_UPGRADE_REQUIRED",
+        )
+    return min(agent_protocol, AGENT_PROTOCOL_VERSION)
 
 
 async def register_agent_hello(
     db: AsyncSession, *, server: Server, payload: AgentHelloIn
 ) -> AgentHelloOut:
-    """Mark the agent enrolled and persist its static host facts."""
+    """Mark the agent enrolled and persist its static host facts.
+
+    Capabilities are refreshed **at hello only**: they describe the host's static
+    abilities (a docker socket, an nginx binary), and re-evaluating them on every
+    heartbeat would turn a transient daemon hiccup into a dispatch refusal. A
+    change in capability requires a hello renegotiation (a restart), which is
+    deliberate. The known limitation is documented in the node/agent doc.
+    """
+    from app.schemas.agent import MIN_AGENT_VERSION, AgentHelloOut
+
     server.agent_enrolled_at = datetime.now(UTC)
+    server.protocol_version = _negotiate_protocol(payload.protocol_version)
+    # The agent_version was already sent by v1 and silently dropped; persist it.
+    server.agent_version = payload.agent_version
     if payload.os_name:
         server.os_name = payload.os_name
     if payload.os_version:
@@ -309,14 +441,27 @@ async def register_agent_hello(
         server.memory_total_mb = payload.memory_total_mb
     if payload.disk_total_gb:
         server.disk_total_gb = payload.disk_total_gb
+
+    if payload.capabilities:
+        # Replace, never merge: a capability the node stopped reporting must stop
+        # being trusted, or a removed docker socket would keep receiving ops.
+        server.capabilities = {
+            name: report.model_dump() for name, report in payload.capabilities.items()
+        }
+    if payload.facts:
+        # Facts land in the flexible JSONB rather than a new column per property.
+        server.extra = {**(server.extra or {}), **payload.facts}
+    # A node that completes a hello with a real agent token is real telemetry.
+    server.simulated = False
     await db.flush()
-    from app.schemas.agent import AgentHelloOut
 
     return AgentHelloOut(
         server_id=server.id,
         name=server.name,
         heartbeat_interval_seconds=server.heartbeat_interval_seconds,
         offline_after_seconds=server.offline_after_seconds,
+        protocol_version=server.protocol_version or 1,
+        min_agent_version=MIN_AGENT_VERSION,
     )
 
 
@@ -339,6 +484,10 @@ async def process_heartbeat(
     prev_status: ServerStatus | str = server.status
 
     server.last_heartbeat_at = now
+    # A heartbeat from a real agent is real telemetry. Clearing the flag here
+    # (as well as at hello) is what makes a node that was created as a simulation
+    # seed stop reading as simulated once a real agent reports for it.
+    server.simulated = False
     if agent_version:
         server.agent_version = agent_version
     if payload.os_name:
@@ -510,8 +659,24 @@ async def ensure_docker_host(db: AsyncSession, *, server: Server) -> DockerHost:
         endpoint_url=f"agent://{server.name}",
         status=DockerHostStatus.UNKNOWN,
     )
-    db.add(host)
-    await db.flush()
+    try:
+        # The savepoint is what makes the new UNIQUE(server_id) safe under a
+        # race: two heartbeats (or a heartbeat and the sync sweep) can both miss
+        # the row, and whoever loses adopts the winner's instead of failing the
+        # whole request. add() goes inside the savepoint so the INSERT rolls back
+        # on conflict rather than poisoning the session.
+        async with db.begin_nested():
+            db.add(host)
+            await db.flush()
+    except IntegrityError:
+        if host in db:
+            db.expunge(host)
+        existing = (
+            await db.execute(select(DockerHost).where(DockerHost.server_id == server.id))
+        ).scalar_one_or_none()
+        if existing is None:
+            raise
+        host = existing
     return host
 
 
@@ -536,7 +701,9 @@ def _apply_agent_entry(
     if entry.mem_limit_mb is not None:
         row.mem_limit_mb = entry.mem_limit_mb
     row.observed_at = now
-    row.simulated = True
+    # Real agent telemetry, never simulation. This used to be hard-coded True,
+    # which left every agent-observed container flagged as simulated data.
+    row.simulated = server.simulated
     row.server_id = server.id
 
 

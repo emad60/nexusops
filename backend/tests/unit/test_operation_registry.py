@@ -17,8 +17,8 @@ from app.core.permissions import ALL_CODENAMES
 from app.models.enums import OperationType
 from app.schemas.base import APIModel
 from app.schemas.operation import (
+    KNOWN_CAPABILITIES,
     OPERATION_SPECS,
-    UNIVERSAL_CAPABILITIES,
     validate_params,
 )
 from app.services import operation_service
@@ -69,14 +69,14 @@ def test_specs_reject_unknown_params() -> None:
         assert exc.value.code == "OPERATION_PARAMS_INVALID"
 
 
-def test_every_declared_capability_is_currently_dispatchable() -> None:
-    """The closed set of capabilities the deployment can confirm.
+def test_every_declared_capability_is_in_the_known_vocabulary() -> None:
+    """Every spec's capability must be one the platform knows how to gate on.
 
-    All current types need ``docker``, which enrollment itself guarantees. A new
-    type needing something else is the signal that the (unbuilt) enrollment
-    negotiation is required — see ``test_an_unverified_capability_is_refused``.
+    Since Phase 3 each node reports capabilities at hello and dispatch checks
+    them per node; this asserts the *vocabulary* is closed so a spec cannot name
+    a capability nobody can report.
     """
-    assert {spec.capability for spec in OPERATION_SPECS.values()} <= UNIVERSAL_CAPABILITIES
+    assert {spec.capability for spec in OPERATION_SPECS.values()} <= KNOWN_CAPABILITIES
 
 
 def test_an_unverified_capability_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:

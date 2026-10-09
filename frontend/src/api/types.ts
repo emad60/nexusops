@@ -112,6 +112,98 @@ export interface ServerSummary {
   docker_host: { id: string; name: string; status: string } | null;
   last_heartbeat_at: string | null;
   created_at: string;
+  /**
+   * Negotiated wire protocol. `null` means a pre-v2 (legacy) agent — treat it
+   * as protocol 1, never as "supports v2".
+   */
+  protocol_version?: number | null;
+  /**
+   * Self-reported capabilities (hello v2). An **empty** object means the node
+   * has not reported any: it is *unverified*, never "has everything". The
+   * dispatch gate and the UI must both read it that way.
+   */
+  capabilities?: Record<string, CapabilityReport>;
+  /** Whether the node has reported capabilities at all. */
+  capabilities_reported?: boolean;
+  /** Open-ended host facts reported at hello v2. */
+  facts?: Record<string, unknown>;
+  /** Set when an operator revoked this node's credential (kill switch). */
+  credential_revoked_at?: string | null;
+  /** Whether the credential is currently revoked. */
+  agent_revoked?: boolean;
+}
+
+/** One node-reported capability from hello v2. */
+export interface CapabilityReport {
+  present: boolean;
+  version?: string | null;
+  api_version?: string | null;
+}
+
+/** Operation type whitelist (mirrors the backend `OperationType` enum). */
+export type OperationType =
+  | "container.start"
+  | "container.stop"
+  | "container.restart"
+  | "container.remove"
+  | "logs.tail";
+
+export type OperationStatus =
+  | "PENDING"
+  | "CLAIMED"
+  | "RUNNING"
+  | "SUCCEEDED"
+  | "FAILED"
+  | "EXPIRED"
+  | "CANCELLED";
+
+/**
+ * One queued/executed node operation. `PENDING` is *queued*, not done: the UI
+ * must never present it as success.
+ */
+export interface OperationItem {
+  id: string;
+  node_id: string;
+  type: OperationType;
+  status: OperationStatus;
+  params: Record<string, unknown>;
+  result: Record<string, unknown> | null;
+  error_code: string | null;
+  error_message: string | null;
+  requested_by_id: string | null;
+  attempts: number;
+  claimed_at: string | null;
+  available_until: string;
+  execution_deadline: string | null;
+  expires_at: string;
+  created_at: string;
+  updated_at: string;
+}
+
+/** Derived lifecycle state of an enrollment token. */
+export type EnrollmentTokenState = "ACTIVE" | "USED" | "REVOKED" | "EXPIRED";
+
+/** Enrollment-token metadata. Never carries the raw token. */
+export interface EnrollmentTokenItem {
+  id: string;
+  org_id: string;
+  name: string;
+  note: string;
+  single_use: boolean;
+  expires_at: string;
+  revoked_at: string | null;
+  used_at: string | null;
+  used_by_node_id: string | null;
+  node_id: string | null;
+  created_by_id: string | null;
+  state: EnrollmentTokenState;
+  created_at: string;
+}
+
+/** The one response that carries the raw enrollment token. */
+export interface EnrollmentTokenCreated extends EnrollmentTokenItem {
+  token: string;
+  install_hint: string;
 }
 
 export interface ServerDetail extends ServerSummary {

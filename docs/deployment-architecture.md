@@ -295,7 +295,7 @@ the deploy flow states this plainly rather than presenting redeploy as data-safe
 
 ## 6. Phased scope
 
-### 6a — Image-based deploys (needs Phase 3 ops framework)
+### 6a — Image-based deploys (Phase 3 ops framework is live; needs the deploy step stream)
 
 Trigger: `POST /deployments/applications/{id}/deployments` with `{version, image_ref}`.
 `deployments` gains `image_ref` **and `image_digest`** (6a): the PULL_IMAGE op result
@@ -504,8 +504,9 @@ Rules:
    before 6b.
 2. **Op line transport.** How agent-emitted op lines reach the runner: op-result
    endpoint with chunked POSTs, op log rows the runner tails, or a Redis list per op.
-   Affects the Phase 3 wire protocol; must be fixed when the Operations framework
-   lands.
+   The Phase 3 Operations framework is live (creation → pull → execute → result via
+   the heartbeat), but a deployment step stream is a **new** operation shape — it
+   must be designed against the shipped registry rather than assumed.
 3. **Private registry auth (6a) — DECIDED: out of 6a.** Public registries only
    (§6a); private auth is deferred behind an integrations registry-kind design
    (domain-model.md §2.7 currently has no registry kind) with encrypted creds

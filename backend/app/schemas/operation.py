@@ -53,15 +53,13 @@ class LogsTailParams(APIModel):
 class OperationSpec:
     """Everything the control plane needs to know about one operation type.
 
-    ``capability`` is the node-side ability an operation needs. Per-node
-    capability advertisement belongs to the agent enrollment negotiation, which
-    is **not built** (``servers`` has no capabilities column), so dispatch cannot
-    yet ask "does *this* node have it?". It can, however, refuse a type whose
-    capability is not guaranteed for every enrolled agent of the current
-    contract — see :data:`UNIVERSAL_CAPABILITIES` and
-    ``operation_service.create_operation``. What is otherwise enforced is that
-    the node exists in the caller's organization, is enrolled, and is not
-    OFFLINE.
+    ``capability`` is the node-side ability the operation needs. Since Phase 3,
+    nodes advertise capabilities in hello v2 and dispatch checks them per node
+    (``operation_service.ensure_node_can_run``): a node that has not reported
+    capabilities is refused, and a node that reports ``docker: {present: false}``
+    is refused for a docker operation. ``KNOWN_CAPABILITIES`` below is the closed
+    *vocabulary* — a spec naming a capability outside it is a programming error,
+    refused before any per-node check runs.
     """
 
     permission: str
@@ -70,18 +68,11 @@ class OperationSpec:
     params_model: type[APIModel]
 
 
-#: Capabilities every enrolled agent is known to provide under the current
-#: agent contract. The reference agent is a Docker observer/controller and
-#: heartbeats containers, so ``docker`` is a property of enrollment itself, not
-#: something a node has to advertise.
-#:
-#: This set is the **Phase 2 boundary**. A new operation type whose capability is
-#: not listed here cannot be dispatched: the negotiation that would let the
-#: control plane confirm that a *specific* node has it does not exist yet, and
-#: assuming it would hand a node work it cannot perform. Widening this set is a
-#: deliberate decision that must come with either that negotiation or a written
-#: argument that the capability is universal.
-UNIVERSAL_CAPABILITIES: frozenset[str] = frozenset({"docker"})
+#: The closed capability vocabulary. Adding one is a deliberate act (the agent
+#: has to be able to report it and at least one operation type has to gate on
+#: it). Presence is per node and comes from hello v2; this set only stops a spec
+#: from naming a capability nobody implements.
+KNOWN_CAPABILITIES: frozenset[str] = frozenset({"docker", "nginx", "systemd"})
 
 
 OPERATION_SPECS: dict[OperationType, OperationSpec] = {
@@ -146,6 +137,11 @@ class OperationOut(OutModel):
     requested_by_id: UUID | None = None
     attempts: int
     claimed_at: datetime | None = None
+    #: Queue/claim deadline (see the timing semantics in node-agent-architecture.md).
+    available_until: datetime
+    #: Set at claim to ``claimed_at + type timeout``; NULL while pending.
+    execution_deadline: datetime | None = None
+    #: Hard terminal deadline the sweep enforces.
     expires_at: datetime
     created_at: datetime
     updated_at: datetime
@@ -161,7 +157,13 @@ class AgentOperationClaimOut(APIModel):
     id: UUID
     type: OperationType
     params: dict[str, Any]
+    claimed_at: datetime | None = None
+    #: The hard deadline the control plane will expire the row at.
     expires_at: datetime
+    #: When the agent must stop executing (``claimed_at + type timeout``). The
+    #: agent enforces this locally and reports a timeout failure rather than
+    #: running past it; ``expires_at`` additionally allows for result reporting.
+    execution_deadline: datetime | None = None
 
 
 class AgentOperationResultOut(APIModel):

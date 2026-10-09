@@ -109,6 +109,21 @@ class EnvironmentType(StrEnum):
     PROD = "PROD"
 
 
+class EnrollmentTokenState(StrEnum):
+    """Derived lifecycle state of an enrollment token, computed server-side.
+
+    Stored as nothing: a token's state is a pure function of ``used_at``,
+    ``revoked_at`` and ``expires_at``, so it cannot drift from the row. Revoked
+    takes precedence over used, which takes precedence over expired, so a token
+    that was revoked after use still reads REVOKED.
+    """
+
+    ACTIVE = "ACTIVE"
+    USED = "USED"
+    REVOKED = "REVOKED"
+    EXPIRED = "EXPIRED"
+
+
 class OperationStatus(StrEnum):
     """Lifecycle of one node operation (node-agent-architecture.md §5.1).
 

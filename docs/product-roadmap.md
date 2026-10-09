@@ -1,8 +1,8 @@
 # Product Roadmap — NexusOps Multi-Tenant Platform
 
-**Status:** Phases 0–2.1 **delivered** (0 on 2026-09-22, 1 on 2026-09-24, 2 on
-2026-10-08, 2.1 on 2026-10-09). Phases 3–9 are **proposals for review** — none is
-approved or implemented.
+**Status:** Phases 0–3 **delivered** (0 on 2026-09-22, 1 on 2026-09-24, 2 on
+2026-10-08, 2.1 on 2026-10-09, 3 on 2026-10-09). Phases 4–9 are **proposals for
+review** — none is approved or implemented.
 **Date:** 2026-09-20 (status updated 2026-10-09)
 **Companions:** [platform-vision.md](platform-vision.md) · [domain-model.md](domain-model.md) · [multi-tenancy.md](multi-tenancy.md) · [authorization.md](authorization.md) · [platform-security-model.md](platform-security-model.md)
 
@@ -75,8 +75,9 @@ Four-way classification, grounded in the subsystem analysis (the harness under
 
 - Per-server enrollment tokens (minted via the servers API, delivered to the agent
   via its env var) → org-scoped `enrollment_tokens` rows with lifecycle
-  (single-use, expiry, revocation).
-- `--allow-insecure-transport` (plain-HTTP agent option) — removed.
+  (single-use, expiry, revocation). **Shipped Phase 3** (the legacy per-node
+  `POST /nodes/{id}/agent-token` remains as a rotation/compat path).
+- `--allow-insecure-transport` (plain-HTTP agent option) — removed (**shipped Phase 3**, along with `--insecure`).
 - `server.*` permission codenames → `node.*` (one migration — **shipped**,
   `20260923_1000-c4e2a1f7b9d3`).
 - `/v1/servers` paths → `/v1/nodes` (**shipped**; `/v1/servers` kept as a schema-
@@ -134,10 +135,10 @@ land in their natural phase — column 3). ✅ = delivered in Phase 0:
 | # | Known issue | Lands in |
 |---|---|---|
 | 1 ✅ | Silent secret-resolution degradation (empty dict on failure) | Phase 0 |
-| 2 ✅ | Agent 401→exit(1) hot-loop on revocation | Phase 0 (backoff), Phase 3 (full revocation semantics) |
-| 3 | Agent plain-HTTP option (`--allow-insecure-transport`) | Phase 3 (HTTPS-only) |
+| 2 ✅ | Agent 401→exit(1) hot-loop on revocation | Phase 0 (backoff), **Phase 3 — separate revoke action + bounded dual-token rotation grace** |
+| 3 ✅ | Agent plain-HTTP option (`--allow-insecure-transport`) | **Phase 3 — removed; non-loopback plain HTTP refused before any credential is sent** |
 | 4 ✅ | WS global channel exposure | Phase 1 — event frames carry their organization and the hub drops cross-org frames (not channel-prefixed; multi-tenancy.md §0 delta 2) |
-| 5 ⏳ | Rate limits keyed by IP only (NAT fleets share a bucket) | moved to Phase 2 (org+IP dimension) |
+| 5 ✅ (agent routes) / ⏳ (human routes) | Rate limits keyed by IP only (NAT fleets share a bucket) | **Phase 3 — authenticated agent routes key on the node**; per-org/per-user keys on human routes still open |
 | 6 ✅ | `Server.name` platform-global uniqueness | Phase 1 — `uq_servers_org_name` (and the same for tags/projects) |
 | 7 ✅ | Audit rows lacking org / request-id | Phase 1 — `audit_logs.org_id`, tenant-scoped reads, append-only trigger unchanged |
 | 8 ✅ (fail-closed + audit) / ⏳ (authorization) | Secret resolution lacking per-user authorization on the engine path | Phase 0 (fail-closed + audit), Phase 2 (deploy-chain authorization) |
@@ -302,31 +303,38 @@ landed (migrations `c3d4e5f6a7b8`, `d4e5f6a7b8c9`, `e5f6a7b8c9d0`):
 confirmed by runtime-role and owner-role database probes, migration round-trips,
 the drift check, the full backend suite and a fresh-volume E2E run.
 
-## 6. Phase 3 — Nodes & agent v2
+## 6. Phase 3 — Nodes & agent v2 ✅ **delivered (2026-10-09)**
 
 **Why:** nodes are the data plane; org-scoped enrollment and the whitelisted
 Operations framework must exist before nginx or deploy work rides on them.
 Spec: [node-agent-architecture.md](node-agent-architecture.md).
 
-- **DB:** `servers` + capabilities JSONB + facts + `agent_version`;
-  `enrollment_tokens` (org_id, single-use flag, expires_at, created_by_id,
-  revoked_at); `operations` table.
-- **API:** `/v1/nodes` extensions (capabilities, facts, version); enrollment
-  token lifecycle (create/revoke/list); ops queue (create/status/list, org-
-  scoped listing); heartbeat v2 (hello/heartbeat + capabilities + agent
-  version via hello).
-- **Agent:** capabilities+facts reporting; op executor (pull model) with
-  whitelist v1: `container.start/stop/restart/remove`, `logs.tail`
-  (`nginx.*` ops arrive in Phase 4 with the provider); token stored 0600;
-  auth-failure backoff; HTTPS-only (`--allow-insecure-transport` removed).
-- **Security:** stolen-token blast radius = one node; revocation kills token
-  acceptance immediately (per-node hash); every op maps to a codename
-  (container lifecycle → `container.lifecycle`; `logs.tail` → `log.read`);
-  op rows audited; enrollment throttles.
-- **Testing:** enrollment e2e (single-use, expiry, revocation); op lifecycle
-  (queued→claimed→running→succeeded/failed/expired); agent unit tests.
-- **Exit:** second machine enrolled via one-liner; ops audited; revocation
-  immediate.
+Delivered:
+
+- **DB:** `enrollment_tokens` (org-scoped, single-use, expiring, revocable, hashed),
+  RLS + app-role grant; `servers` + `capabilities` JSONB (`{}` = unreported) +
+  `protocol_version` + `credential_revoked_at`; `agent_credentials` rotation-grace
+  columns; `operations.available_until` / `execution_deadline`; one
+  `UNIQUE(docker_hosts.server_id)`. One migration, single head (`a1b2c3d4e5f6`).
+- **API:** `/v1/nodes` capability/fact/version exposure; enrollment-token lifecycle
+  (`POST/GET /nodes/enrollment-tokens`, `POST …/{id}/revoke`); `POST /agent/enroll`;
+  heartbeat v2 (200 + `pending_operations` + `token_rotation` for protocol-2 agents,
+  204 unchanged for v1); credential rotate/revoke.
+- **Agent:** open-ended capability + fact reporting; a closed pull-model executor
+  (`container.start/stop/restart/remove`, `logs.tail` — `nginx.*` arrives in Phase 4);
+  honest `/proc/net/dev` network metrics (`null`, never a fabricated `0.0`); Docker
+  capability proven by a real `/version` call; token stored 0600; HTTPS-only
+  (`--allow-insecure-transport` removed).
+- **Security:** stolen-token blast radius = one node; revocation kills acceptance
+  immediately (per-node hash, no grace), rotation survives via a bounded dual-token
+  grace delivered on the heartbeat; every op maps to a codename (container lifecycle
+  → `container.lifecycle`; `logs.tail` → `container.logs`); capability gate on both
+  sides; op rows + enrollment audited; per-node agent rate limits.
+- **Testing:** enrollment e2e (single-use, expiry, revocation, concurrency); op
+  lifecycle and the queue-vs-execution deadline split; agent unit tests; frontend
+  enrollment + operation tests.
+- **Exit:** a machine enrolls through the one-liner path; ops are audited from
+  `pending` to `succeeded`; revocation is immediate.
 
 ## 7. Phase 4 — Domains & routes
 

@@ -38,8 +38,12 @@ from .helpers import (
 
 pytestmark = pytest.mark.integration
 
+#: A protocol-2 hello with docker reported present. Dispatch is capability-gated
+#: per node since Phase 3, so a node that has not reported capabilities cannot
+#: receive an operation — this fixture is what makes the node operable at all.
 HELLO = {
-    "agent_version": "test-agent/0.1",
+    "agent_version": "test-agent/1.1.0",
+    "protocol_version": 2,
     "hostname": "ops.integration.test",
     "os_name": "Ubuntu",
     "os_version": "24.04 LTS",
@@ -47,6 +51,7 @@ HELLO = {
     "cpu_cores": 4,
     "memory_total_mb": 8192,
     "disk_total_gb": 200,
+    "capabilities": {"docker": {"present": True, "api_version": "1.43"}},
 }
 
 CONTAINER_ID = "abc123def456"
@@ -124,7 +129,14 @@ async def test_dispatch_creates_a_pending_operation_with_a_deadline(client, owne
 
     created = datetime.fromisoformat(body["created_at"])
     expires = datetime.fromisoformat(body["expires_at"])
-    assert timedelta(seconds=55) < (expires - created) <= timedelta(seconds=60)
+    available = datetime.fromisoformat(body["available_until"])
+    # The pending hard deadline IS the queue deadline, and it is sized to outlast
+    # at least three heartbeats (90s) so an operation created just after a beat
+    # cannot die before the next one. It is not the 60s execution timeout.
+    assert expires == available
+    assert timedelta(seconds=115) < (available - created) <= timedelta(seconds=125)
+    # The execution clock only starts at claim.
+    assert body["execution_deadline"] is None
 
     # The audit trail names the operation and the node, in the caller's tenant.
     audit = await client.get(
@@ -274,9 +286,10 @@ async def test_expiry_gates_claim(client, owner):
     node, token = await _enrolled_node(client, owner["headers"], "ops-expired")
     operation = (await _dispatch(client, owner["headers"], node["id"])).json()
 
-    await _mutate_in_system_scope(
-        Operation, operation["id"], expires_at=datetime.now(UTC) - timedelta(seconds=1)
-    )
+    # The claim gate is the queue deadline (``available_until``); sending it into
+    # the past is what makes the operation unclaimable.
+    past = datetime.now(UTC) - timedelta(seconds=1)
+    await _mutate_in_system_scope(Operation, operation["id"], available_until=past, expires_at=past)
 
     response = await client.post(
         f"{API}/agent/operations/{operation['id']}/claim", headers={"X-Agent-Token": token}
@@ -529,8 +542,10 @@ async def test_operations_table_is_tenant_scoped_at_the_database(client, owner, 
         # …and B cannot insert a row into A's tenant: WITH CHECK refuses it.
         with pytest.raises(psycopg.errors.Error):
             conn.execute(
-                "INSERT INTO operations (id, org_id, node_id, type, status, params, expires_at) "
-                "VALUES (gen_random_uuid(), %s, %s, 'container.start', 'PENDING', '{}'::jsonb, now())",
+                "INSERT INTO operations "
+                "(id, org_id, node_id, type, status, params, available_until, expires_at) "
+                "VALUES (gen_random_uuid(), %s, %s, 'container.start', 'PENDING', "
+                "'{}'::jsonb, now() + interval '1 hour', now() + interval '1 hour')",
                 (owner["active_organization_id"], node_a["id"]),
             )
         conn.rollback()
@@ -579,23 +594,78 @@ async def test_the_database_whitelist_rejects_an_unregistered_type(client, owner
         )
         with pytest.raises(psycopg.errors.Error) as exc:
             conn.execute(
-                "INSERT INTO operations (id, org_id, node_id, type, status, params, expires_at) "
+                "INSERT INTO operations "
+                "(id, org_id, node_id, type, status, params, available_until, expires_at) "
                 "VALUES (gen_random_uuid(), %s, %s, 'nginx.reload', 'PENDING', "
-                "'{}'::jsonb, now())",
+                "'{}'::jsonb, now() + interval '1 hour', now() + interval '1 hour')",
                 (owner["active_organization_id"], node["id"]),
             )
         assert "ck_operations_type_valid" in str(exc.value)
         conn.rollback()
 
 
+async def test_dispatch_is_refused_for_a_node_that_never_reported_capabilities(client, owner):
+    """Absence of capability data is never read as "has the capability".
+
+    A protocol-1 agent (or a node that has not completed a v2 hello) has an empty
+    capability map; dispatch must refuse rather than assume.
+    """
+    node = (
+        await client.post(
+            f"{API}/nodes", headers=owner["headers"], json=server_payload("ops-v1-caps")
+        )
+    ).json()
+    token = (
+        await client.post(f"{API}/nodes/{node['id']}/agent-token", headers=owner["headers"])
+    ).json()["agent_token"]
+    # Protocol-1 hello: no capabilities block.
+    legacy_hello = {
+        "agent_version": "1.0.0",
+        "hostname": "ops.integration.test",
+        "os_name": "Ubuntu",
+        "arch": "x86_64",
+    }
+    hello = await client.post(
+        f"{API}/agent/hello", headers={"X-Agent-Token": token}, json=legacy_hello
+    )
+    assert hello.status_code == 200, hello.text
+    assert hello.json()["protocol_version"] == 1
+
+    response = await _dispatch(client, owner["headers"], node["id"])
+    assert response.status_code == 409, response.text
+    assert_error_code(response.json(), "NODE_CAPABILITY_UNVERIFIED")
+
+
+async def test_dispatch_is_refused_when_a_node_reports_the_capability_absent(client, owner):
+    """A reported-absent capability is a distinct, harder refusal."""
+    node = (
+        await client.post(
+            f"{API}/nodes", headers=owner["headers"], json=server_payload("ops-no-docker")
+        )
+    ).json()
+    token = (
+        await client.post(f"{API}/nodes/{node['id']}/agent-token", headers=owner["headers"])
+    ).json()["agent_token"]
+    hello = await client.post(
+        f"{API}/agent/hello",
+        headers={"X-Agent-Token": token},
+        json={**HELLO, "capabilities": {"docker": {"present": False}}},
+    )
+    assert hello.status_code == 200, hello.text
+
+    response = await _dispatch(client, owner["headers"], node["id"])
+    assert response.status_code == 409, response.text
+    assert_error_code(response.json(), "NODE_CAPABILITY_MISSING")
+
+
 async def test_dispatch_refuses_a_type_whose_capability_cannot_be_verified(
     client, owner, monkeypatch: pytest.MonkeyPatch
 ):
-    """The capability boundary is fail-closed until enrollment can advertise it.
+    """A spec naming a capability outside the vocabulary is refused.
 
-    Current types need ``docker``, which enrollment guarantees. A type needing
-    anything else is refused with 409 rather than dispatched on the assumption
-    that a node has it — the assumption the Phase 2 negotiation exists to remove.
+    Current types need ``docker``, which the node reports. A type needing
+    anything the platform does not know how to gate on is refused with 409 rather
+    than dispatched on the assumption that a node has it.
     """
     from dataclasses import replace
 

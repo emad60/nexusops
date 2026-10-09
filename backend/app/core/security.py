@@ -100,8 +100,27 @@ def generate_api_key() -> tuple[str, str, str]:
     return raw, raw[:12], hash_token(raw)
 
 
+#: Distinct wire prefixes so a credential's *kind* is visible without a lookup,
+#: and so the agent can tell an enrollment token from a node token at startup
+#: (and refuse to present one where the other is expected).
+AGENT_TOKEN_PREFIX = "nxa_"  # noqa: S105 - wire prefix, not a credential
+ENROLLMENT_TOKEN_PREFIX = "nxk_"  # noqa: S105 - wire prefix, not a credential
+
+
 def generate_agent_token() -> tuple[str, str, str]:
-    raw = f"nxa_{secrets.token_urlsafe(30)}"
+    """A per-node credential (``nxa_``): long-lived, node-scoped, never shared."""
+    raw = f"{AGENT_TOKEN_PREFIX}{secrets.token_urlsafe(30)}"
+    return raw, raw[:12], hash_token(raw)
+
+
+def generate_enrollment_token() -> tuple[str, str, str]:
+    """An enrollment credential (``nxk_``): single-use, short-lived, org-scoped.
+
+    Deliberately a different prefix from the node token: the two are handled by
+    different endpoints and a mix-up should be visible rather than authenticating
+    against the wrong table.
+    """
+    raw = f"{ENROLLMENT_TOKEN_PREFIX}{secrets.token_urlsafe(32)}"
     return raw, raw[:12], hash_token(raw)
 
 

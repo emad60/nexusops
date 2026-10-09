@@ -7,7 +7,16 @@ import {
   useQueryClient,
 } from "@tanstack/react-query";
 import { ApiError, apiDelete, apiGet, apiPatch, apiPost } from "../api/client";
-import type { ContainerOut, MetricPoint, Page, ServerDetail } from "../api/types";
+import type {
+  ContainerOut,
+  EnrollmentTokenCreated,
+  EnrollmentTokenItem,
+  MetricPoint,
+  OperationItem,
+  OperationType,
+  Page,
+  ServerDetail,
+} from "../api/types";
 import { useAuth } from "../auth/AuthContext";
 import { EmptyState, ErrorBlock, LoadingBlock, Modal, StatusBadge, TagChip } from "../components/ui";
 import { Pagination } from "../components/Pagination";
@@ -197,6 +206,8 @@ export default function ServerDetailPage() {
   const [editOpen, setEditOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [issuedToken, setIssuedToken] = useState<EnrollTokenOut | null>(null);
+  const [issuedEnrollment, setIssuedEnrollment] = useState<EnrollmentTokenCreated | null>(null);
+  const [removeTarget, setRemoveTarget] = useState<ContainerOut | null>(null);
   const [range, setRange] = useState<(typeof METRIC_RANGES)[number]>("24h");
   const [containersOffset, setContainersOffset] = useState(0);
   const [live, setLive] = useState<{ latest: LiveSample | null; samples: LiveSample[] }>({
@@ -293,6 +304,74 @@ export default function ServerDetailPage() {
     refetchInterval: 10_000,
   });
 
+  const operationsQuery = useQuery({
+    queryKey: ["operations", { node_id: serverId }],
+    queryFn: ({ signal }) =>
+      apiGet<Page<OperationItem>>("/operations", { node_id: serverId, limit: 10 }, signal),
+    enabled: Boolean(serverId),
+    // Operations move out-of-band (agent claim/result), so poll so a QUEUED row
+    // does not look final.
+    refetchInterval: 5_000,
+  });
+
+  const canManageTokens = hasPermission("node.create");
+  const enrollmentTokensQuery = useQuery({
+    queryKey: ["enrollment-tokens"],
+    queryFn: ({ signal }) =>
+      apiGet<Page<EnrollmentTokenItem>>("/nodes/enrollment-tokens", { limit: 20 }, signal),
+    enabled: canManageTokens,
+  });
+
+  const dispatchMutation = useMutation({
+    mutationFn: ({ type, containerId }: { type: OperationType; containerId: string }) => {
+      if (!serverId) return Promise.reject(new Error("Missing server id"));
+      return apiPost<OperationItem>("/operations", {
+        node_id: serverId,
+        type,
+        params: { container_id: containerId, force: type === "container.remove" },
+      });
+    },
+    onSuccess: () => {
+      // "Queued" is deliberately not "done": the row only becomes SUCCEEDED
+      // once the agent claims, executes and reports back.
+      notify("Operation queued — it runs when the agent next checks in", "success");
+      void queryClient.invalidateQueries({ queryKey: ["operations", { node_id: serverId }] });
+    },
+    onError: (error) => notify(errorMessage(error), "error"),
+  });
+
+  const createEnrollmentMutation = useMutation({
+    mutationFn: () =>
+      apiPost<EnrollmentTokenCreated>("/nodes/enrollment-tokens", { expires_in_seconds: 3600 }),
+    onSuccess: (data) => {
+      setIssuedEnrollment(data);
+      void queryClient.invalidateQueries({ queryKey: ["enrollment-tokens"] });
+    },
+    onError: (error) => notify(errorMessage(error), "error"),
+  });
+
+  const revokeEnrollmentMutation = useMutation({
+    mutationFn: (tokenId: string) =>
+      apiPost<EnrollmentTokenItem>(`/nodes/enrollment-tokens/${tokenId}/revoke`),
+    onSuccess: () => {
+      notify("Enrollment token revoked", "success");
+      void queryClient.invalidateQueries({ queryKey: ["enrollment-tokens"] });
+    },
+    onError: (error) => notify(errorMessage(error), "error"),
+  });
+
+  const revokeCredentialMutation = useMutation({
+    mutationFn: () => {
+      if (!serverId) return Promise.reject(new Error("Missing server id"));
+      return apiPost<ServerDetail>(`/nodes/${serverId}/agent-token/revoke`);
+    },
+    onSuccess: () => {
+      notify("Node credential revoked — the agent will stop reporting", "success");
+      void queryClient.invalidateQueries({ queryKey: ["server", serverId] });
+    },
+    onError: (error) => notify(errorMessage(error), "error"),
+  });
+
   const tokenMutation = useMutation({
     mutationFn: () => {
       if (!serverId) return Promise.reject(new Error("Missing server id"));
@@ -363,6 +442,11 @@ export default function ServerDetailPage() {
   const server = serverQuery.data;
   const canUpdate = hasPermission("node.update");
   const canDelete = hasPermission("node.delete");
+  const canLifecycle = hasPermission("container.lifecycle");
+  const canRemove = hasPermission("container.remove");
+  // Capability-aware: a docker operation is only offered when the node actually
+  // reported docker as present. Unreported is *not* present.
+  const dockerPresent = Boolean(server.capabilities?.docker?.present);
 
   const snapshot = latestQuery.data;
   const current: CurrentMetrics | null =
@@ -406,6 +490,20 @@ export default function ServerDetailPage() {
             {server.hostname} · {server.environment}
             {server.description ? ` — ${server.description}` : ""}
           </p>
+          {server.agent_revoked ? (
+            <p className="form-error" role="status">
+              This node's credential is <strong>revoked</strong> — it is no longer accepted and
+              the agent has stopped reporting. To restore it, re-enroll the machine with a fresh
+              enrollment token: create one below, then run the installer again on the host. The
+              agent will pick up a new credential automatically.
+            </p>
+          ) : null}
+          {server.enrolled && !server.capabilities_reported ? (
+            <p className="small faint">
+              This node has not reported capabilities (legacy agent or pre-v2 hello). Operations
+              cannot be dispatched to it until its agent is upgraded and re-hellos.
+            </p>
+          ) : null}
         </div>
         <div className="page-actions">
           <Link className="btn ghost sm" to="/audit-logs">
@@ -418,7 +516,17 @@ export default function ServerDetailPage() {
               onClick={() => tokenMutation.mutate()}
               disabled={tokenMutation.isPending}
             >
-              {tokenMutation.isPending ? "Issuing…" : "Issue agent token"}
+              {tokenMutation.isPending ? "Rotating…" : "Rotate credential"}
+            </button>
+          ) : null}
+          {canUpdate && server.enrolled ? (
+            <button
+              type="button"
+              className="btn danger sm"
+              onClick={() => revokeCredentialMutation.mutate()}
+              disabled={revokeCredentialMutation.isPending}
+            >
+              {revokeCredentialMutation.isPending ? "Revoking…" : "Revoke credential"}
             </button>
           ) : null}
           {canUpdate ? (
@@ -550,11 +658,45 @@ export default function ServerDetailPage() {
             <dd>{server.heartbeat_interval_seconds}s</dd>
             <dt>Offline after</dt>
             <dd>{server.offline_after_seconds != null ? `${server.offline_after_seconds}s` : "platform default"}</dd>
+            <dt>Protocol</dt>
+            <dd>
+              {server.enrolled
+                ? server.protocol_version
+                  ? `v${server.protocol_version}`
+                  : "v1 (legacy agent)"
+                : "not enrolled"}
+            </dd>
+            <dt>Credential</dt>
+            <dd>
+              {server.agent_revoked
+                ? "revoked"
+                : server.enrolled
+                  ? "active"
+                  : "not issued"}
+            </dd>
+            <dt>Capabilities</dt>
+            <dd>
+              {!server.capabilities_reported ? (
+                <span className="faint">not reported</span>
+              ) : (
+                Object.entries(server.capabilities ?? {}).map(([name, report]) => (
+                  <span
+                    key={name}
+                    className={`badge ${report?.present ? "INFO" : "WARNING"} no-dot`}
+                    title={report?.api_version ? `API ${report.api_version}` : undefined}
+                  >
+                    {name}: {report?.present ? "available" : "unavailable"}
+                  </span>
+                ))
+              )}
+            </dd>
           </dl>
           {canUpdate ? (
             <p className="small faint mt-8">
-              "Issue agent token" generates a fresh enrollment token; the previous one stops
-              working immediately.
+              &ldquo;Rotate credential&rdquo; issues a new node credential with a short grace
+              window so a running agent can pick it up on its next heartbeat. Use &ldquo;Revoke
+              credential&rdquo; (below) for the immediate kill switch when a token is known to be
+              compromised.
             </p>
           ) : null}
         </div>
@@ -593,6 +735,7 @@ export default function ServerDetailPage() {
                       Memory
                     </th>
                     <th scope="col">Seen</th>
+                    <th scope="col">Actions</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -614,6 +757,69 @@ export default function ServerDetailPage() {
                         {container.mem_limit_mb ? ` / ${formatBytesMb(container.mem_limit_mb)}` : ""}
                       </td>
                       <td>{formatRelative(container.observed_at)}</td>
+                      <td className="container-actions">
+                        {canLifecycle ? (
+                          <>
+                            <button
+                              type="button"
+                              className="btn ghost sm"
+                              disabled={
+                                !dockerPresent ||
+                                dispatchMutation.isPending ||
+                                container.status === "RUNNING"
+                              }
+                              onClick={() =>
+                                dispatchMutation.mutate({
+                                  type: "container.start",
+                                  containerId: container.container_id,
+                                })
+                              }
+                            >
+                              Start
+                            </button>
+                            <button
+                              type="button"
+                              className="btn ghost sm"
+                              disabled={
+                                !dockerPresent ||
+                                dispatchMutation.isPending ||
+                                container.status !== "RUNNING"
+                              }
+                              onClick={() =>
+                                dispatchMutation.mutate({
+                                  type: "container.stop",
+                                  containerId: container.container_id,
+                                })
+                              }
+                            >
+                              Stop
+                            </button>
+                            <button
+                              type="button"
+                              className="btn ghost sm"
+                              disabled={!dockerPresent || dispatchMutation.isPending}
+                              onClick={() =>
+                                dispatchMutation.mutate({
+                                  type: "container.restart",
+                                  containerId: container.container_id,
+                                })
+                              }
+                            >
+                              Restart
+                            </button>
+                          </>
+                        ) : null}
+                        {canRemove ? (
+                          <button
+                            type="button"
+                            className="btn danger sm"
+                            disabled={!dockerPresent || dispatchMutation.isPending}
+                            onClick={() => setRemoveTarget(container)}
+                          >
+                            Remove
+                          </button>
+                        ) : null}
+                      </td>
                     </tr>
                   ))}
                 </tbody>
@@ -631,6 +837,132 @@ export default function ServerDetailPage() {
           </>
         ) : null}
       </div>
+
+      <div className="card mt-16">
+        <div className="card-title">
+          <h2>Operations</h2>
+          <span className="small faint">
+            queued actions run when the agent next checks in
+          </span>
+        </div>
+        {operationsQuery.isError ? <ErrorBlock error={operationsQuery.error} /> : null}
+        {operationsQuery.data && operationsQuery.data.items.length === 0 ? (
+          <EmptyState
+            icon="↯"
+            title="No operations yet"
+            hint="Use the container actions above to queue a start, stop, restart or removal."
+          />
+        ) : null}
+        {operationsQuery.data && operationsQuery.data.items.length > 0 ? (
+          <div className="table-wrap">
+            <table className="data">
+              <thead>
+                <tr>
+                  <th scope="col">Type</th>
+                  <th scope="col">Status</th>
+                  <th scope="col">Requested</th>
+                  <th scope="col">Deadline</th>
+                  <th scope="col">Detail</th>
+                </tr>
+              </thead>
+              <tbody>
+                {operationsQuery.data.items.map((operation) => (
+                  <tr key={operation.id}>
+                    <td className="mono small">{operation.type}</td>
+                    <td>
+                      <StatusBadge value={operation.status} />
+                      {operation.status === "PENDING" ? (
+                        <span className="small faint"> queued</span>
+                      ) : null}
+                    </td>
+                    <td>{formatRelative(operation.created_at)}</td>
+                    <td>{formatRelative(operation.expires_at)}</td>
+                    <td className="small">
+                      {operation.error_code ? (
+                        <span className="mono">
+                          {operation.error_code}
+                          {operation.error_message ? ` — ${operation.error_message}` : ""}
+                        </span>
+                      ) : operation.result ? (
+                        <span className="mono faint">{JSON.stringify(operation.result)}</span>
+                      ) : (
+                        "—"
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : null}
+      </div>
+
+      {canManageTokens ? (
+        <div className="card mt-16">
+          <div className="card-title">
+            <h2>Enrollment tokens</h2>
+            <button
+              type="button"
+              className="btn sm"
+              onClick={() => createEnrollmentMutation.mutate()}
+              disabled={createEnrollmentMutation.isPending}
+            >
+              {createEnrollmentMutation.isPending ? "Creating…" : "Create enrollment token"}
+            </button>
+          </div>
+          <p className="small faint">
+            An enrollment token enrolls one machine into this organization. It is single-use,
+            expires, can be revoked, and its value is shown only once.
+          </p>
+          {enrollmentTokensQuery.isError ? <ErrorBlock error={enrollmentTokensQuery.error} /> : null}
+          {enrollmentTokensQuery.data && enrollmentTokensQuery.data.items.length === 0 ? (
+            <EmptyState
+              icon="✚"
+              title="No enrollment tokens"
+              hint="Create one, then run the installer on the machine with the token."
+            />
+          ) : null}
+          {enrollmentTokensQuery.data && enrollmentTokensQuery.data.items.length > 0 ? (
+            <div className="table-wrap">
+              <table className="data">
+                <thead>
+                  <tr>
+                    <th scope="col">Name</th>
+                    <th scope="col">State</th>
+                    <th scope="col">Expires</th>
+                    <th scope="col">Created</th>
+                    <th scope="col" />
+                  </tr>
+                </thead>
+                <tbody>
+                  {enrollmentTokensQuery.data.items.map((token) => (
+                    <tr key={token.id}>
+                      <td>{token.name || "—"}</td>
+                      <td>
+                        <StatusBadge value={token.state} />
+                      </td>
+                      <td>{formatRelative(token.expires_at)}</td>
+                      <td>{formatRelative(token.created_at)}</td>
+                      <td>
+                        {token.state === "ACTIVE" ? (
+                          <button
+                            type="button"
+                            className="btn danger sm"
+                            onClick={() => revokeEnrollmentMutation.mutate(token.id)}
+                            disabled={revokeEnrollmentMutation.isPending}
+                          >
+                            Revoke
+                          </button>
+                        ) : null}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
 
       <div className="card mt-16">
         <div className="card-title">
@@ -687,15 +1019,102 @@ export default function ServerDetailPage() {
       </Modal>
 
       <Modal
+        open={removeTarget !== null}
+        title="Remove container"
+        onClose={() => setRemoveTarget(null)}
+      >
+        {removeTarget ? (
+          <>
+            <p>
+              Remove <strong>{removeTarget.name}</strong>? This permanently deletes the container
+              on the node. Removal is destructive and cannot be undone.
+            </p>
+            <div className="modal-actions">
+              <button type="button" className="btn" onClick={() => setRemoveTarget(null)}>
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="btn danger"
+                onClick={() => {
+                  dispatchMutation.mutate({
+                    type: "container.remove",
+                    containerId: removeTarget.container_id,
+                  });
+                  setRemoveTarget(null);
+                }}
+              >
+                Remove container
+              </button>
+            </div>
+          </>
+        ) : null}
+      </Modal>
+
+      <Modal
+        open={issuedEnrollment !== null}
+        title="Enrollment token"
+        onClose={() => setIssuedEnrollment(null)}
+      >
+        {issuedEnrollment ? (
+          <>
+            <p className="form-error" role="alert">
+              This token is shown only once. It is single-use, expires {
+                formatRelative(issuedEnrollment.expires_at)
+              }, and is stored only as a hash — it can never be retrieved again.
+            </p>
+            <div className="field mt-8">
+              <label htmlFor="enrollment-token-value">Token</label>
+              <input
+                id="enrollment-token-value"
+                className="input mono"
+                readOnly
+                value={issuedEnrollment.token}
+                onFocus={(e) => e.currentTarget.select()}
+              />
+            </div>
+            <div className="modal-actions" style={{ justifyContent: "space-between" }}>
+              <button
+                type="button"
+                className="btn"
+                onClick={() => {
+                  void navigator.clipboard
+                    .writeText(issuedEnrollment.token)
+                    .then(() => notify("Token copied to clipboard", "success"))
+                    .catch(() =>
+                      notify("Clipboard unavailable — select the token and copy it manually", "error"),
+                    );
+                }}
+              >
+                Copy token
+              </button>
+              <button
+                type="button"
+                className="btn primary"
+                onClick={() => setIssuedEnrollment(null)}
+              >
+                Done — I saved it
+              </button>
+            </div>
+            <p className="small faint mono mt-8" style={{ whiteSpace: "pre-wrap" }}>
+              {issuedEnrollment.install_hint}
+            </p>
+          </>
+        ) : null}
+      </Modal>
+
+      <Modal
         open={issuedToken !== null}
-        title="Agent enrollment token"
+        title="Credential rotation"
         onClose={() => setIssuedToken(null)}
       >
         {issuedToken ? (
           <>
             <p className="form-error" role="alert">
-              This token is shown only once. Copy it now — it is stored only as a hash and can
-              never be retrieved again. Issuing a new token invalidates this one.
+              This new credential is shown only once. The node's current token keeps working for
+              a short grace window (so the running agent can collect this one on its next
+              heartbeat) and then stops. Copy the hint now — the raw value can never be
+              retrieved again.
             </p>
             <div className="field mt-8">
               <label htmlFor="agent-token-value">Token</label>

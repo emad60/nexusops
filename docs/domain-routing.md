@@ -190,8 +190,9 @@ methods; **NginxProvider is the first and only v1 implementation**:
   contract generalizes "validate" to the provider's checker (`nginx -t`,
   `caddy validate`, config parse). No route-level code knows the provider.
 - **Selection is per node:** `servers.capabilities` (domain-model.md §2.3) reports
-  `nginx` (+ version) via the hello negotiation channel (schemas/agent.py:37-43
-  extension point — capabilities reporting is Phase 3 work; hello sends none today).
+  a capability map via the hello exchange. Phase 3 shipped capability reporting and
+the `docker`/`systemd` keys; the `nginx` key arrives with the nginx provider
+  (§4), and until a node reports it, dispatch refuses `nginx.*` ops (Phase 4).
   Nodes without the capability never appear in the upstream picker and never
   receive `nginx.*` ops.
 

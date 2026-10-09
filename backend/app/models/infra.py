@@ -80,6 +80,25 @@ class Server(OrgScoped, TimestampMixin, Base):
     disk_total_gb: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
     agent_version: Mapped[str] = mapped_column(String(48), default="", nullable=False)
+    #: Negotiated wire-protocol version. ``NULL`` means a pre-v2 agent that never
+    #: sent one — it is treated as protocol 1 (204 heartbeat, no delivery), which
+    #: is what keeps an upgraded control plane from breaking an installed agent
+    #: that predates this phase. Never interpret ``NULL`` as "supports v2".
+    protocol_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    #: Self-reported capability map from hello v2, e.g.
+    #: ``{"docker": {"present": true, "api_version": "1.43"}}``. An **empty**
+    #: dict means the node has not reported capabilities (or is a legacy agent)
+    #: and is therefore *unverified* — never treated as "has every capability".
+    #: Dispatch refuses any operation whose capability is not present-and-true in
+    #: this map (see ``operation_service``).
+    capabilities: Mapped[dict] = json_column()
+    #: When the node's credential was explicitly revoked (kill switch). Set by
+    #: an operator action, independent of any rotation grace window. A ``NULL``
+    #: revoked_at does not mean "enrolled" on its own — the credential row is the
+    #: authority — but it is what the dashboard reads to show a revoked node.
+    credential_revoked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     # The agent's token hash lives in ``agent_credentials`` (one row per node),
     # not here: the hash has to be resolvable BEFORE an organization is known
     # (auth must identify the node first), and this table is RLS-enforced. The
@@ -99,6 +118,16 @@ class Server(OrgScoped, TimestampMixin, Base):
     extra: Mapped[dict] = json_column()
 
     docker_host: Mapped[DockerHost | None] = relationship(back_populates="server", uselist=False)
+
+    @property
+    def facts(self) -> dict:
+        """Alias for :attr:`extra`, so the API can expose open-ended agent facts.
+
+        The column stays named ``extra`` (it pre-dates the agent protocol); the
+        API presents it as ``facts`` because that is what the agent reports.
+        """
+        return self.extra or {}
+
     tags: Mapped[list[Tag]] = relationship(
         secondary="server_tags", lazy="selectin", order_by="Tag.name"
     )
@@ -156,6 +185,27 @@ class AgentCredential(TimestampMixin, Base):
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
+    # --- rotation grace (docs/node-agent-architecture.md §3.3) -------------
+    #: The hash the agent is *currently* authenticating with, accepted during the
+    #: grace window so a running agent survives the rotation on its next beat.
+    #: Cleared when the agent confirms it applied the new token, or when the
+    #: grace deadline passes. Immediacy is preserved because accept-decision is a
+    #: per-request lookup of this row — never a cache.
+    previous_token_hash: Mapped[str | None] = mapped_column(String(64), unique=True, nullable=True)
+    previous_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    #: The new raw token, Fernet-encrypted at rest, until the agent retrieves it
+    #: on its next authenticated heartbeat. It is served **only** to a request
+    #: authenticated with ``previous_token_hash``. A crash between receive and
+    #: persist therefore self-heals on the following beat; the ciphertext is the
+    #: minimum state that makes rotation survivable without a reinstall.
+    pending_token_ciphertext: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: When the agent confirmed it applied the pending token (ends re-delivery).
+    rotation_applied_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
 
 class ServerCredential(OrgScoped, TimestampMixin, Base):
     """SSH credential for a server. The secret part is Fernet-encrypted."""
@@ -180,6 +230,14 @@ class ServerCredential(OrgScoped, TimestampMixin, Base):
 
 class DockerHost(OrgScoped, TimestampMixin, Base):
     __tablename__ = "docker_hosts"
+    __table_args__ = (
+        # Exactly one docker connection per node. The agent auto-creates its host
+        # row on first container telemetry; without this constraint a
+        # select-then-insert race could mint two rows for one node. NULL server_id
+        # is allowed more than once (PostgreSQL treats NULLs as distinct), so
+        # manually-registered hosts are unaffected.
+        UniqueConstraint("server_id", name="uq_docker_hosts_server_id"),
+    )
 
     id: Mapped[uuid.UUID] = uuid_pk()
     server_id: Mapped[uuid.UUID | None] = mapped_column(

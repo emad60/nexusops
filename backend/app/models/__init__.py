@@ -8,6 +8,7 @@ from app.models.delivery import (
     DeploymentStep,
     Project,
 )
+from app.models.enrollment import EnrollmentToken
 from app.models.identity import (
     ApiKey,
     Permission,
@@ -56,6 +57,7 @@ __all__ = [
     "DeploymentEnvironment",
     "DeploymentStep",
     "DockerHost",
+    "EnrollmentToken",
     "Incident",
     "IncidentEvent",
     "LogEntry",

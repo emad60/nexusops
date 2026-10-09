@@ -187,13 +187,27 @@ async def test_agent_token_rotation_invalidates_previous(client, owner):
         "memory_total_mb": 8192,
         "disk_total_gb": 200,
     }
-    stale = await client.post(
+    # Rotation opens a grace window (docs/node-agent-architecture.md §3.3) so a
+    # running agent can fetch its replacement on the next beat: the old token
+    # still authenticates during it.
+    during_grace = await client.post(
         f"{API}/agent/hello", json=hello, headers={"X-Agent-Token": token_one}
     )
-    assert stale.status_code == 401
+    assert during_grace.status_code == 200, during_grace.text
 
     fresh = await client.post(
         f"{API}/agent/hello", json=hello, headers={"X-Agent-Token": token_two}
     )
     assert fresh.status_code == 200
     assert uuid.UUID(fresh.json()["server_id"]) == uuid.UUID(created["id"])
+
+    # Revocation is the immediate path: after it, neither token is accepted.
+    revoked = await client.post(
+        f"{API}/nodes/{created['id']}/agent-token/revoke", headers=owner["headers"]
+    )
+    assert revoked.status_code == 200, revoked.text
+    for dead in (token_one, token_two):
+        rejected = await client.post(
+            f"{API}/agent/hello", json=hello, headers={"X-Agent-Token": dead}
+        )
+        assert rejected.status_code == 401, rejected.text

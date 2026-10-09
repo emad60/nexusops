@@ -72,7 +72,8 @@ Three credential types exist. All of them are accepted by the same dependency
 |---|---|---|---|
 | User access token | `Authorization: Bearer <jwt>` | HS256 JWT (`sub`, `sid`, `jti`, `typ=access`, `iss=nexusops`) | not stored (stateless, but `sid` must match a live DB session) |
 | API key | `X-API-Key: <key>` | `nxo_<urlsafe random>` | SHA-256 hash only (`backend/app/core/security.py: hash_token`) |
-| Agent enrollment token | `X-Agent-Token: <token>` | `nxa_<urlsafe random>` | SHA-256 hash only, one per server |
+| Agent credential | `X-Agent-Token: <token>` | `nxa_<urlsafe random>` | SHA-256 hash only, one per node (`agent_credentials`) |
+| Enrollment token | body of `POST /agent/enroll` (never a header) | `nxk_<urlsafe random>` | SHA-256 hash only (`enrollment_tokens`), org-scoped, single-use |
 
 ### 3.1 Login and the access token
 
@@ -150,12 +151,27 @@ curl -sS -X POST http://localhost:8080/api/v1/api-keys \
 curl -sS http://localhost:8080/api/v1/nodes -H "X-API-Key: nxo_..."
 ```
 
-### 3.4 Agent tokens (`X-Agent-Token`)
+### 3.4 Agent credentials (`X-Agent-Token`)
 
-Per-server enrollment tokens used only by the two agent endpoints (section 7).
-Header name: **`X-Agent-Token`**. Issued by `POST /nodes/{id}/agent-token`; issuing a
-new one invalidates the previous immediately. Agents that receive `401` on heartbeat
-exit (see `agent/nexusops_agent.py`).
+A node's long-lived write credential (`nxa_…`, SHA-256-hashed at rest), used only by
+the agent endpoints (section 7). Header name: **`X-Agent-Token`**. A brand-new
+machine has none: it presents an organization-scoped **enrollment token**
+(`nxk_…`) to `POST /agent/enroll` and receives its `nxa_` credential, stored at
+`/etc/nexusops-agent/token` (0600).
+
+Two operator actions, deliberately distinct:
+
+* **Rotate** — `POST /nodes/{id}/agent-token` issues a new credential and opens a
+  bounded **dual-token grace window**. The previous hash keeps authenticating until
+  the deadline; the running agent receives the replacement in its next heartbeat
+  response, persists it atomically and acknowledges with `rotation_applied`.
+* **Revoke** — `POST /nodes/{id}/agent-token/revoke` stops acceptance **immediately**:
+  no grace, no delivery. This is the compromise path; recovery is re-enrollment with
+  a fresh enrollment token.
+
+A rejected credential does **not** make the agent exit — it parks in a long, bounded
+re-attempt cadence (`REVOKED_POLL_SECONDS`) so `Restart=always` systemd cannot turn a
+revocation into a request storm (see `agent/nexusops_agent.py`).
 
 ### 3.4a Organization scope — `X-Org-Id` (required)
 
@@ -331,16 +347,25 @@ Implemented as a Redis-backed **fixed window per client IP**
 | `auth` | `POST /auth/login` | 10 per min / IP |
 | `refresh` | `POST /auth/refresh` | 30 per min / IP |
 | `expensive` | `POST /applications/{id}/deployments` (trigger) | 20 per min / IP |
+| `agent_enroll` | `POST /agent/enroll` | 30 per min / IP (fail closed) |
 | `agent_hello` | `POST /agent/hello` | 30 per min / IP |
-| `agent_heartbeat` | `POST /agent/heartbeat` | 600 per min / IP |
+| `agent_heartbeat_ip` | all `POST /agent/*` (unauthenticated ceiling) | 1200 per min / IP |
+| node `agent_heartbeat` | `POST /agent/heartbeat` (authenticated) | 600 per min / **node** |
+| node `agent_ops_claim` | `POST /agent/operations/{id}/claim` | 600 per min / **node** |
+| node `agent_ops_result` | `POST /agent/operations/{id}/result` | 600 per min / **node** |
 
 **Failure behavior is deliberate and differs by limiter:** the auth-facing limiters
-(register / login / refresh) are **fail closed** — if Redis is unreachable they
-degrade to an in-process fixed-window counter (approximate across workers) so
-brute-force throttling never silently disappears. The general limiters (`expensive`,
-agent endpoints) **fail open** (request allowed, warning logged) to stay
-availability-friendly. There is no global request cap and no per-token quota — only
-these per-IP windows.
+(register / login / refresh) and **enrollment** are **fail closed** — if Redis is
+unreachable they degrade to an in-process fixed-window counter (approximate across
+workers) so brute-force throttling never silently disappears. The general limiters
+(`expensive`, hello/heartbeat) **fail open** (request allowed, warning logged) to
+stay availability-friendly.
+
+**Keying.** Authenticated agent routes key on the resolved **node** rather than the
+client IP (`node_rate_limit`), so a NAT'd fleet no longer shares one bucket; a
+cheap per-IP ceiling (`agent_heartbeat_ip`) still covers unauthenticated floods,
+since a rejected token never reaches the node keyed limiter. The compare-and-set in
+the operation service — not the limiter — is what makes concurrent claims safe.
 
 ## 5. WebSocket API
 
@@ -519,7 +544,11 @@ fields describe the role held *in this organization*.
 | DELETE | `/nodes/{server_id}` | `node.delete` | 204; hard delete, cascades |
 | GET | `/nodes/tags` | `node.read` | tag cloud with usage counts |
 | POST | `/nodes/tags` | `node.update` | upsert by name |
-| POST | `/nodes/{server_id}/agent-token` | `node.update` | new `nxa_…` token; previous one dies; raw shown once |
+| POST | `/nodes/{server_id}/agent-token` | `node.update` | **rotate**: new `nxa_…`; old hash accepted for the bounded grace window; raw shown once |
+| POST | `/nodes/{server_id}/agent-token/revoke` | `node.credential` | **revoke**: immediate, no grace, no delivery |
+| POST | `/nodes/enrollment-tokens` | `node.create` | 201; single-use `nxk_…` for this organization; raw `token` + `install_hint` shown **once** |
+| GET | `/nodes/enrollment-tokens` | `node.read` | metadata only — the response type has no token field |
+| POST | `/nodes/enrollment-tokens/{token_id}/revoke` | `node.credential` | revoke an unused token; a used token is `409 ENROLLMENT_TOKEN_ALREADY_USED` |
 
 The pre-rename `/servers` paths remain as a schema-hidden compatibility alias for
 one deprecation window (same handlers and payloads); new clients use `/nodes`.
@@ -529,8 +558,11 @@ The `{server_id}` path-parameter name is unchanged.
 
 | Method | Path | Auth |
 |---|---|---|
+| POST | `/agent/enroll` | body `nxk_…` enrollment token (no header) |
 | POST | `/agent/hello` | `X-Agent-Token` |
 | POST | `/agent/heartbeat` | `X-Agent-Token` |
+| POST | `/agent/operations/{id}/claim` | `X-Agent-Token` |
+| POST | `/agent/operations/{id}/result` | `X-Agent-Token` |
 
 ### Observability — `metrics.py`, `events.py`, `audit.py`, `search.py`
 
@@ -701,57 +733,106 @@ empty value.
 
 ## 7. Agent ingest API
 
-Two endpoints, authenticated **only** by `X-Agent-Token` (the per-server enrollment
-token, `nxa_…`, SHA-256-hashed at rest). Payloads are data-only by design — nothing an
-agent sends is executed. Implementation: `backend/app/api/v1/agent.py`, schemas in
-`backend/app/schemas/agent.py`, client in `agent/nexusops_agent.py`.
+Payloads are data-only by design — nothing an agent sends is executed.
+Implementation: `backend/app/api/v1/agent.py`, schemas in
+`backend/app/schemas/agent.py`, client in `agent/nexusops_agent.py`. Every route but
+enrollment authenticates with `X-Agent-Token`.
 
-### `POST /agent/hello` — first contact after enrollment (30/min/IP)
+### `POST /agent/enroll` — redeem an enrollment token (30/min/IP, fail-closed)
 
 ```json
 {
-  "agent_version": "1.0.0",
-  "hostname": "web-01",
-  "os_name": "Ubuntu", "os_version": "24.04", "arch": "x86_64",
-  "cpu_cores": 8, "memory_total_mb": 16384, "disk_total_gb": 512
+  "enrollment_token": "nxk_…", "hostname": "web-01",
+  "agent_version": "1.1.0", "arch": "x86_64", "cpu_cores": 8,
+  "memory_total_mb": 16384, "disk_total_gb": 512
 }
 ```
 
-Response persists the static host facts and negotiates cadence:
+There is **no** `org_id` field: the node's organization is the token row's. The token
+is consumed atomically (single-use), and the response carries the node's own
+credential plus the hello contract:
+
+```json
+{
+  "node_id": "…", "name": "web-01", "agent_token": "nxa_…",
+  "heartbeat_interval_seconds": 30, "offline_after_seconds": 90,
+  "protocol_version": 2
+}
+```
+
+A bad/expired/revoked/used token is the same `401 ENROLLMENT_TOKEN_INVALID` — the
+response never reveals which guess was closest. Two concurrent redemptions of one
+token cannot both succeed.
+
+### `POST /agent/hello` — registration + negotiation (30/min/IP)
+
+```json
+{
+  "agent_version": "1.1.0", "protocol_version": 2,
+  "hostname": "web-01",
+  "os_name": "Ubuntu", "os_version": "24.04", "arch": "x86_64",
+  "cpu_cores": 8, "memory_total_mb": 16384, "disk_total_gb": 512,
+  "capabilities": {"docker": {"present": true, "api_version": "1.43"},
+                   "systemd": {"present": true}},
+  "facts": {"kernel": "6.8.0", "network_interfaces": 2}
+}
+```
+
+Response persists the static facts + capabilities and negotiates cadence and protocol:
 
 ```json
 {
   "server_id": "…", "name": "web-01",
-  "heartbeat_interval_seconds": 30,
-  "offline_after_seconds": 90
+  "heartbeat_interval_seconds": 30, "offline_after_seconds": 90,
+  "protocol_version": 2, "min_agent_version": "1.1.0"
 }
 ```
 
-The agent adopts `heartbeat_interval_seconds` (floor 5 s) as its reporting period.
+A **v1 agent** omits `protocol_version` (defaults to `1`) and keeps the original
+contract. `capabilities` is a bounded JSONB map; an absent key or `present: false`
+means *unreported/unavailable* — never "has it".
 
-### `POST /agent/heartbeat` — periodic sample (600/min/IP) → `204`
+### `POST /agent/heartbeat` — periodic sample (per-node limit)
 
 ```json
 {
   "cpu_percent": 12.5, "mem_used_mb": 4096.2, "mem_percent": 25.0,
   "disk_used_gb": 128.4, "disk_percent": 25.1,
-  "net_rx_kb_s": 0.0, "net_tx_kb_s": 0.0, "load1": 0.42, "uptime_seconds": 864000,
+  "net_rx_kb_s": 812.4, "net_tx_kb_s": 233.1, "load1": 0.42, "uptime_seconds": 864000,
+  "rotation_applied": false,
   "containers": [
     {"container_id": "ab12…", "name": "api", "status": "RUNNING",
-     "health": "healthy", "image_ref": "ghcr.io/nexusops/api:1.0.0",
+     "health": "HEALTHY", "image_ref": "ghcr.io/nexusops/api:1.0.0",
      "cpu_percent": 1.2, "mem_used_mb": 256.5}
   ]
 }
 ```
+
+Response:
+
+- **protocol-1 agent → `204`** with no body (the original contract, unchanged).
+- **protocol-2 agent → `200`**: `{heartbeat_interval_seconds, pending_operations[],
+  token_rotation?}`. `pending_operations` lists ids awaiting claim for *this* node;
+  `token_rotation` (if present) carries the replacement credential for a rotation in
+  progress and is served **only** to a request authenticated by the previous hash.
+
+`net_rx_kb_s`/`net_tx_kb_s` are measured from `/proc/net/dev` and may be **`null`**
+(not measurable) — never render `null` as `0.0`.
+
+### `POST /agent/operations/{id}/claim` · `/result`
+
+See the Node operations table above: claim is a per-node compare-and-set, result
+closes the row (`SUCCEEDED`/`FAILED`), and a duplicate result is a 200 no-op.
 
 Behavior around it:
 
 - A server with no heartbeat for `SERVER_OFFLINE_AFTER_SECONDS` (default 90) is marked
   offline by the beat scheduler; the container fleet simulation in
   `SIMULATION_MODE=true` is driven by the same scheduler, not by agents.
-- Rotating the token (`POST /nodes/{id}/agent-token`) instantly invalidates the old
-  one; the agent exits on `401`.
-- Repeated failures back off exponentially, capped at 5 minutes.
+- A **rotation** opens a bounded grace window and delivers the new credential on the
+  heartbeat; a **revocation** stops acceptance immediately. A rejected token no longer
+  makes the agent exit — it parks in a long re-attempt cadence.
+- Repeated transient failures back off exponentially, capped at 5 minutes.
 
 ## 8. A curl journey
 
@@ -819,21 +900,31 @@ SERVER_ID=$(curl -sS -X POST $BASE/nodes -H "$AUTH" -H "$ORGH" -H 'Content-Type:
       }' | jq -r .id)
 echo "server: $SERVER_ID"
 
-# 5. Issue an agent enrollment token (nxa_… shown exactly once; any older token dies)
-curl -sS -X POST $BASE/nodes/$SERVER_ID/agent-token -H "$AUTH" -H "$ORGH" | jq .
-# → {"agent_token": "nxa_…", "install_hint": "bash agent/install.sh   # …"}
+# 5. Mint a single-use, org-scoped enrollment token (nxk_… shown exactly once).
+#    Optional "node_id" claims an existing placeholder node instead of creating one.
+curl -sS -X POST $BASE/nodes/enrollment-tokens -H "$AUTH" -H "$ORGH" \
+  -H 'Content-Type: application/json' \
+  -d '{"name": "web wave 1", "expires_in_seconds": 3600}' | jq .
+# → {"token": "nxk_…", "install_hint": "…", "state": "ACTIVE", …}
+#    (Legacy alternative: POST /nodes/$SERVER_ID/agent-token rotates that node's own
+#     credential directly; POST …/agent-token/revoke kills it with no grace.)
 
-# 6. Pretend to be the agent: hello, then heartbeats with X-Agent-Token
-export AGENT_TOKEN=nxa_...   # from step 5
+# 6. Pretend to be the agent: redeem the enrollment token for this node's own
+#    credential, then hello (protocol 2) and heartbeat.
+export ENROLL_TOKEN=nxk_...   # from step 5
+export AGENT_TOKEN=$(curl -sS -X POST $BASE/agent/enroll -H 'Content-Type: application/json' \
+  -d "{\"enrollment_token\": \"$ENROLL_TOKEN\", \"hostname\": \"web01.internal\", \"agent_version\": \"1.1.0\"}" \
+  | jq -r .agent_token)
 curl -sS -X POST $BASE/agent/hello -H "X-Agent-Token: $AGENT_TOKEN" \
   -H 'Content-Type: application/json' \
-  -d '{"agent_version": "1.0.0", "hostname": "web01.internal",
+  -d '{"agent_version": "1.1.0", "protocol_version": 2, "hostname": "web01.internal",
        "os_name": "Ubuntu", "os_version": "24.04", "arch": "x86_64",
-       "cpu_cores": 8, "memory_total_mb": 16384, "disk_total_gb": 500}' | jq .
-curl -sS -o /dev/null -w '%{http_code}\n' -X POST $BASE/agent/heartbeat \
+       "cpu_cores": 8, "memory_total_mb": 16384, "disk_total_gb": 500,
+       "capabilities": {"docker": {"present": true}}}' | jq .
+curl -sS -w '\n%{http_code}\n' -X POST $BASE/agent/heartbeat \
   -H "X-Agent-Token: $AGENT_TOKEN" -H 'Content-Type: application/json' \
   -d '{"cpu_percent": 11.5, "mem_used_mb": 4096, "mem_percent": 25.0,
-       "disk_used_gb": 128, "disk_percent": 25.6, "uptime_seconds": 86400}'   # → 204
+       "disk_used_gb": 128, "disk_percent": 25.6, "uptime_seconds": 86400}'   # protocol 2 → 200 + pending_operations
 
 # 7. Create an uptime monitor (monitor.manage; URL passes the SSRF guard)
 MONITOR_ID=$(curl -sS -X POST $BASE/monitors -H "$AUTH" -H "$ORGH" -H 'Content-Type: application/json' \
@@ -873,10 +964,12 @@ A minimal WebSocket client against the same token:
 
 Documented honestly, so nobody discovers them in production:
 
-- **Rate limiting is per-IP.** Fixed windows in Redis, keyed on the rightmost
-  `X-Forwarded-For` hop. Auth limiters fail closed (in-process fallback during a
-  Redis outage, approximate across workers); the general and agent limiters fail
-  open. There is no global budget and no per-credential quota.
+- **Rate limiting is two-tier.** Fixed windows in Redis: authenticated agent routes
+  key on the resolved **node**, everything else on the rightmost `X-Forwarded-For`
+  hop. Auth and enrollment limiters fail closed (in-process fallback during a Redis
+  outage, approximate across workers); the general and hello/heartbeat limiters fail
+  open. Human routes still have **no per-org/per-user quota** — that work is tracking
+  in platform-security-model.md H6.
 - **WebSocket has no replay.** Redis pub/sub is fire-and-forget; anything published
   while a socket is down is lost. Clients must re-subscribe after reconnecting and
   tolerate gaps.

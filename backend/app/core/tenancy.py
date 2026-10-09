@@ -116,6 +116,7 @@ SYSTEM_SCOPE_ALLOWED_MODULES: frozenset[str] = frozenset(
     {
         "app/core/tenancy.py",  # defines the scopes
         "app/services/auth_service.py",  # pre-org security events (login/refresh/logout)
+        "app/services/enrollment_service.py",  # pre-org enrollment-token hash lookup
         "app/services/event_bus.py",  # raw-frame consumers are cross-org by design
         "app/services/notification_service.py",  # claims undelivered rows, dispatches frames
         "app/tasks/_util.py",  # sweep_session(), the worker-side claim helper

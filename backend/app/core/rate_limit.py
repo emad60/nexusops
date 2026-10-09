@@ -56,6 +56,30 @@ def _memory_count_and_ttl(key: str, window_seconds: int) -> tuple[int, int]:
     return entry[1], max(ttl, 1)
 
 
+async def _enforce(
+    *, key: str, name: str, limit: int, window_seconds: int, fail_closed: bool
+) -> None:
+    """Shared fixed-window accounting for every limiter in this module."""
+    try:
+        redis = get_redis()
+        count = await redis.incr(key)
+        if count == 1:
+            await redis.expire(key, window_seconds)
+        ttl = await redis.ttl(key)
+    except Exception:
+        if not fail_closed:
+            log.warning("rate_limiter_unavailable", limiter=name)
+            return
+        # Auth/enrollment endpoints: degrade to the in-process limiter, never open.
+        count, ttl = _memory_count_and_ttl(key, window_seconds)
+    if count > limit:
+        retry_after = max(ttl, 1)
+        raise RateLimited(
+            f"Rate limit exceeded. Try again in {retry_after}s.",
+            retry_after=retry_after,
+        )
+
+
 def rate_limit(
     name: str, limit: int, window_seconds: int, *, fail_closed: bool = False
 ) -> Callable[[Request], Awaitable[None]]:
@@ -66,25 +90,44 @@ def rate_limit(
     """
 
     async def _dependency(request: Request) -> None:
-        key = f"nx:rl:{name}:{client_ip(request)}"
-        try:
-            redis = get_redis()
-            count = await redis.incr(key)
-            if count == 1:
-                await redis.expire(key, window_seconds)
-            ttl = await redis.ttl(key)
-        except Exception:
-            if not fail_closed:
-                log.warning("rate_limiter_unavailable", limiter=name)
-                return
-            # Auth endpoints: degrade to the in-process limiter, never open.
-            count, ttl = _memory_count_and_ttl(key, window_seconds)
-        if count > limit:
-            retry_after = max(ttl, 1)
-            raise RateLimited(
-                f"Rate limit exceeded. Try again in {retry_after}s.",
-                retry_after=retry_after,
-            )
+        await _enforce(
+            key=f"nx:rl:{name}:{client_ip(request)}",
+            name=name,
+            limit=limit,
+            window_seconds=window_seconds,
+            fail_closed=fail_closed,
+        )
+
+    return _dependency
+
+
+def node_rate_limit(
+    name: str, limit: int, window_seconds: int, *, fail_closed: bool = True
+) -> Callable[[Request], Awaitable[None]]:
+    """Return a dependency keyed on the **authenticated node**, not the IP.
+
+    A fleet behind one NAT should not share a single 600/min bucket: after
+    ``require_server`` has resolved the token, the bucket key is the node id, so
+    each machine gets its own allowance. The identity comes exclusively from
+    ``request.state.agent_server_id``, which only ``require_server`` sets after a
+    token lookup — an unauthenticated caller can never choose or consume another
+    node's bucket. When that state is absent (the dependency is used on a route
+    with no resolved node, or runs before authentication), the key falls back to
+    the client IP so the route is never unthrottled.
+
+    Fail-closed by default: losing Redis must not remove agent throttling.
+    """
+
+    async def _dependency(request: Request) -> None:
+        node_id = getattr(request.state, "agent_server_id", None)
+        identity = f"node:{node_id}" if node_id else f"ip:{client_ip(request)}"
+        await _enforce(
+            key=f"nx:rl:{name}:{identity}",
+            name=name,
+            limit=limit,
+            window_seconds=window_seconds,
+            fail_closed=fail_closed,
+        )
 
     return _dependency
 

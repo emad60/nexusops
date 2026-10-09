@@ -1,21 +1,26 @@
 [Unit]
-Description=NexusOps monitoring agent
-Documentation=https://github.com/your-org/nexusops/blob/main/docs/agent.md
+Description=NexusOps agent (protocol v2)
+Documentation=https://github.com/your-org/nexusops/blob/main/docs/node-agent-architecture.md
 After=network-online.target docker.service
 Wants=network-online.target
 
 [Service]
 Type=simple
-EnvironmentFile=/etc/default/nexusops-agent
+# ``-`` tolerates a missing file (e.g. first start before enrollment).
+EnvironmentFile=-/etc/default/nexusops-agent
 ExecStart=/usr/bin/env python3 /usr/local/lib/nexusops-agent/nexusops_agent.py
+# Restart=always keeps crash resilience; the agent itself no longer exits on a
+# rejected credential (it parks), so a revocation is not a restart storm.
 Restart=always
 RestartSec=10
-# Least privilege: read-only filesystem, only what metric collection needs.
+# Least privilege: read-only filesystem except the credential directory, which
+# the agent must be able to rewrite atomically when the control plane rotates it.
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=read-only
 PrivateTmp=true
 ReadOnlyPaths=/proc /sys
+ReadWritePaths=/etc/nexusops-agent
 SupplementaryGroups=docker
 
 [Install]

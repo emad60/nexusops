@@ -765,10 +765,11 @@ Two deliberate demo hooks, so real data is never mistaken for failure:
 - `sim://` monitor URLs are scheme-gated, so real http(s) monitors cannot
   collide with the keywords above.
 
-Also placeholder, not fake-but-plausible: the agent's `net_rx_kb_s` /
-`net_tx_kb_s` heartbeat fields are hardcoded `0.0`
-(`agent/nexusops_agent.py:398-399`); dashboards render zeros — no network I/O
-is collected yet (agent v2, Phase 3).
+Also honest, not fake-but-plausible: the agent's `net_rx_kb_s` / `net_tx_kb_s`
+heartbeat fields are measured from `/proc/net/dev` deltas over non-loopback
+interfaces and reported as **`null`** when not measurable (first sample, no
+interface, counter reset) — the platform renders `null` as *unavailable*, never
+as `0.0` throughput (Phase 3).
 
 ## 13. Known limitations
 

@@ -14,6 +14,16 @@ Every event carries its organization. Request paths inherit it from the tenancy
 scope; sweeps and workers pass it explicitly (there is no ambient answer once a
 worker acts across tenants); and the genuinely org-less events that remain are
 written under the system scope, which is also why no tenant can read them.
+
+A named actor (a user, a machine) is required to belong somewhere: publishing
+one without an organization raises, so tenant work can never be filed under no
+tenant. The narrow exception is :attr:`publish`'s ``instance_level`` opt-in, used
+only for the pre-organization authentication facts (a sign-in, a failed attempt,
+a sign-out or a password change for an account whose membership is none or
+ambiguous). Those are honest instance-level records: ``org_id IS NULL``, written
+under the system scope, dropped by the WS hub for every org subscriber, and
+invisible to every tenant-scoped read. It is deliberately explicit at each call
+site rather than a blanket allowance — nothing else may pass it.
 """
 
 from __future__ import annotations
@@ -134,6 +144,7 @@ async def publish(
     dedup_key: str | None = None,
     commit: bool = False,
     org_id: uuid.UUID | None = None,
+    instance_level: bool = False,
 ) -> SystemEvent | None:
     """Persist an event and fan it out to Redis. Returns None when deduplicated.
 
@@ -143,6 +154,11 @@ async def publish(
     pass ``org_id`` explicitly: there is no ambient answer, and the dispatcher
     matches notification channels by the frame's organization, so an event
     published to the wrong org is a cross-tenant notification.
+
+    ``instance_level=True`` is the *only* way a named actor may be published with
+    no organization, and it exists solely for pre-organization authentication
+    facts. It is opt-in per call so the invariant stays loud everywhere else; the
+    resulting row is ``org_id IS NULL`` and invisible to every tenant.
     """
     resolved_org = org_id if org_id is not None else current_org()
     if dedup_key is not None:
@@ -152,9 +168,12 @@ async def publish(
         if existing is not None:
             return None
 
-    if resolved_org is None and actor_type is not ActorType.SYSTEM:
+    if resolved_org is None and actor_type is not ActorType.SYSTEM and not instance_level:
         # A named actor (user or machine) always belongs somewhere; publishing
         # without an organization would file the event under no tenant at all.
+        # The one deliberate exception is a pre-org auth fact, which an operator
+        # cannot attribute to a single tenant and which therefore declares
+        # ``instance_level=True`` explicitly at its call site.
         raise TenancyScopeError(
             f"event {type!r} has an actor but no organization: pass org_id= or "
             f"run inside org_scope(...)"

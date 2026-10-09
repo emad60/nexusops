@@ -280,13 +280,44 @@ def test_logs_output_is_size_bounded(agent: Any, monkeypatch) -> None:
 # --- transport ----------------------------------------------------------------
 
 
-def test_plain_http_to_a_remote_host_is_refused(agent: Any) -> None:
+#: Every non-loopback destination that must be refused over plain HTTP. This
+#: includes link-local, which is deliberately *not* exempt: the credential can
+#: reach another host on that segment just as easily as any LAN peer.
+_NON_LOOPBACK_PLAIN_HTTP = [
+    "http://control-plane.example.com",  # ordinary DNS name
+    "http://localhost.evil.example",  # a name that merely starts with localhost
+    "http://10.0.0.5:8080",  # private LAN (RFC 1918)
+    "http://192.168.1.10",  # private LAN
+    "http://172.16.0.1",  # private LAN
+    "http://169.254.169.254",  # IPv4 link-local (cloud metadata)
+    "http://[fe80::1]:8080",  # IPv6 link-local
+    "http://[fd00::1]",  # IPv6 ULA
+    "http://8.8.8.8",  # public IPv4
+    "http://[2001:4860:4860::8888]",  # public IPv6
+    "http://0.0.0.0",  # unspecified address is not loopback
+]
+
+#: Genuine loopback only, where the credential cannot leave the host.
+_LOOPBACK_PLAIN_HTTP = [
+    "http://127.0.0.1:8000",
+    "http://127.5.5.5",  # the whole 127.0.0.0/8 range is loopback
+    "http://localhost",
+    "http://localhost:8000/api",
+    "http://[::1]",
+    "http://[::1]:8000",
+    "http://[::ffff:127.0.0.1]:8000",  # IPv4-mapped loopback
+]
+
+
+@pytest.mark.parametrize("url", _NON_LOOPBACK_PLAIN_HTTP)
+def test_plain_http_to_a_non_loopback_host_is_refused(agent: Any, url: str) -> None:
     with pytest.raises(ValueError, match="plain HTTP"):
-        agent.AgentClient("http://control-plane.example.com", "nxa_test")
+        agent.AgentClient(url, "nxa_test")
 
 
-def test_plain_http_to_loopback_is_allowed(agent: Any) -> None:
-    client = agent.AgentClient("http://127.0.0.1:8000", "nxa_test")
+@pytest.mark.parametrize("url", _LOOPBACK_PLAIN_HTTP)
+def test_plain_http_is_allowed_only_for_genuine_loopback(agent: Any, url: str) -> None:
+    client = agent.AgentClient(url, "nxa_test")
     assert client.use_tls is False
 
 
@@ -300,7 +331,65 @@ def test_https_uses_a_verifying_context(agent: Any) -> None:
     assert client._ctx.check_hostname is True
 
 
-def test_the_insecure_transport_flag_is_gone(agent: Any, monkeypatch) -> None:
+def test_https_with_a_private_ca_still_verifies(agent: Any) -> None:
+    """Trusting a private CA must not weaken verification."""
+    import certifi
+
+    client = agent.AgentClient(
+        "https://control-plane.internal", "nxa_test", ca_bundle=certifi.where()
+    )
+    assert client.use_tls is True
+    assert client._ctx is not None
+    assert client._ctx.verify_mode.name == "CERT_REQUIRED"
+    assert client._ctx.check_hostname is True
+    # The bundle is genuinely loaded (a non-empty trust store), not bypassed.
+    assert client._ctx.get_ca_certs()
+
+
+def test_a_missing_private_ca_bundle_fails_closed(agent: Any, tmp_path: Path) -> None:
+    """An unloadable CA file must error, never silently fall back to no verify."""
+    with pytest.raises(OSError):
+        agent.AgentClient(
+            "https://control-plane.internal",
+            "nxa_test",
+            ca_bundle=str(tmp_path / "does-not-exist.pem"),
+        )
+
+
+def test_a_refused_transport_sends_no_credential(
+    agent: Any, monkeypatch: Any, tmp_path: Path, capsys: Any
+) -> None:
+    """A link-local URL over plain HTTP must fail before any request or write."""
+    sent: list[Any] = []
+    original = agent.AgentClient.request
+
+    def spy(self: Any, *args: Any, **kwargs: Any) -> Any:
+        sent.append((args, kwargs))
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(agent.AgentClient, "request", spy)
+    token_file = str(tmp_path / "token")
+
+    code = agent.main(
+        [
+            "--server",
+            "http://169.254.169.254",
+            "--token",
+            "nxk_super_secret",
+            "--token-file",
+            token_file,
+        ]
+    )
+
+    assert code != 0, "a refused transport must exit non-zero"
+    assert sent == [], "no request (enrollment or heartbeat) may be attempted"
+    assert not Path(token_file).exists(), "no credential may be persisted"
+    err = capsys.readouterr().err
+    assert "refusing to start" in err
+    assert "nxk_super_secret" not in err, "the credential must never be echoed"
+
+
+def test_the_insecure_transport_flag_is_gone(agent: Any, monkeypatch: Any) -> None:
     """No CLI switch may disable TLS verification."""
     with pytest.raises(SystemExit):
         agent.main(["--server", "https://cp.example.com", "--token", "nxa_x", "--insecure"])

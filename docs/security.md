@@ -228,9 +228,16 @@ General API traffic fails open for availability, as documented in the module.
 Every mutating request writes an append-only audit row (`backend/app/services/audit_service.py`)
 with actor, action codename, target, request id, **organization**, and redacted
 metadata. Reads are tenant-scoped: the audit API returns only the active
-organization's rows (a pre-organization security event — a failed login for an
-unknown address, a refresh-token replay — is written with a NULL organization,
-visible to system scope only and never to a tenant). The API is read-only; there is
+organization's rows. A **pre-organization security event** — a failed login for an
+unknown address, a refresh-token replay, or a sign-in/sign-out/password change for
+an account whose memberships are none or several — is written with a NULL
+organization, visible to system scope only and never to a tenant. Such an event
+keeps its **identity** (the user is the actor) but is *not* attributed to any one
+tenant: picking an organization for a user who belongs to two would be a guess, and
+filing it under no tenant is the honest answer. The event bus enforces this: a
+named-actor event without an organization raises unless the call site explicitly
+declares it instance-level, and the WS hub drops a NULL-org frame for every org
+subscriber. The API is read-only; there is
 no update or delete path, and the database trigger that blocks `UPDATE`/`DELETE` on
 `audit_logs` predates tenancy and is unchanged — tenant scoping narrows who can
 *read* the trail, it does not widen who can rewrite it.

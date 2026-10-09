@@ -39,13 +39,16 @@ if [[ -z "$SERVER" ]]; then
   exit 2
 fi
 
-# HTTPS-only, with a loopback exemption for local testing. This mirrors the
-# agent's own check so a misconfigured URL fails before anything is installed.
+# HTTPS-only, with a **genuine loopback** exemption for local testing and
+# nothing else. This mirrors the agent's own check (`_require_loopback_plain_http`)
+# so a misconfigured URL fails before anything is installed. Link-local, private
+# LAN and public addresses all require https://; there is no insecure override.
 case "$SERVER" in
   https://*) : ;;
-  http://localhost*|http://127.0.0.1*|http://[::1]*|http://169.254.*) : ;;
+  http://localhost|http://localhost/|http://localhost:*|http://127.*|http://\[::1\]|http://\[::1\]/|http://\[::1\]:*) : ;;
   http://*)
     echo "refusing open HTTP server URL '$SERVER': credentials would be sent in the clear." >&2
+    echo "Only genuine loopback (localhost, 127.0.0.0/8, ::1) may skip TLS." >&2
     echo "Use https:// (terminate TLS at your edge)." >&2
     exit 2 ;;
   *)

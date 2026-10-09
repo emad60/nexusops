@@ -229,14 +229,16 @@ Added in the hardening pass (P1–P5 of the hardening brief):
    needing a non-universal capability is refused until the negotiation exists.
    What was already enforced: the node exists in the caller's org, is enrolled
    (`agent_enrolled_at`), and is not OFFLINE.
-3. **Operations: delivery to the agent is not wired.** The architecture's
-   "pending op ids in the heartbeat response" (§5.1) would change the heartbeat's
-   204 contract, which agents and the journey assert, and the docs require the
-   agent router to have **no GET endpoints**. So claim/result are reachable by id
-   but nothing hands the agent its ids yet, and the reference agent
-   (`agent/nexusops_agent.py`) does not poll or execute operations. The working
-   surface is complete and tested; the delivery path is the documented next step
-   (the architecture's own open question 2).
+3. **Operations: delivery to the agent is not wired — RESOLVED (Phase 3).**
+   *(At the time of this report, the architecture's "pending op ids in the
+   heartbeat response" (§5.1) would change the heartbeat's 204 contract, which
+   agents and the journey assert, so claim/result were reachable by id but nothing
+   handed the agent its ids, and the reference agent did not poll or execute
+   operations.)* Phase 3 resolved it exactly as the architecture proposed, without
+   breaking v1: negotiation is explicit, a **protocol-2** heartbeat returns
+   `200` + `pending_operations` while a protocol-1 agent still gets the original
+   `204`, and the reference agent claims, executes (closed registry) and reports
+   those operations. See `node-agent-architecture.md` §4.1/§5.
 4. **`Operator → DevOps` role rename remains deferred** (documented as pending in
    authorization.md), as does `servers` table / Python-internal renaming to
    `nodes`.

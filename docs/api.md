@@ -412,7 +412,7 @@ closes the socket with `4401`.
 
 | Channel | Required params | Permission(s) | Delivers |
 |---|---|---|---|
-| `global` | — | `event.read` | every system event of **this organization** published on the internal bus (frames from other organizations are dropped) |
+| `global` | — | `event.read` | every system event of **this organization** published on the internal bus (frames from other organizations are dropped, as is any instance-level frame with no organization — a pre-organization auth fact) |
 | `incidents` | — | `monitor.read` | only events whose type starts with `INCIDENT_` or `MONITOR_` |
 | `server-metrics` | `server_id` | `metric.read` **and** `node.read` | per-server metric samples |
 | `container-logs` | `container_id` | `container.logs` | container log lines |

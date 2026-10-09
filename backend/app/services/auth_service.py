@@ -88,8 +88,13 @@ async def _event(
     rid: str | None = None,
     data: dict[str, Any] | None = None,
     org_id: UUID | None = None,
+    instance_level: bool = False,
 ) -> None:
-    """Thin event_bus.publish wrapper keeping call sites readable."""
+    """Thin event_bus.publish wrapper keeping call sites readable.
+
+    ``instance_level`` is forwarded for the pre-organization auth events only
+    (see :func:`_auth_event_scope`).
+    """
     await event_bus.publish(
         db,
         type=type_,
@@ -101,7 +106,21 @@ async def _event(
         resource_id=rid,
         data=data,
         org_id=org_id,
+        instance_level=instance_level,
     )
+
+
+def _auth_event_scope(memberships: list[Membership]) -> tuple[UUID | None, bool]:
+    """Return ``(org_id, instance_level)`` for a pre-organization auth event.
+
+    Login, logout and password-change happen before (or without) a chosen
+    organization. A single active membership is unambiguous and the event is
+    attributed to it; zero or several memberships have no honest tenant answer,
+    so the event is filed at **instance level** (``org_id IS NULL``) with its
+    identity preserved. It is never guessed onto the first organization.
+    """
+    org_id = primary_org_of(memberships)
+    return org_id, org_id is None
 
 
 async def primary_org_for(db: AsyncSession, user_id: UUID) -> UUID | None:
@@ -357,8 +376,11 @@ async def _record_login_failure(
     # organization to attribute the row to, so it is written under a system
     # scope and remains invisible to every tenant.
     failure_org: UUID | None = None
+    failure_instance_level = False
     if ctx is not None:
-        failure_org = primary_org_of(await active_memberships(db, ctx.user_id))
+        failure_org, failure_instance_level = _auth_event_scope(
+            await active_memberships(db, ctx.user_id)
+        )
 
     async with system_write_scope(db, "auth.failed_login_audit"):
         await _audit(
@@ -381,6 +403,7 @@ async def _record_login_failure(
             res="user",
             data={"email": email},
             org_id=failure_org,
+            instance_level=failure_instance_level,
         )
     await db.commit()
 
@@ -468,8 +491,9 @@ async def login(
     memberships = await active_memberships(db, user.id)
     # Login is pre-org by definition, so the security trail is written under a
     # system scope with the organization resolved from the account's own
-    # memberships (a single membership is unambiguous; several are filed at
-    # instance level rather than guessed).
+    # memberships (a single membership is unambiguous; zero or several are filed
+    # at instance level rather than guessed).
+    login_org, login_instance_level = _auth_event_scope(memberships)
     async with system_write_scope(db, "auth.login_audit"):
         await _audit(
             db,
@@ -479,7 +503,7 @@ async def login(
             rid=user.id,
             meta={"email": email_norm},
             request=request,
-            org_id=primary_org_of(memberships),
+            org_id=login_org,
         )
         await _event(
             db,
@@ -490,7 +514,8 @@ async def login(
             res="session",
             rid=str(session.id),
             data={"ip": ip},
-            org_id=primary_org_of(memberships),
+            org_id=login_org,
+            instance_level=login_instance_level,
         )
     issued = _issue_access(user, session, raw_refresh)
     issued.memberships = memberships
@@ -673,7 +698,7 @@ async def logout(db: AsyncSession, *, ctx: AuthContext, request: Request | None 
     """
     if ctx.session_id is not None:
         await revoke_session(db, ctx.session_id, reason="logout")
-    memberships = await active_memberships(db, ctx.user_id)
+    logout_org, logout_instance_level = _auth_event_scope(await active_memberships(db, ctx.user_id))
     async with system_write_scope(db, "auth.logout_audit"):
         await _audit(
             db,
@@ -682,7 +707,7 @@ async def logout(db: AsyncSession, *, ctx: AuthContext, request: Request | None 
             res="session",
             rid=str(ctx.session_id) if ctx.session_id else None,
             request=request,
-            org_id=primary_org_of(memberships),
+            org_id=logout_org,
         )
         await _event(
             db,
@@ -692,7 +717,8 @@ async def logout(db: AsyncSession, *, ctx: AuthContext, request: Request | None 
             actor_type=ActorType.USER,
             res="user",
             rid=str(ctx.user_id),
-            org_id=primary_org_of(memberships),
+            org_id=logout_org,
+            instance_level=logout_instance_level,
         )
 
 
@@ -724,7 +750,7 @@ async def change_own_password(
     revoked = await revoke_all_user_sessions(
         db, user.id, reason="password_changed", exclude_session_id=ctx.session_id
     )
-    memberships = await active_memberships(db, user.id)
+    pwd_org, pwd_instance_level = _auth_event_scope(await active_memberships(db, user.id))
     async with system_write_scope(db, "auth.password_change_audit"):
         await _audit(
             db,
@@ -734,7 +760,7 @@ async def change_own_password(
             rid=user.id,
             meta={"revoked_other_sessions": revoked},
             request=request,
-            org_id=primary_org_of(memberships),
+            org_id=pwd_org,
         )
         await _event(
             db,
@@ -745,6 +771,7 @@ async def change_own_password(
             actor_type=ActorType.USER,
             res="user",
             rid=str(user.id),
-            org_id=primary_org_of(memberships),
+            org_id=pwd_org,
+            instance_level=pwd_instance_level,
         )
     return user

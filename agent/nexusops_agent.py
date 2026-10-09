@@ -756,26 +756,36 @@ class AgentClient:
             self._require_loopback_plain_http()
 
     def _require_loopback_plain_http(self) -> None:
-        """Refuse to send credentials over plain HTTP to a non-local server.
+        """Refuse to send credentials over plain HTTP to a non-loopback server.
 
         The ``X-Agent-Token`` header authenticates every call, and the enrollment
         token mints node identities. Over plain HTTP any passive observer on the
-        path captures it. Loopback/link-local targets are exempt because the
-        credential cannot leave the host; everything else is a hard error with
-        no override — terminate TLS at the edge instead.
+        path captures it. Only a **genuine loopback** destination is exempt —
+        ``localhost``, or an address in the ``127.0.0.0/8`` / ``::1`` ranges,
+        where the credential cannot leave the host. Everything else, including
+        link-local (169.254.0.0/16, fe80::/10), private LAN and public addresses,
+        is a hard error with no override — terminate TLS at the edge instead.
         """
-        host = self.host or ""
+        host = (self.host or "").strip()
+        # ``localhost`` is the only name exempted, and only as a whole host: a
+        # name like ``localhost.example.com`` resolves to a real remote host, so
+        # a prefix match would be an impersonation hole.
+        is_named_loopback = host.lower() in ("localhost", "localhost.")
         try:
-            addr = ipaddress.ip_address(host)
-            local = addr.is_loopback or addr.is_link_local
+            # ``ip_address`` rejects a bracketless/zoney form, so anything it
+            # cannot parse is treated as a remote name (never exempt). This also
+            # catches IPv4-mapped loopback (``::ffff:127.0.0.1``), whose
+            # ``is_loopback`` is true.
+            is_ip_loopback = ipaddress.ip_address(host).is_loopback
         except ValueError:
-            local = host.lower() in ("localhost", "localhost.")
-        if local:
+            is_ip_loopback = False
+        if is_named_loopback or is_ip_loopback:
             return
         raise ValueError(
             f"refusing to send the agent credential over plain HTTP to {host}:{self.port}. "
-            "Use an https:// server URL (terminate TLS at your edge). Certificate "
-            "verification is never disabled; trust a private CA with NEXUSOPS_CA_BUNDLE."
+            "Only genuine loopback (localhost, 127.0.0.0/8, ::1) may skip TLS; use an "
+            "https:// server URL (terminate TLS at your edge). Certificate verification "
+            "is never disabled; trust a private CA with NEXUSOPS_CA_BUNDLE."
         )
 
     def request(self, method: str, path: str, payload: dict | None = None) -> tuple[int, dict]:
@@ -999,9 +1009,14 @@ def main(argv: list[str] | None = None) -> int:
     interval = max(args.interval, 5)
 
     ca_bundle = args.ca_bundle or None
-    # A non-loopback plain-HTTP URL is refused here, before any credential is
-    # built or sent.
-    client = AgentClient(args.server, token, ca_bundle=ca_bundle)
+    # A non-loopback plain-HTTP URL (or an unloadable CA bundle) is refused here,
+    # before any credential is built or sent. Fail clearly and non-zero rather
+    # than with a traceback, and never fall back to an unverified transport.
+    try:
+        client = AgentClient(args.server, token, ca_bundle=ca_bundle)
+    except (ValueError, OSError) as exc:
+        print(f"[nexusops-agent] refusing to start: {exc}", file=sys.stderr)
+        return 2
 
     # Enrollment: an nxk_ token is exchanged once for this node's own credential.
     if token.startswith("nxk_"):

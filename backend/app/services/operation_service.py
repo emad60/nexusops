@@ -276,10 +276,13 @@ def _active_org() -> uuid.UUID:
 async def pending_ids_for_node(db: AsyncSession, server: Server, *, limit: int = 20) -> list[str]:
     """Ids the agent may claim for this node — oldest and most urgent first.
 
-    Read-only and node-scoped. Today it backs the dashboard/diagnostics view; the
-    heartbeat delivery path that hands these to the agent is the architecture's
-    open question 2 and is deliberately not wired into the heartbeat contract yet
-    (which would change its 204 response).
+    Read-only and node-scoped. Since Phase 3 this is the **delivery path**: the
+    protocol-2 heartbeat response carries these ids as ``pending_operations``,
+    and the agent then claims each one (the claim is the compare-and-set that
+    actually moves the row). Ids are hints, never authority — a claim for a row
+    that another beat already took, or that has passed its queue deadline, loses
+    the CAS and is refused. A protocol-1 agent never sees this list and keeps the
+    original 204 heartbeat contract (``api/v1/agent.py``).
     """
     now = _utcnow()
     rows = (

@@ -6,15 +6,15 @@
     "semantic_hash": "ffc5cd7959f74911269491997351494a"
   },
   "agent/install.sh": {
-    "mtime": 1791581319.317601,
-    "seen": 1791587770.953746,
-    "ast_hash": "6deb1ec08bf3814b957ed46051040e91",
+    "mtime": 1791588715.2973175,
+    "seen": 1791589467.5165675,
+    "ast_hash": "876599baac0a88bdb9342958cbded659",
     "semantic_hash": ""
   },
   "agent/nexusops_agent.py": {
-    "mtime": 1791581214.6746068,
-    "seen": 1791587770.9537477,
-    "ast_hash": "b2822d274e091dbd67eb62189332f804",
+    "mtime": 1791588768.2541363,
+    "seen": 1791589467.5165691,
+    "ast_hash": "0cecd6bcbc8e7e3a6f355fa7c1b8919f",
     "semantic_hash": ""
   },
   "backend/alembic/env.py": {
@@ -594,9 +594,9 @@
     "semantic_hash": ""
   },
   "backend/app/services/auth_service.py": {
-    "mtime": 1790113715.4040623,
-    "seen": 1790274598.3963046,
-    "ast_hash": "8e777bcb833d9080dd33b85e47295745",
+    "mtime": 1791588390.2602098,
+    "seen": 1791589467.5166957,
+    "ast_hash": "adef185cc8b27a682d419318f0183491",
     "semantic_hash": ""
   },
   "backend/app/services/container_service.py": {
@@ -618,9 +618,9 @@
     "semantic_hash": ""
   },
   "backend/app/services/event_bus.py": {
-    "mtime": 1791328213.8547826,
-    "seen": 1791328960.3472703,
-    "ast_hash": "f650ce14c6cf35feb32a14be9e503524",
+    "mtime": 1791588332.0230105,
+    "seen": 1791589467.516702,
+    "ast_hash": "7b52691d2e9fa802865f2436096b6207",
     "semantic_hash": ""
   },
   "backend/app/services/event_registry.py": {
@@ -1494,9 +1494,9 @@
     "semantic_hash": ""
   },
   "docs/api.md": {
-    "mtime": 1791585041.053395,
-    "seen": 1791587770.9540746,
-    "ast_hash": "53c8bfb26a0cc6dd81769f134a1a1228",
+    "mtime": 1791589390.7571545,
+    "seen": 1791589467.5168972,
+    "ast_hash": "e65de429040b7cdc21d03901241aebcd",
     "semantic_hash": ""
   },
   "docs/architecture.md": {
@@ -1524,9 +1524,9 @@
     "semantic_hash": "50ac6a5872a6cf8d7071b2064da53aed"
   },
   "docs/security.md": {
-    "mtime": 1791585120.0919812,
-    "seen": 1791587770.9540915,
-    "ast_hash": "53cd42839f0b1151654fa79d0c5724df",
+    "mtime": 1791589378.8131552,
+    "seen": 1791589467.516915,
+    "ast_hash": "d5e9c85c9121905eed750005c1e48f74",
     "semantic_hash": ""
   },
   "docs/troubleshooting.md": {
@@ -1764,9 +1764,9 @@
     "semantic_hash": ""
   },
   "backend/app/services/operation_service.py": {
-    "mtime": 1791579979.582675,
-    "seen": 1791587770.9538882,
-    "ast_hash": "1c0bcdda34df89dd1c72098b13c852ab",
+    "mtime": 1791588623.154297,
+    "seen": 1791589467.5167093,
+    "ast_hash": "d7a203063a5dc71ad6b875252e1d70a9",
     "semantic_hash": ""
   },
   "backend/tests/integration/test_operations.py": {
@@ -1788,9 +1788,9 @@
     "semantic_hash": ""
   },
   "docs/phase1-report.md": {
-    "mtime": 1791329961.4465406,
-    "seen": 1791502365.9987543,
-    "ast_hash": "7af96229303c30be7c07e8cda1c0510b",
+    "mtime": 1791588658.789324,
+    "seen": 1791589467.5169103,
+    "ast_hash": "c1ac8c990c054a4c1c1f96b33b51f0c5",
     "semantic_hash": ""
   },
   "backend/alembic/versions/20261006_1200-f1a2b3c4d5e6_fix_schema_drift.py": {
@@ -1962,15 +1962,21 @@
     "semantic_hash": ""
   },
   "backend/tests/unit/test_agent_v2.py": {
-    "mtime": 1791581391.350597,
-    "seen": 1791587770.9539428,
-    "ast_hash": "060f0d47125885a834540f5e51cb74b5",
+    "mtime": 1791588794.5381875,
+    "seen": 1791589467.5167668,
+    "ast_hash": "5e2cb590cd2cee1fc2c7eb00d1711b4e",
     "semantic_hash": ""
   },
   "frontend/e2e/phase3.spec.ts": {
     "mtime": 1791587051.6832838,
     "seen": 1791587770.9539726,
     "ast_hash": "121c4a39b24cc470bdef545507ef53c6",
+    "semantic_hash": ""
+  },
+  "backend/tests/integration/test_auth_multi_org.py": {
+    "mtime": 1791588866.3741834,
+    "seen": 1791589467.5167391,
+    "ast_hash": "5af5a8145a543c63f238e6871d9fe2ee",
     "semantic_hash": ""
   }
 }

@@ -333,10 +333,10 @@ Entity status against the target model:
 | Organization / Membership | `organizations` / `memberships` | new | tenant root; user↔org via Membership with role + status |
 | Node | `servers` (kept) | existing, renamed at surface | + `org_id`, capabilities + facts; codenames `node.*` (renamed from `server.*`) |
 | DockerEndpoint | `docker_hosts` (kept) | existing | exposed as part of Node; 0..1 per node |
-| Environment | `deployment_environments` | **promoted (Phase 2)** | `application_id` → `project_id`; `environment_type` DEV/STAGING/PROD; `server_id` target node; unique `(project_id, slug)` |
+| Environment | `deployment_environments` | **promoted (Phase 2)** | `application_id` → `project_id`; `environment_type` DEV/STAGING/PROD (legacy rows corrected in Phase 2.1, migration `d4e5f6a7b8c9`); `server_id` target node; unique `(project_id, slug)` |
 | Domain / Route / Certificate | `domains` / `routes` / `certificates` | new | DNS-verified domains; hostname+path routes; ACME certs |
 | Operation | `operations` | new | whitelisted remote ops the agent pulls; permissioned + audited |
-| Secret / SecretVersion | `secrets` / `secret_versions` | existing / **new (Phase 2)** | org/project/environment layered scope, most specific wins; append-only version history with transactional rotation and non-destructive rollback |
+| Secret / SecretVersion | `secrets` / `secret_versions` | existing / **new (Phase 2)** | org/project/environment layered scope, most specific wins; append-only version history (DB-enforced since Phase 2.1, §10.1) with transactional rotation and non-destructive rollback |
 | Delivery set | `projects`, `applications`, `deployments`, `deployment_steps` | existing | + `org_id` (project; denormalized on deployment) |
 | Observability set | monitors, checks, incidents, snapshots, logs, events, audit, alerts, channels, deliveries | existing | + `org_id` on monitors/incidents/channels/audit/events |
 | Role (custom, org-scoped) | `roles` (kept) | re-scoped | + nullable `org_id` (`NULL` = system template); org custom roles come later |
@@ -661,6 +661,37 @@ So even a compromised or buggy application role cannot rewrite or erase
 history; corrections are new rows. There is intentionally no API surface for
 editing audit entries — `audit.read` is read-only. *Target:* the table gains
 `org_id` + `request_id` so trails partition per org (multi-tenancy.md §1).
+
+### 10.1 `secret_versions` — the same guarantee, cascade-aware (Phase 2.1)
+
+Secret history gets the same treatment. Phase 2 called `secret_versions`
+append-only but granted the runtime role `UPDATE`/`DELETE`; migration
+`c3d4e5f6a7b8` revokes both (the app role keeps `SELECT`/`INSERT`) and adds a
+guard trigger that must allow the one legitimate delete — the FK cascade that
+purges a Secret's history when the Secret itself is hard-deleted:
+
+```sql
+CREATE OR REPLACE FUNCTION nexusops_block_secret_version_mutation() RETURNS trigger AS $$
+BEGIN
+    IF TG_OP = 'UPDATE' THEN
+        RAISE EXCEPTION 'secret_versions is append-only (attempted UPDATE of version %)', OLD.version;
+    END IF;
+    IF EXISTS (SELECT 1 FROM secrets s WHERE s.id = OLD.secret_id) THEN
+        RAISE EXCEPTION 'secret_versions rows are removed only by deleting their parent secret (attempted DELETE of version %)', OLD.version;
+    END IF;
+    RETURN OLD;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER secret_versions_no_mutation BEFORE UPDATE OR DELETE ON secret_versions
+FOR EACH ROW EXECUTE FUNCTION nexusops_block_secret_version_mutation();
+```
+
+PostgreSQL runs referential actions *after* the parent row is deleted, so "the
+parent is gone" is true only inside the cascade — a direct `DELETE FROM
+secret_versions` is refused even for the table owner. Deleting a Secret remains a
+hard delete that purges its history (secrets-architecture.md §3, domain-model.md
+§2.5).
 
 ## 11. Scheduling and simulation mode
 

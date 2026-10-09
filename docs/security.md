@@ -149,15 +149,37 @@ the delivered code, not the plan.
 | 4 | Rollback authorization | Rollback requires `secret.write` and only accepts a version that exists **for that secret**; it appends a new version rather than rewriting history, so it can never destroy the pre-rollback value. | Closed |
 | 5 | Plaintext leakage | No secret-bearing schema has a value field; project/environment detail returns references and key **names** only; resolution runs inside the deployment's worker and never returns through a response. The SPA renders no value column anywhere, including version history. | Closed — API tests assert the response bodies carry no value; SPA tests assert no value column |
 | 6 | Secret consumption vs metadata | `secret.read` (metadata) stays separate from the deploy chain. No endpoint resolves a secret on request. | Closed — but see the limitation below on grant narrowing |
-| 7 | Raw SQL / RLS | `secret_versions` carries `org_id` with the standard tenant + system policies and is in the catalog test's scope. The tenant-scoped SQL uses ORM selects (the tenancy guard rejected a Core `select(1)` probe during development, confirming the guard applies to the new code paths). | Closed — catalog + raw-SQL probes unchanged and green |
+| 7 | Raw SQL / RLS | `secret_versions` carries `org_id` with the standard tenant + system policies and is in the catalog test's scope. The tenant-scoped SQL uses ORM selects (the tenancy guard rejected a Core `select(1)` probe during development, confirming the guard applies to the new code paths). Since Phase 2.1 the append-only guarantee is **database-enforced** — the runtime role holds `SELECT`/`INSERT` only and a guard trigger refuses `UPDATE` and non-cascade `DELETE` (fourth review below). | Closed — catalog + raw-SQL probes unchanged and green |
 | 8 | Environment type | `environment_type` is descriptive only. Nothing in the authorization path reads it. | Closed by construction |
 | 9 | Config as a channel | Config is a flat, bounded `string → string` map; malformed secret refs are rejected; nothing in config is interpolated or executed. | Closed |
 
 **Residual risk carried forward:** resource-level grants do not exist yet, so a
 principal holding `deployment.create` may deploy *any* environment of its own
 organization, and therefore can cause any referenced secret of that organization to
-be consumed by a deployment. That is a known, documented gap (roadmap Phase 7) —
-not an accidental hole — and it is why resolution is audited per reference.
+be consumed by a deployment. That is a known, documented gap — not an accidental
+hole — and it is why resolution is audited per reference. Since Phase 2.1 it is
+pinned as a **hard gate** on real deployments and secret delivery
+(product-roadmap.md §9.0): the four boundaries (view metadata / create a
+deployment / deploy to an environment / consume that environment's secrets) must be
+reviewed and enforced before 6a, not after.
+
+## Fourth security review — secret-version integrity (Phase 2.1, 2026-10-09)
+
+A narrow, database-level review prompted by one inconsistency: Phase 2 called
+`secret_versions` append-only but granted the runtime role `UPDATE`/`DELETE` on it,
+so the guarantee lived only in the service layer having no mutation path.
+
+| # | Surface | Finding | Status |
+| --- | --- | --- | --- |
+| 1 | Runtime mutation | The app role's `UPDATE`/`DELETE` on `secret_versions` are revoked; it holds `SELECT`/`INSERT` only. A raw-SQL probe as the app role is refused on both statements. | Closed — `test_phase21_secret_version_integrity.py` |
+| 2 | Privileged rewrite | A `BEFORE UPDATE OR DELETE` trigger refuses `UPDATE` for every role (owner included) and refuses `DELETE` unless the parent Secret is already gone — i.e. only the FK cascade. Immutability does not rest on grants alone. | Closed — owner-role probe asserts the trigger message |
+| 3 | Cascade / purge | Deleting a Secret still purges its versions (the documented hard-delete policy); the trigger allows the cascade and refuses a direct delete. Rotation and rollback still append. | Closed — API tests + direct-delete probe |
+| 4 | RLS preserved | No RLS bypass introduced; the app role stays `NOBYPASSRLS`, and version rows remain tenant-scoped (org A sees its row; org B and an unset GUC see nothing). | Closed |
+| 5 | Role separation | The guard is a plain trigger firing for the invoking role — no `SECURITY DEFINER`, no owner-role request path. | Closed by construction |
+
+**Residual / open:** history is retained only for the life of its Secret —
+deleting the Secret destroys it (and is audited). A tombstone/grace period remains
+an open question, not a shipped control; the §3 prune job still does not exist.
 
 ## Transport and headers
 
@@ -172,7 +194,7 @@ not an accidental hole — and it is why resolution is audited per reference.
 - **Never returned after creation.** Agent enrollment tokens, API keys and notification-channel credentials are shown once in the UI with an explicit "stored only as a hash" notice; only a salted hash is persisted.
 - `digest_of` (`backend/app/core/security.py`) renders a short, server-keyed HMAC digest for change-detection UI — a leaked digest is useless without the app secret, unlike a plain SHA-256.
 - Secret *values* never appear in logs, audit records, or API responses; the redaction layer (`redact_mapping` in `backend/app/core/logging.py`) scrubs sensitive-named keys from structured payloads before they are persisted or logged. Caveat: it recurses dicts but not lists (platform-security-model.md S8).
-- **Scopes and history (Phase 2).** A secret is org-, project- or environment-scoped, resolved most-specific-first (environment > project > organization). Rotation appends an immutable version; rollback re-appends an older value as a *new* version, so history is never rewritten or deleted. Version history exposes version numbers, digests and actors only. Deleting a secret cascades its history — the one destructive secret operation, gated by `secret.write` and audited.
+- **Scopes and history (Phase 2; append-only enforced in the database since Phase 2.1).** A secret is org-, project- or environment-scoped, resolved most-specific-first (environment > project > organization). Rotation appends an immutable version; rollback re-appends an older value as a *new* version, so history is never rewritten or deleted. Since Phase 2.1 the runtime role holds `SELECT`/`INSERT` only on `secret_versions` and a trigger refuses `UPDATE`/non-cascade `DELETE`, so history cannot be rewritten even by a privileged SQL path. Version history exposes version numbers, digests and actors only. Deleting a secret cascades its history — the one destructive secret operation, gated by `secret.write` and audited.
 - **Fail-closed resolution.** An unresolvable reference fails the deployment before its first step instead of substituting an empty value; the failure reason names the key, never the value.
 - Probe headers on uptime monitors are echoed back **masked** (`mask_sensitive_headers` in `backend/app/schemas/monitor.py`) and monitor URL query strings are redacted in responses (`_redact_url_query`).
 - Notification channels expose only a pre-masked `display_target` (e.g. `sm******@example.com`, path-stripped URLs) — `backend/app/schemas/channel.py`.

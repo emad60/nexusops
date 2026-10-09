@@ -656,8 +656,12 @@ route returns all three layers separately so a client can show provenance:
 ```
 
 `environment_type` accepts `dev`/`staging`/`prod` (and the `development`/`stage`/
-`production` spellings) case-insensitively. It is **descriptive**: authorization is
-permission-based, never derived from the environment kind.
+`production` spellings) case-insensitively, and defaults to `DEV`. It is
+**descriptive**: authorization is permission-based, never derived from the
+environment kind. Environments created before this field existed were defaulted
+to `DEV` and were corrected in Phase 2.1 by an explicit, case-insensitive mapping
+of the exact slug/name aliases (`production`/`prod` → `PROD`, `staging`/`stage` →
+`STAGING`; `dev`/`development` and anything unknown stay `DEV`).
 
 Secret resolution at deploy time prefers the most specific scope —
 **environment > project > organization** — and **fails closed**: an unresolvable

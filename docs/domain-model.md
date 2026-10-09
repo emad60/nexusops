@@ -200,6 +200,18 @@ active-org header, and an `active` membership in that org is required. Consequen
   naming convention (`_slugify`), so `Production`, `production` and `PRODUCTION`
   in the same project collapse onto one slug and the second such request is
   rejected as a duplicate.
+- **Environment kind (`environment_type`) was never recorded before Phase 2**, so
+  the Phase 2 migration defaulted every legacy row to `DEV`. The Phase 2.1
+  corrective migration (`d4e5f6a7b8c9`) reclassifies the unambiguous cases with a
+  small, explicit, case-normalised mapping — `production`/`prod` → `PROD`,
+  `staging`/`stage` → `STAGING`, `dev`/`development` and anything unknown → `DEV`
+  — matching exact slug/name aliases (trimmed, case-insensitive; the slug wins
+  when slug and name disagree). Only rows still carrying the Phase 2 `DEV`
+  default are candidates, so an operator's explicit post-Phase-2 classification
+  is never overwritten. The correction updates one descriptive column in place:
+  environment ids, deployments, uniqueness, organization ownership and RLS are
+  untouched. `environment_type` remains descriptive only — never an authorization
+  dimension.
 - **Deployment rows keep** `(application_id, environment_id)` — the pair now means
   "application deployed into project environment". `application_id` is *not*
   removed: an application is the thing that deploys, the environment is where.
@@ -252,7 +264,7 @@ overlap — Operation is not renamed to Task (collides with Celery tasks) or Act
 | Entity | Table | Changes | Notes |
 |---|---|---|---|
 | **Secret** | `secrets` | + org_id; scope via (org_id, project_id?, environment_id?) | Org / project / environment layered scope, most specific wins. Resolution is fail-closed. |
-| **SecretVersion** | `secret_versions` | secret_id, version, ciphertext, digest, created_by_id, created_at; uq `(secret_id, version)` | Append-only history. Rotation appends a version and moves the parent's pointer; rollback re-appends an earlier value as a **new** version, so nothing is rewritten or deleted. |
+| **SecretVersion** | `secret_versions` | secret_id, version, ciphertext, digest, created_by_id, created_at; uq `(secret_id, version)` | Append-only history, **enforced in the database** since Phase 2.1 (`c3d4e5f6a7b8`): the runtime role holds `SELECT`/`INSERT` only, and a guard trigger refuses `UPDATE` and any `DELETE` that is not the FK cascade from deleting the parent Secret. Rotation appends a version and moves the parent's pointer; rollback re-appends an earlier value as a **new** version. Deleting the Secret purges its versions (hard delete, no tombstone). |
 
 Authorization stays split: `secret.read` is *metadata* only, `secret.write`
 manages values, and neither is the permission that lets a deployment **consume** a

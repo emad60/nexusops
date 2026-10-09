@@ -94,7 +94,7 @@ Four-way classification, grounded in the subsystem analysis (evidence in
 | 3 | Nodes & agent v2 | capabilities+facts, enrollment v2, **per-node capability advertisement + operations delivery** (the control plane and the fail-closed gate are already in), HTTPS-only agent | 1 |
 | 4 | Domains & routes | Domain/Route entities, DNS verification, NginxProvider, apply pipeline, polymorphic monitors | 3 |
 | 5 | Certificates | ACME DNS-01, DNSProvider (Cloudflare first), renewal scan, encrypted delivery, TLS-expiry monitors | 4 |
-| 6 | Real deployments | 6a image-based via agent ops; 6b git→build on node | 3 (6a), 3+4 (6b) |
+| 6 | Real deployments | 6a image-based via agent ops; 6b git→build on node | 3 (6a), 3+4 (6b) — **and the deployment-secret authorization gate (§9.0), which must close before 6a ships** |
 | 7 | Teams, grants & custom roles | teams, resource-level grants, custom roles | 2 |
 | 8 | Backups | policies/runs/destinations, verify + restore drill | 3, 7 |
 | 9 | Billing & metering | usage-counter enforcement, plan gates | 1, 2 |
@@ -254,7 +254,8 @@ Spec: domain-model.md §2.2.1.
 - **Deploy-chain (grant-narrowed) authorization is NOT implemented** — grants are
   a later phase (§10). Today a principal holding `deployment.create` may deploy
   any environment of its organization. The `secret.read` ≠ secret-consumption
-  split *is* enforced.
+  split *is* enforced. **This is now a hard gate on real deployments and secret
+  delivery (§9.0): it must be reviewed and enforced before 6a, never after.**
 - The project page shows environments but no per-environment deployment actions —
   deployments stay on the existing pages.
 
@@ -337,6 +338,45 @@ servers and wildcards. Spec: [certificate-management.md](certificate-management.
 (`plan_steps`/`execute_step`/`StepLine`) survives; the simulation becomes one
 registered runner among two. Spec: [deployment-architecture.md](deployment-architecture.md).
 
+### 9.0 Authorization gate — a prerequisite, NOT a follow-up
+
+**No real deployment execution and no secret delivery to a customer node may
+ship before this gate closes.** It is written first, and as a gate rather than a
+hardening note, because the feature needs it — scheduling the authorization
+review *after* real deploys or secret delivery would ship the exposure first and
+close it later.
+
+Today a principal holding `deployment.create` may deploy **any** environment of
+its organization (see §5 "Deviations"; [secrets-architecture.md](secrets-architecture.md)
+§4/§5). With the simulated runner that is tolerable — nothing leaves the control
+plane. The moment 6a executes on a real node, the same permission begins
+*delivering that environment's secrets to that node*. Four boundaries that are
+today collapsed into one must be reviewed and enforced, each as its own decision:
+
+| Boundary | Question it must answer | Today |
+|---|---|---|
+| **View secret metadata** (`secret.read`) | Who may see key names, versions, digests and scope? | Enforced; no endpoint returns a value |
+| **Create a deployment** (`deployment.create`) | Who may queue a deployment run at all? | Enforced, organization-wide |
+| **Deploy to a specific environment** | Who may target *this* environment (e.g. staging but not production)? | **Not enforced** — `deployment.create` is a blanket org permission (resource-level grants are §10 / Phase 7) |
+| **Consume that environment's secrets** | Who may cause this environment's referenced secrets to be resolved and delivered to its node? | **Implicit** — follows the deploy; must become an explicit, audited consequence of the environment-target boundary, never a side effect |
+
+The gate closes only when all of the following hold:
+
+- (a) the **environment-target** boundary is *enforced*, not merely documented,
+at the moment a deployment is created or executed — the minimal mechanism is the
+environment-scoped grant from §10, which may be pulled forward for this purpose;
+- (b) **secret consumption** is authorized *through* that boundary, so neither
+`secret.read` nor any unrelated permission can trigger resolution or delivery;
+- (c) the four boundaries are written down in [authorization.md](authorization.md)
+and exercised by an integration test — the Ali/Ahmed scenario currently listed as
+§10's *exit* becomes a gate test here;
+- (d) resolution and delivery remain audited per
+[secrets-architecture.md](secrets-architecture.md) §4.1/§7.
+
+Until the gate closes, 6a stays behind the simulated runner and the honesty chip:
+no real node execution, no secret delivery. This is why grants (§10) and real
+deploys (§9) are no longer independently schedulable — the gate couples them.
+
 - **DB:** minimal — deployments gain image/git columns in 6a/6b respectively.
 - **API:** deploy trigger takes an image (6a) or git source (6b); step lines
   stream over the existing Redis deployment channel; per-step timeouts +
@@ -354,7 +394,7 @@ registered runner among two. Spec: [deployment-architecture.md](deployment-archi
   (minimization); deploy permission chain authorizes resolution; ops audited.
   Current gap (security-model H2): the real runner path never receives resolved
   secrets today — `docker_real.py` has zero `ctx.secrets` references; only the
-  simulated runner consumes them. 6a wires them in.
+  simulated runner consumes them. 6a wires them in — **after §9.0 closes**.
 - **Testing:** e2e against `docker_sim` in CI; real-node e2e manual; rollback
   = new deployment re-deploying last good version (existing behavior kept).
 - **Exit:** image deploy on a real node; health gate blocks routing on
@@ -473,11 +513,12 @@ which the category earns a phase of its own:
 | **Self-serve signup** | Gated on billing plans (multi-tenancy.md §2.1): open registration + abuse control + plan enforcement ship together, as one phase. |
 | **Usage-tier billing** | The Phase 1 metering counters (domain-model.md §2.7) have accumulated real usage cycles — rates need data to be defensible. |
 
-**Waits until later (each behind its gate above):** 6b (git→build), 7
-(teams/grants/custom roles), 8 (backups), 9 (billing enforcement). **Stays out
-entirely** (non-goals, platform-vision §2.1): Kubernetes as the primary runtime,
-a CI engine, a log platform at scale, arbitrary remote shell, multi-region
-control plane.
+**Waits until later (each behind its gate above):** 6b (git→build), the remainder
+of 7 (teams/custom roles — the environment-scoped grant the §9.0 gate needs may
+ship early), 8 (backups), 9 (billing enforcement). **Stays out entirely**
+(non-goals, platform-vision §2.1): Kubernetes as the primary runtime, a CI
+engine, a log platform at scale, arbitrary remote shell, multi-region control
+plane.
 
 ## 14. Biggest risks (short form)
 

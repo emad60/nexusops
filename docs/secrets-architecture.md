@@ -3,9 +3,11 @@
 **Status:** §1 shipped (Fernet store, metadata-only reads, deploy-time resolution).
 **Phase 2 shipped §2 (org/project/environment scope), §3 (SecretVersion history,
 transactional rotation, non-destructive rollback) and the fail-closed policy of
-§5.** Still proposal, not built: per-node delivery (§7), the per-org DEK envelope
-(§6), and the §3 prune job.
-**Date:** 2026-09-20 (status updated 2026-10-08)
+§5. Phase 2.1 hardened §3: the append-only guarantee is now enforced by
+PostgreSQL (revoked grants + a row-level guard trigger), not only by the service
+layer.** Still proposal, not built: per-node delivery (§7), the per-org DEK
+envelope (§6), and the §3 prune job.
+**Date:** 2026-09-20 (status updated 2026-10-09)
 **Reads best after:** [domain-model.md](domain-model.md) §2.5 · [multi-tenancy.md](multi-tenancy.md) §3, §4 · [authorization.md](authorization.md) §3
 
 ---
@@ -52,7 +54,8 @@ Consequence: the key namespace is **per organization** — the pre-Phase-2
 platform-wide global namespace is gone, and Org A's `STRIPE_KEY` never collides
 with, nor resolves for, Org B.
 
-`secret_versions` (append-only; migration `b2c3d4e5f6a7`):
+`secret_versions` (append-only — created by migration `b2c3d4e5f6a7`, DB-enforced
+by `c3d4e5f6a7b8`):
 
 | Column | Purpose |
 |---|---|
@@ -244,11 +247,33 @@ Mechanics — one transaction per operation:
    current volumes, unbounded history is cheaper than the risk of a wrong prune
    policy; no user-facing delete of versions exists.
 
-Append-only is enforced **application-side** (the service layer has no UPDATE or
-DELETE path against `secret_versions`) plus a uq `(secret_id, version)` constraint
-that makes a rewound write fail loudly. There is deliberately no DB trigger —
-contrast `audit_logs`' `nexusops_block_audit_mutation`. Deleting a *secret* cascades
-its versions (hard delete, no tombstone); §Open questions revisits that.
+Append-only was, in Phase 2, enforced only **application-side** (the service layer
+had no UPDATE or DELETE path against `secret_versions`) plus the uq
+`(secret_id, version)` constraint — but the migration *granted* the runtime role
+`UPDATE` and `DELETE`, so nothing stopped a bug or a rogue worker from rewriting
+history. **Phase 2.1 (migration `c3d4e5f6a7b8`) makes the guarantee real in the
+database:**
+
+- the runtime app role holds **`SELECT` + `INSERT` only** on `secret_versions` —
+  `UPDATE` and `DELETE` are revoked;
+- a row-level `BEFORE UPDATE OR DELETE` trigger
+  (`nexusops_block_secret_version_mutation`) refuses `UPDATE` outright and refuses
+  `DELETE` unless the parent `secrets` row is already gone. PostgreSQL runs
+  referential actions *after* the parent row is deleted, so that condition is
+  exactly the FK's `ON DELETE CASCADE`: a direct `DELETE FROM secret_versions` is
+  refused even for the owner (the trigger fires for every role), while deleting
+  the Secret still purges its versions;
+- the uq `(secret_id, version)` constraint remains the backstop against a rewound
+  write.
+
+**Deletion policy (explicit).** Deleting a Secret is a hard delete that cascades
+its entire version history — history is retained for the lifetime of the Secret,
+**not** in perpetuity, and the docs no longer imply otherwise. The purge itself
+is recorded in the append-only `audit_logs` (`secret.delete`); no ciphertext
+survives. Project/environment deletion cascades the same way
+(`projects → deployment_environments → secrets → secret_versions`), and there is
+today no organization-delete endpoint. A tombstone with a grace period remains an
+explicit *open question* below — it is not shipped behavior.
 
 Audit: `secret.created`, `secret.rotated` and `secret.rolled_back` rows carry the
 key name and version numbers only — never a value.
@@ -539,7 +564,7 @@ sequenceDiagram
 
 ---
 
-## Decided in Phase 2
+## Decided in Phase 2 — and hardened in Phase 2.1
 
 - **`secrets.ciphertext` retained** as the denormalized current value alongside the
   immutable history row (§3). Dropping it would put a join on the deploy-time read
@@ -547,13 +572,18 @@ sequenceDiagram
 - **Save-time validation rejects malformed refs, not unresolved ones** (§5). A ref
   naming no secret is legal at authoring time and fails the deployment closed at
   deploy time; the failure reason names the key.
-- **Secret deletion is a hard delete cascading its versions** (§3).
+- **Secret deletion is a hard delete cascading its versions** (§3) — reconfirmed
+  in Phase 2.1 and now enforced at the database level: version rows cannot be
+  rewritten or directly deleted by any role; only deleting the parent Secret
+  removes them. History lives as long as its Secret does.
 
 ## Open questions
 
 - SecretVersion prune defaults (last N = 10? 30-day floor?); org-configurable window? (§3)
 - Secret deletion: is a tombstone with a grace period worth it for accidental
-  deletes? Today it is an immediate cascade with an audit row (§3).
+  deletes? Today it is an immediate cascade with an audit row (§3) — *decided in
+  Phase 2.1 as: keep the immediate cascade*; a tombstone would need its own
+  migration and a soft-delete path, neither of which is scheduled.
 - Delivery-op params: scrub-and-keep-row-for-audit vs delete the row — deadline
   is decided (terminal state or expires_at, whichever first, §7); open choice is
   keep vs delete. (§7)

@@ -792,9 +792,9 @@
     "semantic_hash": "3030345a78b0b5a28ff3d47bd4062884"
   },
   "backend/tests/integration/conftest.py": {
-    "mtime": 1790115889.1738174,
-    "seen": 1790274598.3963385,
-    "ast_hash": "92c8a30f0bab5a02f7b5755c0fe24947",
+    "mtime": 1791504270.8465638,
+    "seen": 1791504757.7352357,
+    "ast_hash": "8750c43aebc989553a5d9144fa115a4c",
     "semantic_hash": ""
   },
   "backend/tests/integration/helpers.py": {
@@ -1494,15 +1494,15 @@
     "semantic_hash": ""
   },
   "docs/api.md": {
-    "mtime": 1791497664.7559292,
-    "seen": 1791502365.998742,
-    "ast_hash": "87ff3d37f8afdf3a0ca2d9328cad656f",
+    "mtime": 1791504183.8785686,
+    "seen": 1791504757.735413,
+    "ast_hash": "2a75a472fd5cc2611d330b9df3ffaa95",
     "semantic_hash": ""
   },
   "docs/architecture.md": {
-    "mtime": 1791500308.178783,
-    "seen": 1791502365.998743,
-    "ast_hash": "bf66834056470d49085d8236c9b41ef1",
+    "mtime": 1791504156.7055702,
+    "seen": 1791504757.735414,
+    "ast_hash": "b88273d17f2473d5158296b45b0568b7",
     "semantic_hash": ""
   },
   "docs/deployment.md": {
@@ -1524,9 +1524,9 @@
     "semantic_hash": "50ac6a5872a6cf8d7071b2064da53aed"
   },
   "docs/security.md": {
-    "mtime": 1791497732.6349256,
-    "seen": 1791502365.9987588,
-    "ast_hash": "2ed0fa2bf43314a5c40487a4c02a5df9",
+    "mtime": 1791504124.540572,
+    "seen": 1791504757.7354305,
+    "ast_hash": "9b4316ef54bd8c259fc5500eba7f0f19",
     "semantic_hash": ""
   },
   "docs/troubleshooting.md": {
@@ -1578,9 +1578,9 @@
     "semantic_hash": ""
   },
   "docs/domain-model.md": {
-    "mtime": 1791497506.295938,
-    "seen": 1791502365.9987493,
-    "ast_hash": "a0563030d95c2ef6bec46c045decffad",
+    "mtime": 1791504053.856576,
+    "seen": 1791504757.7354205,
+    "ast_hash": "7c5534facf50fc6a1595e560fa476045",
     "semantic_hash": ""
   },
   "docs/domain-routing.md": {
@@ -1614,15 +1614,15 @@
     "semantic_hash": ""
   },
   "docs/product-roadmap.md": {
-    "mtime": 1791497707.5549269,
-    "seen": 1791502365.9987571,
-    "ast_hash": "8f8788f1fdf6328033282ac19f35fbe0",
+    "mtime": 1791503983.7485797,
+    "seen": 1791504757.7354286,
+    "ast_hash": "50357d25d763fb508f8e2bb07fce589c",
     "semantic_hash": ""
   },
   "docs/secrets-architecture.md": {
-    "mtime": 1791497616.3171406,
-    "seen": 1791502365.998758,
-    "ast_hash": "2870ed39b4f6d1840ef6d055a742c85c",
+    "mtime": 1791504032.454577,
+    "seen": 1791504757.7354295,
+    "ast_hash": "ec20f46de98ed99818b7f817458a1dc4",
     "semantic_hash": ""
   },
   ".claude/workflows/nexusops-challenge.mjs": {
@@ -1836,9 +1836,9 @@
     "semantic_hash": ""
   },
   "backend/tests/integration/test_migration_phase2.py": {
-    "mtime": 1791498834.2648647,
-    "seen": 1791502365.9986029,
-    "ast_hash": "7bcd8b51bca1330cce38e929c9c587c5",
+    "mtime": 1791504283.4595633,
+    "seen": 1791504757.7352462,
+    "ast_hash": "675d2c413679831a71310c217955391c",
     "semantic_hash": ""
   },
   "backend/tests/integration/test_phase2_environments.py": {
@@ -1887,6 +1887,30 @@
     "mtime": 1791497249.0489523,
     "seen": 1791502365.9986997,
     "ast_hash": "0d4ae8c037303f06929aa40313693cd1",
+    "semantic_hash": ""
+  },
+  "backend/alembic/versions/20261009_1000-c3d4e5f6a7b8_enforce_secret_version_integrity.py": {
+    "mtime": 1791503547.5866039,
+    "seen": 1791504757.7350898,
+    "ast_hash": "01ff9f300b6a0cb7d9e0dd638485bedc",
+    "semantic_hash": ""
+  },
+  "backend/alembic/versions/20261009_1100-d4e5f6a7b8c9_correct_legacy_environment_types.py": {
+    "mtime": 1791503596.6206012,
+    "seen": 1791504757.7350914,
+    "ast_hash": "b973e44a5b08c46747d75e5ff2c62766",
+    "semantic_hash": ""
+  },
+  "backend/tests/integration/test_migration_phase21.py": {
+    "mtime": 1791504312.1825616,
+    "seen": 1791504757.7352471,
+    "ast_hash": "9875b5050fd429f5a6ad7c621e92cf71",
+    "semantic_hash": ""
+  },
+  "backend/tests/integration/test_phase21_secret_version_integrity.py": {
+    "mtime": 1791504312.1825616,
+    "seen": 1791504757.7352514,
+    "ast_hash": "8fff121afcf6b07745b319fdebf7b758",
     "semantic_hash": ""
   }
 }

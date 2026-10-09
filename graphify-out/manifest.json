@@ -1494,15 +1494,15 @@
     "semantic_hash": ""
   },
   "docs/api.md": {
-    "mtime": 1791504183.8785686,
-    "seen": 1791504757.735413,
-    "ast_hash": "2a75a472fd5cc2611d330b9df3ffaa95",
+    "mtime": 1791505818.3374782,
+    "seen": 1791506551.670397,
+    "ast_hash": "5ee973352a8d4cdf4355275e7073be82",
     "semantic_hash": ""
   },
   "docs/architecture.md": {
-    "mtime": 1791504156.7055702,
-    "seen": 1791504757.735414,
-    "ast_hash": "b88273d17f2473d5158296b45b0568b7",
+    "mtime": 1791505800.3114793,
+    "seen": 1791506551.670398,
+    "ast_hash": "b0c2d95858ff50556b11e10b76369f5c",
     "semantic_hash": ""
   },
   "docs/deployment.md": {
@@ -1524,9 +1524,9 @@
     "semantic_hash": "50ac6a5872a6cf8d7071b2064da53aed"
   },
   "docs/security.md": {
-    "mtime": 1791504124.540572,
-    "seen": 1791504757.7354305,
-    "ast_hash": "9b4316ef54bd8c259fc5500eba7f0f19",
+    "mtime": 1791505786.51048,
+    "seen": 1791506551.670414,
+    "ast_hash": "7aefcc1bb0c9a6b6d27d8f2cb7f42a10",
     "semantic_hash": ""
   },
   "docs/troubleshooting.md": {
@@ -1578,9 +1578,9 @@
     "semantic_hash": ""
   },
   "docs/domain-model.md": {
-    "mtime": 1791504053.856576,
-    "seen": 1791504757.7354205,
-    "ast_hash": "7c5534facf50fc6a1595e560fa476045",
+    "mtime": 1791505737.0574827,
+    "seen": 1791506551.6704044,
+    "ast_hash": "11e09a56041ab8d4adceb05219f74714",
     "semantic_hash": ""
   },
   "docs/domain-routing.md": {
@@ -1614,15 +1614,15 @@
     "semantic_hash": ""
   },
   "docs/product-roadmap.md": {
-    "mtime": 1791503983.7485797,
-    "seen": 1791504757.7354286,
-    "ast_hash": "50357d25d763fb508f8e2bb07fce589c",
+    "mtime": 1791505726.6295207,
+    "seen": 1791506551.6704123,
+    "ast_hash": "ee2c780f0bcf6a41b90c91cc5b94d14e",
     "semantic_hash": ""
   },
   "docs/secrets-architecture.md": {
-    "mtime": 1791504032.454577,
-    "seen": 1791504757.7354295,
-    "ast_hash": "ec20f46de98ed99818b7f817458a1dc4",
+    "mtime": 1791505765.3154812,
+    "seen": 1791506551.670413,
+    "ast_hash": "4297deb18da27d203fc1a810fcd49053",
     "semantic_hash": ""
   },
   ".claude/workflows/nexusops-challenge.mjs": {
@@ -1911,6 +1911,18 @@
     "mtime": 1791504312.1825616,
     "seen": 1791504757.7352514,
     "ast_hash": "8fff121afcf6b07745b319fdebf7b758",
+    "semantic_hash": ""
+  },
+  "backend/alembic/versions/20261009_1200-e5f6a7b8c9d0_fix_environment_type_precedence.py": {
+    "mtime": 1791505599.3234904,
+    "seen": 1791506551.6700864,
+    "ast_hash": "077d29d1806f2b68c0539874e9f8e9c7",
+    "semantic_hash": ""
+  },
+  "backend/tests/integration/test_migration_phase22.py": {
+    "mtime": 1791505901.4244738,
+    "seen": 1791506551.6702428,
+    "ast_hash": "d21bf32fba35f242cc1fff866645dbc8",
     "semantic_hash": ""
   }
 }

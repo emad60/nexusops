@@ -12,6 +12,9 @@ never printed or asserted on.
 
 from __future__ import annotations
 
+import uuid
+from collections.abc import Iterator
+
 import httpx
 import pytest
 import pytest_asyncio
@@ -50,6 +53,32 @@ def _run_migrations() -> None:
     cfg = Config(str(BACKEND_DIR / "alembic.ini"))
     cfg.set_main_option("script_location", str(BACKEND_DIR / "alembic"))
     command.upgrade(cfg, "head")
+
+
+def _admin_dsn() -> str:
+    """A libpq DSN to the maintenance database (create/drop scratch DBs)."""
+    return f"postgresql://{_PG_USER}:{_PG_PASSWORD}@{TEST_PG_HOST}:{_PG_PORT}/{_ADMIN_DB}"
+
+
+@pytest.fixture
+def scratch_database() -> Iterator[str]:
+    """An empty database on the same server, dropped again afterwards.
+
+    Shared by the migration tests: each builds its own database and runs
+    Alembic's own ``upgrade``, so the test exercises the exact code path a
+    deployment does rather than a hand-built subset of the schema.
+    """
+    import psycopg
+
+    name = f"nexusops_mig_{uuid.uuid4().hex[:10]}"
+    with psycopg.connect(_admin_dsn(), autocommit=True) as conn:
+        conn.execute(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)')
+        conn.execute(f'CREATE DATABASE "{name}"')
+    try:
+        yield name
+    finally:
+        with psycopg.connect(_admin_dsn(), autocommit=True) as conn:
+            conn.execute(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)')
 
 
 @pytest.fixture(scope="session", autouse=True)

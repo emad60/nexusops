@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import os
 import uuid
-from collections.abc import Iterator, Sequence
+from collections.abc import Sequence
 
 import psycopg
 import pytest
@@ -38,7 +38,6 @@ from alembic.config import Config
 from alembic.script import ScriptDirectory
 
 from tests.conftest import (
-    _ADMIN_DB,
     _PG_PASSWORD,
     _PG_PORT,
     _PG_USER,
@@ -80,34 +79,16 @@ PROJECT_SECRET = "aaaa1111-0000-0000-0000-000000000062"
 Statement = tuple[str, Sequence[object]]
 
 
+#: The ``scratch_database`` fixture is defined in this package's conftest.py so
+#: the Phase 2 and Phase 2.1 migration modules share one implementation.
+
+
 def _owner_dsn(database: str) -> str:
     return f"postgresql://{_PG_USER}:{_PG_PASSWORD}@{TEST_PG_HOST}:{_PG_PORT}/{database}"
 
 
 def _migration_dsn(database: str) -> str:
     return _owner_dsn(database).replace("postgresql://", "postgresql+psycopg://")
-
-
-def _admin_dsn() -> str:
-    return f"postgresql://{_PG_USER}:{_PG_PASSWORD}@{TEST_PG_HOST}:{_PG_PORT}/{_ADMIN_DB}"
-
-
-def _recreate_database(name: str) -> None:
-    with psycopg.connect(_admin_dsn(), autocommit=True) as conn:
-        conn.execute(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)')
-        conn.execute(f'CREATE DATABASE "{name}"')
-
-
-@pytest.fixture
-def scratch_database() -> Iterator[str]:
-    """An empty database on the same server, dropped again afterwards."""
-    name = f"nexusops_mig_{uuid.uuid4().hex[:10]}"
-    _recreate_database(name)
-    try:
-        yield name
-    finally:
-        with psycopg.connect(_admin_dsn(), autocommit=True) as conn:
-            conn.execute(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)')
 
 
 def _alembic_config(database: str) -> Config:
@@ -300,11 +281,14 @@ def test_promotes_environments_and_keeps_every_deployment_resolvable(
     )
     assert [row[0] for row in envs] == ["production", "staging"], envs
     assert {str(row[1]) for row in envs} == {YMART}
-    # A promoted environment defaults to DEV: the kind was never recorded before.
-    assert {row[2] for row in envs} == {"DEV"}
+    # Phase 2 defaulted every legacy row to DEV; the Phase 2.1 corrective
+    # migration reclassifies the unambiguous slugs (production/staging).
+    assert {row[2] for row in envs} == {"PROD", "STAGING"}, envs
 
     production = next(row for row in envs if row[0] == "production")
     staging = next(row for row in envs if row[0] == "staging")
+    assert production[2] == "PROD"
+    assert staging[2] == "STAGING"
 
     # Survivor = earliest created_at (API's row); fields fill from duplicates.
     assert production[5] is True, "auto_deploy must be the OR of the merged group"

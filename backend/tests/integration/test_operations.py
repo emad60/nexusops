@@ -153,7 +153,7 @@ async def test_unknown_operation_type_and_bad_params_are_rejected(client, owner)
     not_whitelisted = await client.post(
         f"{API}/operations",
         headers=owner["headers"],
-        json={"node_id": node["id"], "type": "nginx.apply", "params": {}},
+        json={"node_id": node["id"], "type": "nginx.reload", "params": {}},
     )
     assert not_whitelisted.status_code == 422, not_whitelisted.text
 
@@ -560,22 +560,41 @@ async def test_operations_table_is_tenant_scoped_at_the_database(client, owner, 
 
 # --- 4. the exec whitelist cannot be widened by accident ----------------------
 
-#: Reserved by the Phase 2 documents (domains/TLS, nginx, secret delivery).
+#: Reserved by the architecture documents for a later phase (certificates,
+#: secret delivery, nginx reload). None is dispatchable: each needs the subsystem
+#: it belongs to, and a name alone would be a pass-through. Phase 4's
+#: ``nginx.apply`` left this list by shipping — the test below is its replacement.
 RESERVED = (
     "certificate.issue",
+    "certificate.install",
     "certificate.renew",
-    "nginx.apply",
     "nginx.reload",
     "secret.env.apply",
 )
 
 
-async def test_no_reserved_phase2_type_is_dispatchable(client, owner):
+async def test_no_reserved_later_phase_type_is_dispatchable(client, owner):
     """A reserved type is a 422 at dispatch, not a pass-through to the agent."""
     node, _token = await _enrolled_node(client, owner["headers"], "ops-reserved")
     for reserved in RESERVED:
         response = await _dispatch(client, owner["headers"], node["id"], op_type=reserved)
         assert response.status_code == 422, f"{reserved} was accepted: {response.text}"
+
+
+async def test_a_shipped_phase4_type_is_gated_on_the_node_capability(client, owner):
+    """``nginx.apply`` is a real type now: a node without nginx is told so.
+
+    Not a 422 — the request is valid and the refusal is about *this* node, which
+    is the difference between "nobody may ever run this" and "this node cannot".
+    """
+    node, _token = await _enrolled_node(client, owner["headers"], "ops-nginx-gate")
+    response = await client.post(
+        f"{API}/operations",
+        headers=owner["headers"],
+        json={"node_id": node["id"], "type": "nginx.apply", "params": {}},
+    )
+    assert response.status_code == 409, response.text
+    assert response.json()["error"]["code"] == "NODE_CAPABILITY_MISSING"
 
 
 async def test_the_database_whitelist_rejects_an_unregistered_type(client, owner):

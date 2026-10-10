@@ -138,8 +138,17 @@ def test_unknown_operation_type_is_refused(agent: Any) -> None:
     assert code == "OPERATION_UNSUPPORTED"
 
 
-def test_reserved_phase4_types_are_not_in_the_local_registry(agent: Any) -> None:
-    for reserved in ("nginx.apply", "secret.env.apply", "certificate.install"):
+def test_phase4_nginx_operations_are_the_only_nginx_ones(agent: Any) -> None:
+    """Phase 4 shipped three nginx ops — no file primitive, no command primitive."""
+    assert {name for name in agent.OPERATION_REGISTRY if name.startswith("nginx.")} == {
+        "nginx.bootstrap",
+        "nginx.apply",
+        "nginx.status",
+    }
+
+
+def test_later_phase_types_are_still_absent_from_the_local_registry(agent: Any) -> None:
+    for reserved in ("secret.env.apply", "certificate.install", "node.execute"):
         assert reserved not in agent.OPERATION_REGISTRY
 
 

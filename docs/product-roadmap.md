@@ -338,27 +338,52 @@ Delivered:
 
 ## 7. Phase 4 — Domains & routes
 
-**Why:** the wedge feature — container:port → URL. No code exists today; the
-nginx/ dir in the repo serves only the dashboard. Spec:
-[domain-routing.md](domain-routing.md).
+**Why:** the wedge feature — container:port → URL. Spec:
+[domain-routing.md](domain-routing.md) (now marked implemented for HTTP).
 
-- **DB:** `domains`, `routes` tables; monitors become polymorphic
-  (`target_type`/`target_id`), URL monitors backfilled as `target_type=url`.
-- **API:** domains (create/verify/re-verify/delete), routes CRUD, provider
-  status; domain/route events org-scoped.
-- **Providers:** `ProxyProvider` interface (render/apply/status);
-  `NginxProvider` first — renders from STRICT templates (no user-supplied raw
-  nginx directives in v1); apply pipeline via agent op: stage → `nginx -t` →
-  atomic swap → reload → rollback on failure.
-- **Frontend:** Domains page (add domain, DNS TXT instructions + status,
-  routes editor with upstream picker: node + container:port).
-- **Security:** anti-takeover — verify before any route goes live, re-verify
-  on apex change; upstream must live on the route's node; header/rate-limit
-  config from an allowlist; injection threat modeled in
+**Shipped (2026-10-10), HTTP only — TLS is Phase 5.**
+
+- **DB:** `domains` + `routes` (migration `f4a5b6c7d8e9`), tenant RLS and the
+  anti-takeover partial unique index on the verified name; monitors became
+  polymorphic as `target_type` (`URL`/`ROUTE`) + `route_id`, with every existing
+  row backfilled to `URL`; `servers.proxy_state`; the operation whitelist gained
+  the three `nginx.*` types.
+- **API:** domains (create/list/detail/verify/re-verify/delete, routes-by-domain),
+  routes CRUD + enable/disable, node proxy status/refresh/apply and the
+  route-target upstream picker; `domain.read`/`domain.manage` codenames; every
+  domain/route mutation audited and published as an org-scoped event.
+- **Providers:** the nginx renderer (strict templates, `extra=forbid` schemas, no
+  user-supplied raw directives) produces a fingerprint + manifest + allowlisted
+  file tree; the agent stages → `nginx -t` → atomically swaps → reloads, and
+  reports `applied`/`failed`/`rolled_back`/`rollback_failed`. The control plane
+  attributes the outcome to routes from the bundle manifest, so state is never
+  guessed from config text.
+- **Frontend:** Domains list/detail (TXT instructions, reachability warning,
+  re-verify, delete-blocked-while-enabled) and a Routes page with the upstream
+  picker (node → container → published port), enable/disable and delete.
+- **Security:** verification before any route goes live, re-verification and NS
+  snapshots, cross-org flip handling, upstream must live on the route's node,
+  header/rate-limit/redirect inputs from closed allowlists, and the listener
+  pre-flight (domain-routing.md §5). Injection threat modeled in
   platform-security-model.md.
-- **Testing:** verification flow (mock DNS), render snapshots, apply pipeline
-  with failing `nginx -t` → rollback.
-- **Exit:** a route serving real traffic on a node; re-verify on apex change.
+- **Testing:** mock-DNS unit + integration suites (verification lifecycle, grace
+  window, cross-org flip), 62-test HTTP integration suite for domains/routes/
+  apply/rollback/drift/tenancy, render snapshots, agent contract tests, and a
+  Phase 3→4 migration test over a populated database.
+- **E2E:** `frontend/e2e/phase4.spec.ts` runs the whole wedge against the throwaway
+  stack — a node container that really runs nginx, the real agent enrolled inside
+  it, a real authoritative mock nameserver (`e2e/dnsmock`) serving the minted TXT
+  record, and an HTTP request through the node's port 80 that reaches the upstream
+  container. It asserts the rendered fragment, the 444 catch-all for an unmapped
+  Host, `drift: false` with matching bundle ids, and the dashboard's own view. It
+  found two real defects while it was being written: bootstrap could not write the
+  system `nginx.conf` at all (the managed-tree guard rejected the one path outside
+  the tree), and the include it added had no target, so `nginx -t` failed; both are
+  fixed and pinned by contract tests.
+- **Exit:** met — a route's desired configuration reaches a node as a whitelisted
+  op, is applied atomically with rollback, and its outcome is reflected on the
+  route; re-verification on apex change pulls the routes; and the cross-container
+  journey above proves the loop end to end.
 
 ## 8. Phase 5 — Certificates
 

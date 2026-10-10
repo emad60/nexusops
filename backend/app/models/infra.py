@@ -92,6 +92,11 @@ class Server(OrgScoped, TimestampMixin, Base):
     #: Dispatch refuses any operation whose capability is not present-and-true in
     #: this map (see ``operation_service``).
     capabilities: Mapped[dict] = json_column()
+    #: Last proxy state the node reported for its managed reverse proxy
+    #: (``nginx.status``): live bundle fingerprint, nginx version, last
+    #: configuration-test outcome and apply history. Bounded, sanitized facts
+    #: only — never configuration text, file listings or host environment data.
+    proxy_state: Mapped[dict] = json_column()
     #: When the node's credential was explicitly revoked (kill switch). Set by
     #: an operator action, independent of any rotation grace window. A ``NULL``
     #: revoked_at does not mean "enrolled" on its own — the credential row is the

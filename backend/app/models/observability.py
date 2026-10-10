@@ -45,15 +45,32 @@ from app.models.enums import (
     LogSource,
     MetricGranularity,
     MonitorStatus,
+    MonitorTargetType,
 )
 
 
 class Monitor(OrgScoped, TimestampMixin, Base):
+    """One probe. Targets are polymorphic since Phase 4 (domain-model.md §2.6).
+
+    ``target_type`` says what ``url``/``route_id`` describe:
+
+    * ``URL`` — the original shape. ``url`` holds the address and ``route_id`` is
+      NULL. Every pre-Phase-4 row was backfilled to this value by the migration.
+    * ``ROUTE`` — a NexusOps-managed route's HTTP uptime. ``route_id`` is set and
+      ``url`` still holds the literal ``http://<hostname><path>`` that gets
+      probed, so the existing check → incident → notification pipeline runs
+      unchanged and no per-target branching leaks into the engine.
+
+    There is no certificate target in Phase 4; TLS expiry monitoring is Phase 5.
+    """
+
     __tablename__ = "monitors"
     __table_args__ = (
         status_check("status", MonitorStatus),
+        status_check("target_type", MonitorTargetType),
         CheckConstraint("interval_seconds >= 10", name="interval_min"),
         CheckConstraint("timeout_seconds > 0 AND timeout_seconds <= 60", name="timeout_bounds"),
+        CheckConstraint("(target_type = 'ROUTE') = (route_id IS NOT NULL)", name="target_shape"),
         Index("ix_monitors_next_check", "enabled", "next_check_at"),
     )
 
@@ -61,6 +78,16 @@ class Monitor(OrgScoped, TimestampMixin, Base):
     name: Mapped[str] = mapped_column(String(160), nullable=False)
     project_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("projects.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    #: What this monitor observes. Defaults to URL so an insert that predates the
+    #: polymorphic model (or any code path that has not opted in) stays valid.
+    target_type: Mapped[MonitorTargetType] = mapped_column(
+        String(8), default=MonitorTargetType.URL, nullable=False
+    )
+    #: Set only for ROUTE targets; the route is the authority for both the
+    #: hostname and the upstream, so it is deleted with the route.
+    route_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("routes.id", ondelete="CASCADE"), nullable=True, index=True
     )
     url: Mapped[str] = mapped_column(String(1000), nullable=False)
     method: Mapped[str] = mapped_column(String(10), default="GET", nullable=False)

@@ -20,6 +20,10 @@ dependencies = [
     "structlog>=25.4",
     "docker>=7.1",
     "tenacity>=9.1",
+    # Directly imported by app/services/dns_verifier.py for authoritative NS/TXT
+    # queries. It already arrived transitively via email-validator; declaring it
+    # keeps an unrelated upgrade from silently removing the dependency.
+    "dnspython>=2.8",
     "orjson>=3.11",
     "prometheus-client>=0.23",
 ]

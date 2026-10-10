@@ -113,3 +113,14 @@ class Operation(OrgScoped, TimestampMixin, Base):
         DateTime(timezone=True), nullable=True
     )
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    @property
+    def ok(self) -> bool:
+        """Whether the agent reported this operation as successful.
+
+        A terminal check, not a proof of execution: it only says the node
+        reported ``SUCCEEDED``. ``EXPIRED``/``CANCELLED`` rows are not ok.
+        """
+        # The column is a plain String, so a row loaded from the DB holds a
+        # ``str``; StrEnum equality makes both spellings compare equal.
+        return self.status == OperationStatus.SUCCEEDED

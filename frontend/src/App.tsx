@@ -13,6 +13,9 @@ const ServerDetailPage = lazy(() => import("./pages/ServerDetailPage"));
 const ContainerListPage = lazy(() => import("./pages/ContainerListPage"));
 const ContainerDetailPage = lazy(() => import("./pages/ContainerDetailPage"));
 const DockerHostsPage = lazy(() => import("./pages/DockerHostsPage"));
+const DomainListPage = lazy(() => import("./pages/DomainListPage"));
+const DomainDetailPage = lazy(() => import("./pages/DomainDetailPage"));
+const RouteListPage = lazy(() => import("./pages/RouteListPage"));
 const MonitorListPage = lazy(() => import("./pages/MonitorListPage"));
 const MonitorDetailPage = lazy(() => import("./pages/MonitorDetailPage"));
 const IncidentListPage = lazy(() => import("./pages/IncidentListPage"));
@@ -71,6 +74,9 @@ export function App() {
               <Route path="/containers" element={<ContainerListPage />} />
               <Route path="/containers/:containerId" element={<ContainerDetailPage />} />
               <Route path="/docker-hosts" element={<DockerHostsPage />} />
+              <Route path="/domains" element={<DomainListPage />} />
+              <Route path="/domains/:domainId" element={<DomainDetailPage />} />
+              <Route path="/routes" element={<RouteListPage />} />
               <Route path="/monitors" element={<MonitorListPage />} />
               <Route path="/monitors/:monitorId" element={<MonitorDetailPage />} />
               <Route path="/incidents" element={<IncidentListPage />} />

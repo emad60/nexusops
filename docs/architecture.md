@@ -62,11 +62,13 @@ by membership rather than by an `org_id` column; WebSocket sockets are bound to 
 organization and cross-organization frames are dropped; workers claim a row, resolve
 its organization, then act inside it. **Shipped since:** the `server.*` → `node.*`
 rename and the `Server` → `Node` surface naming (API paths `/nodes`, with a
-schema-hidden `/servers` alias); the `Server` → `Node` vocabulary; and the Phase 2
+schema-hidden `/servers` alias); the `Server` → `Node` vocabulary; the Phase 2
 delivery promotion (project-scoped environments, config layering, secret version
-history). **Not yet shipped:** domains/routes, certificates, real node operations
-beyond the container subset, backups, teams/grants and billing — every
-later-phase entity in the companion specs.
+history); and the Phase 4 domains/routes surface with the nginx apply pipeline
+(HTTP only — see [domain-routing.md](domain-routing.md)). **Not yet shipped:** certificates (TLS — domains and routes are HTTP-only
+until Phase 5), real node operations beyond the container and nginx subsets,
+backups, teams/grants and billing — every later-phase entity in the companion
+specs.
 
 **Naming.** The existing `Server` entity is exposed as **Node** (API paths
 `/nodes`, codenames `node.*`); the `servers` table keeps its name

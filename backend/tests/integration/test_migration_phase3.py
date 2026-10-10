@@ -245,5 +245,6 @@ def test_exactly_one_alembic_head() -> None:
     script = ScriptDirectory.from_config(_alembic_config("postgres"))
     heads = script.get_heads()
     assert len(heads) == 1, f"multiple alembic heads: {heads}"
-    assert heads == [PHASE3_REVISION]
+    # And the Phase 3 revision is reachable, i.e. actually applied by `head` —
+    # later phases extend the chain from here rather than replacing it.
     assert any(rev.revision == PHASE3_REVISION for rev in script.walk_revisions("base", "heads"))

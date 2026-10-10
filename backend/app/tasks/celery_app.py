@@ -21,6 +21,7 @@ app = Celery(
         "app.tasks.heartbeat",
         "app.tasks.monitoring",
         "app.tasks.deployments",
+        "app.tasks.domain_routing",
         "app.tasks.maintenance",
         "app.tasks.simulation",
     ],
@@ -81,6 +82,21 @@ app.conf.beat_schedule = {
         "task": "nx.expire_operations",
         "schedule": 60.0,
         "options": {"expires": 50},
+    },
+    # Domains are re-proved on a cadence; each row also carries its own
+    # ``next_check_at`` (grace/backoff), so a shorter dispatch tick only makes the
+    # due row happen sooner — it never shortens the proof policy itself.
+    "sweep-domains": {
+        "task": "nx.sweep_domains",
+        "schedule": settings.domain_sweep_interval_seconds,
+        "options": {"expires": settings.domain_sweep_interval_seconds - 10},
+    },
+    # Desired-state reconciliation: ask nodes for their live fingerprint and
+    # re-apply where the control plane's bundle is not the one the node has.
+    "sweep-routes": {
+        "task": "nx.sweep_routes",
+        "schedule": settings.route_sweep_interval_seconds,
+        "options": {"expires": settings.route_sweep_interval_seconds - 5},
     },
     "aggregate-metrics": {
         "task": "nx.aggregate_metrics",

@@ -41,6 +41,7 @@ from app.models.observability import (
     SystemEvent,
 )
 from app.models.operations import Operation
+from app.models.routing import Domain, Route
 from app.models.secrets import Secret, SecretVersion
 from app.models.tenancy import Membership, Organization
 
@@ -57,6 +58,7 @@ __all__ = [
     "DeploymentEnvironment",
     "DeploymentStep",
     "DockerHost",
+    "Domain",
     "EnrollmentToken",
     "Incident",
     "IncidentEvent",
@@ -75,6 +77,7 @@ __all__ = [
     "RefreshToken",
     "Role",
     "RolePermission",
+    "Route",
     "Secret",
     "SecretVersion",
     "Server",

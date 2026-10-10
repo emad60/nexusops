@@ -153,9 +153,13 @@ class OperationType(StrEnum):
     (see ``app.schemas.operation.OPERATION_SPECS``) — the architecture
     deliberately does **not** add a generic ``node.execute`` codename, so a
     container action reuses ``container.lifecycle`` rather than inventing a new
-    grant. Reserved types from the companion docs (``secret.env.apply``,
-    ``certificate.*``, the ``nginx.*`` family) are deliberately absent until the
-    subsystems they belong to ship, so no params pass-through can exist for them.
+    grant.
+
+    Phase 4 adds the three ``nginx.*`` types the domain-routing design approves
+    and nothing else. Their params are typed models (see
+    :mod:`app.schemas.proxy`); there is no file-write or command primitive and
+    no path is ever interpolated into a shell. ``certificate.*`` and
+    ``secret.env.apply`` stay absent until the phases that own them ship.
     """
 
     CONTAINER_START = "container.start"
@@ -163,6 +167,77 @@ class OperationType(StrEnum):
     CONTAINER_RESTART = "container.restart"
     CONTAINER_REMOVE = "container.remove"
     LOGS_TAIL = "logs.tail"
+    NGINX_BOOTSTRAP = "nginx.bootstrap"
+    NGINX_APPLY = "nginx.apply"
+    NGINX_STATUS = "nginx.status"
+
+
+class DomainStatus(StrEnum):
+    """Ownership-verification lifecycle of a Domain (domain-routing.md §4).
+
+    ``STALE`` is the grace state: the periodic sweep no longer sees the proof
+    TXT record but the name was previously verified. Routes stop being served in
+    both ``STALE`` and ``UNVERIFIED`` — render filters on ``VERIFIED`` only — so
+    losing the proof never leaves a live route behind.
+    """
+
+    PENDING = "PENDING"
+    VERIFYING = "VERIFYING"
+    VERIFIED = "VERIFIED"
+    STALE = "STALE"
+    UNVERIFIED = "UNVERIFIED"
+    FAILED = "FAILED"
+
+
+class RouteConfigState(StrEnum):
+    """Last nginx apply outcome for a route, as reported by its node's agent.
+
+    ``PENDING`` is "an apply is in flight"; ``IN_SYNC`` is the only state that
+    means the node's live configuration matches the desired bundle.
+    """
+
+    PENDING = "PENDING"
+    IN_SYNC = "IN_SYNC"
+    STALE = "STALE"
+    FAILED = "FAILED"
+
+
+class ProxyApplyOutcome(StrEnum):
+    """Terminal outcome of one ``nginx.apply`` operation on a node."""
+
+    APPLIED = "applied"
+    FAILED = "failed"
+    ROLLED_BACK = "rolled_back"
+    ROLLBACK_FAILED = "rollback_failed"
+
+
+class ListenerOwnership(StrEnum):
+    """Who holds one required listener port, per the node's pre-flight.
+
+    The distinction exists because "nginx is installed" says nothing about
+    whether NexusOps can manage it: ``MANAGED`` is the only state that means the
+    intended nginx instance owns the port, ``OTHER`` names a conflicting process,
+    ``FREE`` is an unused port, and ``UNKNOWN`` is an unreadable listener table
+    (never treated as free).
+    """
+
+    MANAGED = "MANAGED"
+    OTHER = "OTHER"
+    FREE = "FREE"
+    UNKNOWN = "UNKNOWN"
+
+
+class MonitorTargetType(StrEnum):
+    """What a monitor observes (domain-model.md §2.6, polymorphic targets).
+
+    ``URL`` is the Phase 0 shape every existing monitor keeps; ``ROUTE`` is a
+    NexusOps-managed route, whose HTTP uptime is checked from the control plane
+    exactly like a URL target. There is deliberately no certificate target in
+    Phase 4 — TLS is Phase 5.
+    """
+
+    URL = "URL"
+    ROUTE = "ROUTE"
 
 
 class MonitorStatus(StrEnum):

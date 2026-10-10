@@ -13,18 +13,59 @@
 # security-header middleware and the docs toggle are all keyed off
 # `is_production`, not `is_testing`, so the journey still exercises the real
 # edge. The only behavioural difference is JSON log formatting.
+#
+# --- Mock DNS (Phase 4) ------------------------------------------------------
+#
+# Domain verification resolves a name's authoritative nameservers and asks *them*
+# for the proof TXT record, so a journey that proves ownership needs a real
+# authoritative answer. `dnsmock` (e2e/dnsmock) serves one zone from a
+# runtime-registered record; the api and worker point at it via `dns:`, which
+# sets the *upstream* of Docker's embedded resolver — container-name lookups
+# (postgres, redis, mailpit) still resolve internally, and every name outside the
+# mock's zone is forwarded to the container's original resolver by the mock
+# itself, so nothing else in the stack loses DNS.
+#
+# The static address is what makes `dns:` possible (Docker takes IPs, not
+# service names) and what the mock advertises as its own NS glue. The subnet is
+# deliberately unusual so it cannot collide with the workflow's other networks.
 services:
+  dnsmock:
+    build:
+      context: ./e2e/dnsmock
+    environment:
+      MOCK_ZONE: ${E2E_DNS_ZONE:-e2e.test}
+      MOCK_IP: 172.31.253.53
+      MOCK_CONTROL_PORT: "8053"
+    networks:
+      default:
+        ipv4_address: 172.31.253.53
+    ports:
+      # The control API the journey posts its minted TXT record to. Loopback
+      # only: nothing off-box ever needs to register a record.
+      - "127.0.0.1:${NEXUSOPS_E2E_DNS_CONTROL_PORT:-8054}:8053"
+    restart: unless-stopped
+
   api:
     environment:
       ENVIRONMENT: test
       SIMULATION_MODE: "true"
+    dns:
+      - 172.31.253.53
 
   worker:
     environment:
       ENVIRONMENT: test
       SIMULATION_MODE: "true"
+    dns:
+      - 172.31.253.53
 
   scheduler:
     environment:
       ENVIRONMENT: test
       SIMULATION_MODE: "true"
+
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: 172.31.253.0/24

@@ -100,6 +100,19 @@ class Settings(BaseSettings):
     #: an operation created just after a beat survives until the next one.
     agent_delivery_min_seconds: int = Field(default=120, ge=10, le=86400)
     monitor_dispatch_interval_seconds: int = Field(default=10, ge=5)
+    #: --- Domain routing (Phase 4) ---------------------------------------
+    #: How often the domain sweep runs. Rows carry their own ``next_check_at``
+    #: (hourly re-check, bounded failure backoff and the 72h stale grace), so this
+    #: tick only decides how promptly a due row is picked up.
+    domain_sweep_interval_seconds: int = Field(default=300, ge=30, le=86400)
+    #: How often routed nodes are asked for their live proxy state, and re-applied
+    #: when the desired bundle differs. Applies are deduplicated, so this cannot
+    #: flood a node's operation queue.
+    route_sweep_interval_seconds: int = Field(default=60, ge=15, le=3600)
+    #: DNS timeouts for ownership verification. Bounded so an unresponsive
+    #: authoritative server cannot hold a worker open.
+    dns_query_timeout_seconds: float = Field(default=3.0, ge=0.5, le=30)
+    dns_total_budget_seconds: float = Field(default=12.0, ge=1, le=120)
     metrics_aggregation_interval_seconds: int = Field(default=60, ge=10)
     raw_metric_retention_hours: int = Field(default=24, ge=1)
     hourly_metric_retention_days: int = Field(default=30, ge=1)

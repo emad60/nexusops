@@ -67,6 +67,13 @@ PERMISSIONS: tuple[PermissionSpec, ...] = (
     # secrets
     PermissionSpec("secret.read", "Secrets", "List secrets (metadata only)"),
     PermissionSpec("secret.write", "Secrets", "Create / rotate / delete secrets"),
+    # domains & routing
+    PermissionSpec("domain.read", "Domains", "View domains, routes and proxy status"),
+    PermissionSpec(
+        "domain.manage",
+        "Domains",
+        "Add / verify domains, manage routes and apply proxy configuration",
+    ),
 )
 
 ALL_CODENAMES: frozenset[str] = frozenset(p.codename for p in PERMISSIONS)
@@ -109,6 +116,8 @@ ROLE_MATRIX: dict[str, list[str]] = {
         "event.read",
         "secret.read",
         "secret.write",
+        "domain.read",
+        "domain.manage",
     ),
     "Operator": _perms(
         "user.read",
@@ -136,6 +145,8 @@ ROLE_MATRIX: dict[str, list[str]] = {
         "log.read",
         "event.read",
         "secret.read",
+        "domain.read",
+        "domain.manage",
     ),
     "Developer": _perms(
         "node.read",
@@ -153,6 +164,7 @@ ROLE_MATRIX: dict[str, list[str]] = {
         "log.read",
         "event.read",
         "secret.read",
+        "domain.read",
     ),
     "Viewer": _perms(
         "node.read",
@@ -165,6 +177,7 @@ ROLE_MATRIX: dict[str, list[str]] = {
         "metric.read",
         "log.read",
         "event.read",
+        "domain.read",
     ),
 }
 

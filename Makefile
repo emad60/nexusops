@@ -70,12 +70,25 @@ E2E_HTTP_PORT    ?= 8090
 E2E_MAILPIT_PORT ?= 8026
 E2E_PG_PORT      ?= 5434
 E2E_REDIS_PORT   ?= 6391
+# The Phase 4 journey proves domain ownership against a mock authoritative DNS
+# server, so it needs a zone and a way to publish the token the API minted.
+E2E_DNS_CTL_PORT ?= 8054
+E2E_DNS_ZONE     ?= e2e.test
 
 E2E_COMPOSE := NEXUSOPS_HTTP_PORT=$(E2E_HTTP_PORT) \
                NEXUSOPS_MAILPIT_HTTP_PORT=$(E2E_MAILPIT_PORT) \
                NEXUSOPS_POSTGRES_PORT=$(E2E_PG_PORT) \
                NEXUSOPS_REDIS_PORT=$(E2E_REDIS_PORT) \
+               NEXUSOPS_E2E_DNS_CONTROL_PORT=$(E2E_DNS_CTL_PORT) \
+               E2E_DNS_ZONE=$(E2E_DNS_ZONE) \
                $(COMPOSE) -p $(E2E_PROJECT) -f docker-compose.yml -f docker-compose.e2e.yml
+
+# The Phase 4 spec builds its own nginx node image on demand (e2e/nginxnode);
+# nothing else about the journey needs a pre-built artifact.
+E2E_ENV := E2E_BASE_URL=http://127.0.0.1:$(E2E_HTTP_PORT) \
+           E2E_MAILPIT_URL=http://127.0.0.1:$(E2E_MAILPIT_PORT) \
+           E2E_DNS_CONTROL_URL=http://127.0.0.1:$(E2E_DNS_CTL_PORT) \
+           E2E_DNS_ZONE=$(E2E_DNS_ZONE)
 
 # Owner DSN pinned to the e2e port directly. Deliberately NOT reusing $(PG_URL):
 # that one resolves the port through `${NEXUSOPS_POSTGRES_PORT:-5433}`, and
@@ -111,8 +124,7 @@ e2e: ## Run the Playwright journey on a throwaway isolated stack, then tear it d
 	 $(MAKE) -s e2e-await-worker && \
 	 ( $(E2E_SEED) ) && \
 	 ( cd frontend && npx playwright install chromium >/dev/null 2>&1 || true; \
-	     E2E_BASE_URL=http://127.0.0.1:$(E2E_HTTP_PORT) \
-	     E2E_MAILPIT_URL=http://127.0.0.1:$(E2E_MAILPIT_PORT) npx playwright test ); \
+	     $(E2E_ENV) npx playwright test ); \
 	 status=$$?; $(E2E_COMPOSE) down -v --remove-orphans >/dev/null 2>&1 || true; \
 	 if [ $$status -ne 0 ]; then echo "e2e failed (stack torn down)"; fi; exit $$status
 
@@ -123,7 +135,7 @@ e2e-stack: ## Bring up + seed the isolated e2e stack and leave it running (for d
 	 ( $(E2E_SEED) ) && \
 	 echo "→ e2e stack up: UI http://127.0.0.1:$(E2E_HTTP_PORT)  mailpit http://127.0.0.1:$(E2E_MAILPIT_PORT)" && \
 	 echo "→ admin: admin@nexusops.example.com / nexusops-admin" && \
-	 echo "→ run: cd frontend && E2E_BASE_URL=http://127.0.0.1:$(E2E_HTTP_PORT) E2E_MAILPIT_URL=http://127.0.0.1:$(E2E_MAILPIT_PORT) npx playwright test"
+	 echo "→ run: cd frontend && $(E2E_ENV) npx playwright test"
 
 e2e-down: ## Tear down the isolated e2e stack and its volume (DESTRUCTIVE)
 	@$(E2E_COMPOSE) down -v --remove-orphans

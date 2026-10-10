@@ -121,6 +121,7 @@ SYSTEM_SCOPE_ALLOWED_MODULES: frozenset[str] = frozenset(
         "app/services/notification_service.py",  # claims undelivered rows, dispatches frames
         "app/tasks/_util.py",  # sweep_session(), the worker-side claim helper
         "app/tasks/deployments.py",  # deployment sweeper
+        "app/tasks/domain_routing.py",  # domain verification sweep + platform-wide claim release
         "app/tasks/heartbeat.py",  # offline sweep
         "app/tasks/maintenance.py",  # retention/aggregation sweeps
         "app/tasks/monitoring.py",  # monitor due-check claim

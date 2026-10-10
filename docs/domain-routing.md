@@ -1,16 +1,22 @@
 # Domain Routing — NexusOps
 
-**Status:** Target design for Phase 2+ — nothing in this subsystem is implemented yet.
-**Date:** 2026-09-21 (status updated 2026-10-07)
+**Status:** Implemented for HTTP routing (Phase 4, 2026-10-10). Certificates, TLS
+and post-deploy route sync remain target design (Phases 5–6) and are marked as
+such below.
+**Date:** 2026-09-21 (status updated 2026-10-10)
 **Companions:** [platform-vision.md](platform-vision.md) · [domain-model.md](domain-model.md) · [multi-tenancy.md](multi-tenancy.md) · [authorization.md](authorization.md) · [node-agent-architecture.md](node-agent-architecture.md) · [certificate-management.md](certificate-management.md)
 
 ## 1. Scope and current state
 
-Nothing in this subsystem exists today — no Domain or Route model, no DNS
-verification, no nginx rendering or apply code anywhere in the backend
-(platform-vision.md §1: "no domains/certificates/reverse-proxy subsystem at all";
-nothing to simulate; it must be built). Everything below is a design spec for new
-work (roadmap Phase 4).
+Phase 4 shipped the **HTTP half** of this design: the `domains` and `routes`
+tables (tenant RLS plus the anti-takeover partial unique index on the verified
+name), TXT verification with the STALE → UNVERIFIED grace lifecycle and its
+sweeps, the nginx renderer, the three `nginx.*` operations, the agent-side nginx
+provider with atomic apply and rollback, and the Domains/Routes UI.
+Certificates, TLS and HTTPS redirects are **not** part of it: the schema has no
+`certificate_id` column and the redirect shape has no `to_scheme` field,
+deliberately, so no route can be configured into an HTTPS redirect before Phase 5
+owns it. Sections describing Phase 5–6 behavior are marked as such.
 
 **The repo's `nginx/` directory is the DASHBOARD edge, not a customer proxy.** It
 proxies `/api/` → the API container and `/` → the SPA container over a single
@@ -21,11 +27,11 @@ Its TLS block exists but is commented out and no certs are mounted
 nginx → edge, `docs/deployment.md:371-425`) terminates the dashboard's own TLS
 outside the repo. This edge never carries customer traffic (§2).
 
-**The agent has no operations channel yet** — hello/heartbeat telemetry only
-(`agent/nexusops_agent.py:302-494`; `backend/app/api/v1/agent.py:31-81`). The
-Operation framework this spec leans on — pull-based op rows, whitelisted types, no
-shell — is specified in node-agent-architecture.md (roadmap Phase 3), a hard
-prerequisite for Phase 4. Nothing here is simulated *or* real: it is unbuilt.
+**The agent's operations channel shipped in Phase 3** — pull-based op rows, a
+closed type whitelist, no shell (node-agent-architecture.md) — and Phase 4 added
+exactly the three `nginx.*` types to that whitelist. Everything the routing
+subsystem does reaches a node through those ops; there is still no shell, no
+tunnel and no push channel.
 
 What exists and is reused:
 
@@ -196,25 +202,35 @@ the `docker`/`systemd` keys; the `nginx` key arrives with the nginx provider
   Nodes without the capability never appear in the upstream picker and never
   receive `nginx.*` ops.
 
-**Routing pre-flight (Phase 3, reported through the same hello channel).** The
+**Routing pre-flight (Phase 4, reported through the same hello channel).** The
 capability flag alone says "this node once had nginx" — not "routing will work
-here." Route creation additionally requires a **pre-flight** the agent runs and
-reports, stored in `servers.capabilities`:
+here." The agent's `nginx` capability therefore carries a whole pre-flight
+verdict, stored in `servers.capabilities`:
 
-- **nginx installed** — binary present on PATH;
-- **nginx running** — master process visible / unit active;
-- **ports 80/443 free** — a stdlib socket bind probe from the agent (bind success
-  = free; `EADDRINUSE` = taken; the result names the blocked port and, where
-  readable, the occupant).
+- **installed / running / config-test** — `present`, `running`, `config_test_ok`;
+- **listener ownership** — `listener_80` / `listener_443` are each
+  `MANAGED` (the intended nginx master holds it), `FREE`, `OTHER` (some other
+  process holds it) or `UNKNOWN` (could not be determined safely);
+- **`routing_eligible` + `reason`** — the agent's own summary of the above, with
+  a precise, user-facing reason when it is `false`.
 
-`POST /routes` and `POST /routes/{id}/enable` refuse nodes that fail the
-pre-flight with a named error: *"NexusOps routing needs exclusive use of 80/443
-on this node — port 443 is held by <occupant>."* This is **refusal, not
-coexistence**: NexusOps never shares 80/443 with another proxy (two writers to
-the same port family conflict constantly), and it never touches the pre-existing
-service — the pre-flight just names what blocks the bind. The check re-runs at
-enable time, not only creation: a node can gain a conflicting service after the
-route was created.
+The control plane **trusts that verdict first**: a node reporting
+`routing_eligible: false` is refused `409 NGINX_PREFLIGHT_FAILED` with the node's
+own reason ("port 80 is held by a process that is not the intended nginx
+instance"), so the refusal says what the *node* found rather than guessing from one
+flag. Only then do the control plane's own fallbacks apply, each with its own
+code: `NGINX_NOT_INSTALLED`, `NGINX_NOT_RUNNING`,
+`NGINX_CONFIG_TEST_UNAVAILABLE`, `NGINX_LISTENER_CONFLICT` (80 not `MANAGED`, or
+443 neither `MANAGED` nor `FREE`), `NODE_OFFLINE`, `NODE_CAPABILITY_STALE`.
+
+`POST /routes` and `POST /routes/{id}/enable` **both** run the gate — a node's
+state moves, and a route created while healthy must be re-checked when it is
+made live — and `POST /nodes/{id}/proxy/apply` re-checks it before queueing an
+apply. This is **refusal, not coexistence**: NexusOps never shares 80/443 with
+another proxy (two writers to the same port family conflict constantly), and it
+never touches the pre-existing service. Port 443 must be either already held by
+the managed nginx or free, because Phase 5 reserves it for certificates; another
+process there is a conflict resolved now, not after certificates ship.
 
 ## 6. Config rendering — strict allowlists
 
@@ -230,8 +246,8 @@ reproducible from the DB:
 /etc/nexusops/nginx/staged/                # staging area for atomic apply (§7)
 ```
 
-The default_server catch-all (§10) and HTTP→HTTPS redirect blocks (§9) are always
-part of the bundle.
+The default_server catch-all (§10) is always part of the bundle. There is no
+HTTP→HTTPS redirect block in Phase 4: nothing in the renderer can emit one.
 
 ### 6.2 The allowlist (the injection defense)
 
@@ -247,9 +263,9 @@ makes unknown JSONB keys 422. `nginx -t` (§7) is a syntax safety net, not a def
 | `path` | Starts `/`; charset `^[A-Za-z0-9._\-/]*$` — no `~` `=` (match-type markers), no whitespace, quotes, `;`, `{}`, `$` | `location` prefix match |
 | header name / value | name `^[A-Za-z0-9-]{1,64}$` (denylist: Host, Connection, Content-Length, Transfer-Encoding, Upgrade, Expect); value printable ASCII 0x20–0x7E, ≤512, no `$` | `add_header` / `proxy_set_header` |
 | `port` | Int 1–65535 | `proxy_pass` |
-| `rate_limit` | `{requests 1..10000, window ∈ (1s, 10s, 1m), burst ≤ requests}` | `limit_req_zone` / `limit_req` |
-| `redirect` | `{code ∈ (301,302,307,308), to_scheme https, to_host?}` — `to_host` must be a verified name in the org | fixed `return` block |
-| `certificate_id` | `status = issued` and covering the hostname (selection rule §8.2; covering check: cert doc §8) | `ssl_certificate` paths |
+| `rate_limit` | `{requests 1..10000, window ∈ (1s, 1m), burst ≤ requests}` — nginx can express only per-second and per-minute windows, so "10s" is deliberately not offered | `limit_req_zone` / `limit_req` |
+| `redirect` | `{to_host, code ∈ (301,302,307,308)}` — **host only**: there is no `to_scheme` field in Phase 4, so no route can be made to emit an HTTPS redirect. `to_host` must be a verified name in the org | fixed `return` block |
+| `certificate_id` | *not in Phase 4* — Phase 5 adds the column and its validation by migration | `ssl_certificate` paths (Phase 5) |
 
 Why this hard line: co-hosted domains on one node share one nginx config — a config
 injection is traffic interception across *every* route on that node
@@ -266,12 +282,15 @@ Operation types. Per authorization.md §2, applying config is gated by
 | Op type | Params (at rest) | Effect |
 |---|---|---|
 | `nginx.bootstrap` | `{}` | Idempotent: ensure `/etc/nexusops/nginx/{routes.d,staged}` exist; ensure the single include lines sit in the system nginx.conf's http context; run `nginx -t`. Run once per node when the nginx capability first appears |
-| `nginx.apply` | `{bundle_id, files: [{path, content}], reload: true}` | Stage → validate → atomic swap → reload → rollback on failure (below) |
+| `nginx.apply` | `{bundle: {bundle_id, provider, template_version, manifest, files}, reload: true}` | Stage → validate → atomic swap → reload → rollback on failure (below) |
 | `nginx.status` | `{}` | Agent reports live fingerprint + nginx version (drift detection, §8.4) |
 
-**Bundles carry no secrets.** TLS private keys arrive only via `certificate.install`
-(reference-only params, pull-time decryption — certificate-management.md §6). Config
-fragments reference cert files by path; they never embed key material.
+**Bundles carry no secrets — and, in Phase 4, no certificates.** There is no
+field for a certificate or a key and no managed path for one; a bundle is a
+fingerprint, a provider name, a template version, a manifest of route ids and an
+allowlisted set of config files. TLS private keys arrive only via
+`certificate.install` (reference-only params, pull-time decryption —
+certificate-management.md §6, Phase 5).
 
 Agent-side steps for `nginx.apply`:
 
@@ -390,7 +409,7 @@ Validation rules live in §6.2; this is what they mean per route:
 | Custom proxy headers | `headers` with `action: set` | `proxy_set_header` to the upstream |
 | Standard proxy headers | Not user-configurable | Always rendered: `Host`, `X-Forwarded-For`, `X-Forwarded-Proto`, `X-Forwarded-Host` |
 | Rate limit | `rate_limit: {requests, window, burst}` | One `limit_req_zone` per route (key `$binary_remote_addr`) declared in `nexusops.conf`; `limit_req` in the route location |
-| Force HTTPS | `redirect: {to_scheme: https, code}` | Fixed 301 server block on `:80` for the route's names |
+| Force HTTPS | — not available in Phase 4 | Requires certificates; lands with Phase 5 |
 | Host redirect | `redirect: {to_host, code}` | Fixed `return` block; `to_host` must be a verified org name |
 
 The node-level `nexusops.conf` is regenerated wholesale on every render, so
@@ -400,7 +419,7 @@ rate-limit zones never leak stale entries after route deletion.
 
 - **Wildcard domains.** A Domain row may be `*.example.com`; TXT verification at the
   apex (`_nexusops.example.com`), same re-verification rules. Wildcard HTTPS needs a
-  wildcard certificate — DNS-01 only (certificate-management.md §8).
+  wildcard certificate — DNS-01 only (Phase 5, certificate-management.md §8).
 - **Coverage.** A route's `hostname` must be the Domain's name, a **one-label**
   subdomain of it, or `*.<name>` of a wildcard Domain. Deeper names
   (`a.b.example.com`) are rejected — the same depth rule as the cert doc's wildcard
@@ -433,13 +452,26 @@ rate-limit zones never leak stale entries after route deletion.
    (§7); uptime monitor auto-attaches (opt-out, §13). Route creation is **refused**
    on a node that fails the routing pre-flight (§5.1) with a message naming the
    conflict.
-5. **HTTPS** — request a certificate (`certificate.manage`), DNS-01 via the domain's
-   `dns_provider_id`; on `issued` + delivered, bind `scheme=https` + `certificate_id`
-   → re-render serves TLS. Full spec: **certificate-management.md** (§5–§7).
+5. **HTTPS — not shipped (Phase 5).** Request a certificate (`certificate.manage`),
+   DNS-01 via the domain's `dns_provider_id`; on `issued` + delivered, bind
+   `scheme=https` + `certificate_id` → re-render serves TLS. Full spec:
+   **certificate-management.md** (§5–§7).
 6. **Operate** — sweeps keep re-proving control; NS change or lost TXT pulls routes
    until re-verified; expiry monitors page through the incident pipeline.
 7. **Decommission** — disable route → apply removes its fragment; domain delete
    blocked while enabled routes reference it.
+
+**Proven end to end (`make e2e`).** `frontend/e2e/phase4.spec.ts` walks steps 1–4
+against a throwaway stack with nothing simulated on the routing path: a node
+container that really runs nginx (`e2e/nginxnode`) with the real agent enrolled
+inside it, an authoritative mock nameserver (`e2e/dnsmock`, wired into the api and
+worker through `docker-compose.e2e.yml`) holding the token the API minted, and a
+real upstream container on a loopback-published port. It asserts the unverified →
+`VERIFIED` transition, the token's one-time retrieval rule, the fragment that lands
+on the node (`server_name`, `proxy_pass` to the published port, no `ssl_*`), an HTTP
+request through the node's port 80 that reaches the container's marker, the managed
+catch-all answering 444 for a Host nobody mapped, `drift: false` with matching
+bundle ids — and the dashboard showing the same state.
 
 ## 12. API surface, permissions, audit
 
@@ -463,17 +495,24 @@ Audit actions (append-only; `resource.action` naming, domain-model.md §2.6):
 `domain.created` · `domain.verified` · `domain.reverified` · `domain.unverified`
 (NS change, cross-org flip, or grace expiry — sweep/worker) · `domain.deleted` ·
 `route.created`/`updated`/`deleted` (user) · `route.applied`/`apply_failed`/
-`rolled_back` (agent). Events: `domain.verified`, `domain.unverified`,
-`route.applied`, `route.apply_failed` publish id/status-only frames on
-`org:{org_id}:domains` (event_bus.py:114-125 frame shape) — no tokens, no config text.
+`rolled_back`/`rollback_failed` (agent) · `nginx.bootstrap_completed`/`failed` ·
+`nginx.drift_detected`. Events: `DOMAIN_VERIFIED`, `DOMAIN_UNVERIFIED`,
+`ROUTE_CREATED`, `ROUTE_ENABLED`, `ROUTE_APPLIED`, `ROUTE_APPLY_FAILED` and
+`NGINX_DRIFT_DETECTED` publish id/status-only frames on `org:{org_id}:domains`
+(event_bus.py frame shape) — no tokens, no config text. The verification token is
+never written into an audit row, an event or a log: it is returned once to a
+`domain.manage` holder while it is still actionable, and never again.
 
 ## 13. Monitoring tie-in
 
-Monitors become polymorphic in this phase (domain-model.md §2.6). Creating a route
-auto-attaches (opt-out via `monitor_optout`): an **uptime** monitor on the route's
-`url` (`https://<hostname><path>`, existing URL-monitor machinery) and, per bound
-certificate, a **TLS-expiry** monitor (certificate-management.md §10) — both on the
-existing engine, page through the same incident pipeline, fail independently.
+Monitors became polymorphic in this phase (domain-model.md §2.6). Creating a route
+auto-attaches (opt-out via `monitor_optout`) an **uptime** monitor on the route's
+`url` — `http://<hostname><path>` in Phase 4, since that is what the node serves —
+using the existing URL-monitor machinery. Disabling a route parks the monitor
+rather than deleting it; the monitor is org-scoped like every other row. Once
+certificates exist (Phase 5), a per-certificate **TLS-expiry** monitor
+(certificate-management.md §10) joins it on the same engine, the same incident
+pipeline, and fails independently of the uptime probe.
 
 **Vantage point, disclosed.** Uptime monitors probe **from the control plane** —
 the UI says so ("checked from the NexusOps control plane"), not just this doc. A

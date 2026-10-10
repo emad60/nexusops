@@ -263,7 +263,7 @@ overlap — Operation is not renamed to Task (collides with Celery tasks) or Act
 | **Domain** | `domains` | org_id, project_id?, name (uq per org), status, verified_at, verification token, dns_provider_id? | Ownership proven via DNS TXT record before routes go live (anti-takeover). |
 | **Route** | `routes` | org_id, domain_id, hostname, path, node_id, container_id?, port, scheme, certificate_id?, headers/rate-limit JSONB, enabled | hostname+path → upstream. A route's upstream may be a container (usual case) or an external upstream. |
 | **Certificate** | `certificates` | org_id, primary CN, SANs, status, issued_at, expires_at, challenge type, auto_renew, encrypted key+chain (ciphertext columns) | Issued via ACME (DNS-01 first). Private keys never leave the control plane except encrypted delivery to the serving node. Spec: [certificate-management.md](certificate-management.md). |
-| **ProxyProvider** | — | interface only | Nginx first: renders config, ships via agent operation, validates (`nginx -t`), applies atomically with rollback. Spec: [domain-routing.md](domain-routing.md). |
+| **ProxyProvider** | — | **shipped for HTTP** (Phase 4) | Nginx first: renders config, ships via agent operation, validates (`nginx -t`), applies atomically with rollback. TLS is Phase 5. Spec: [domain-routing.md](domain-routing.md). |
 
 ### 2.5 Secrets (re-scoped — **shipped in Phase 2**)
 

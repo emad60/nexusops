@@ -119,7 +119,7 @@ steps dispatch to the node as whitelisted `Operation` rows the **agent pulls**
 | Artifact | image ref: user-supplied (6a) or node-local tag (6b) | registry / node | 6a/6b |
 | Deploy | pull image, stop old, run new with env/ports | node via container ops | 6a |
 | Health | agent-side probe loop; failure blocks routing | node via `container.healthcheck` op | 6a |
-| Route | nginx render/validate/atomic-apply for the app's routes | control plane + nginx ops | 6a (route-sync skips until Phase 4) |
+| Route | nginx render/validate/atomic-apply for the app's routes | control plane + nginx ops | 6a — **not wired**: the Phase 4 provider ships, but no route-sync step exists in the runner yet |
 | Monitor | container-health monitor auto-attached; uptime/TLS later | control plane | 6a |
 
 The control plane never sits in the customer traffic path; routing terminates on the
@@ -202,7 +202,7 @@ sequenceDiagram
 | `container.healthcheck` | local HTTP probe loop (path/port/interval/retries) | `container.lifecycle` | 6a |
 | `git.fetch` | clone/fetch repo at ref into workspace | `deployment.build` (amendment — see note below) | 6b |
 | `container.build` | `docker build` from workspace with build_config | `deployment.build` (amendment — see note below) | 6b |
-| `nginx.apply` | render/validate/atomic-apply routes (Phase 4 provider) | `domain.manage` | 6a (step skips until Phase 4) |
+| `nginx.apply` | render/validate/atomic-apply routes (Phase 4 provider) | `domain.manage` | 6a (op shipped; no deployment step dispatches it yet) |
 
 There is **no `node.execute`** and no exec/shell op type — narrow types only, per
 authorization.md §2. Ops are org-scoped; an agent fetches only ops for its own node
@@ -337,7 +337,7 @@ deployment). Rejection is the simplest safe rule and consistent with the engine'
 | 3 | STOP_OLD | `container.stop` | missing old container → tolerated (first deploy) | 60s |
 | 4 | RUN_NEW | `container.run` | create/start failure → FAILED; old container already stopped → rollback advised | 120s |
 | 5 | HEALTH_CHECK | `container.healthcheck` | retries exhausted → FAILED; **routing never applied** (real gate — the `-broken` hook is retired from the real path) | 180s |
-| 6 | ROUTE_SYNC | `nginx.apply` | apply failure → FAILED (previous routing config remains; §11); pre-Phase 4 (no nginx provider yet) → SKIPPED | 60s |
+| 6 | ROUTE_SYNC | `nginx.apply` | apply failure → FAILED (previous routing config remains; §11); today no ROUTE_SYNC step exists in the runner → SKIPPED | 60s |
 | 7 | FINALIZE | — (control plane) | marks SUCCESS, stamps `current_version`/`current_deployment_id` | 10s |
 
 The "Default timeout" column is the **per-type op timeout** fixed when 6a registers
@@ -445,8 +445,9 @@ routes whose upstream is the newly started container through the `ProxyProvider`
 (nginx first): render → `nginx -t` validate → atomic apply with rollback, executed as
 `nginx.apply` agent ops (domain-model.md §2.4). Gated by `domain.manage` at the
 route-management layer; the deployment dispatches as SYSTEM. No routes → step
-no-ops; pre-Phase 4 (nginx provider not yet shipped) → step SKIPPED the same way,
-which keeps 6a's dependency at Phase 3 only (roadmap §2).
+no-ops; the `nginx.apply` op and its provider shipped in Phase 4, but the runner
+still has no route-sync step → SKIPPED the same way, which keeps 6a's dependency at
+Phase 3 only (roadmap §2).
 Apply failure fails the deployment while the previous routing config stays live —
 a bad build can never be routed (health gate) and a routing failure never orphans a
 healthy container without recourse (rollback or re-trigger re-runs the step).

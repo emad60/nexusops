@@ -1,7 +1,7 @@
 # Node & Agent Architecture
 
-**Status:** Phases 1 and 3 shipped — the node control plane below is real, bar §7.3.
-**Date:** 2026-09-20 (status updated 2026-10-09)
+**Status:** Phases 1, 3 and 4 shipped — the node control plane below is real, bar §7.3.
+**Date:** 2026-09-20 (status updated 2026-10-10)
 **Companions:** [platform-vision.md](platform-vision.md) · [domain-model.md](domain-model.md) · [multi-tenancy.md](multi-tenancy.md) · [authorization.md](authorization.md)
 
 The **operations control plane** (§5 — creation, claim, result, cancel, expiry) shipped
@@ -9,9 +9,11 @@ in Phase 1. Phase 3 shipped the rest of this document: organization-scoped enrol
 tokens (§3.2), the heartbeat v2 additions and per-node capability advertisement (§2.3,
 §4.2), pull-based delivery of operations to the agent (§5.1, §5.4), credential rotation
 and revocation (§3.3–§3.4), HTTPS-only transport (§6.3) and the install UX (§8.2).
-The one section that remains a **target design** is §7.3 (agent self-update) — upgrades
-are still a re-run of `install.sh`. Where a subsection below still reads as a proposal,
-the *Implemented* note in it states what actually ships.
+Phase 4 added the `nginx` capability and the three `nginx.*` operation types to the
+closed whitelist (§2.3, §5.2) — the only whitelist change since Phase 3, and still
+no `node.execute`. The one section that remains a **target design** is §7.3 (agent
+self-update) — upgrades are still a re-run of `install.sh`. Where a subsection below
+still reads as a proposal, the *Implemented* note in it states what actually ships.
 
 ---
 
@@ -36,7 +38,7 @@ the design:
 | Enrollment v2 (`nxk_` tokens), capabilities, operation delivery + execution, rotation/revocation, HTTPS-only | **Real** (Phase 3) — see §3.2, §4.2, §5, §6.3 |
 | Deployment runner | **Simulated** — `SimulatedDeploymentRunner` renders fake docker-style step logs, no real work (`backend/app/providers/deployment_runner.py:107`) |
 | `sim://` monitor transports, `docker_sim` provider | **Simulated** demo/CI tooling (`backend/app/providers/docker_sim.py:39-100`) |
-| nginx capability (`nginx.*` ops) | **Not built** — reserved for Phase 4; no nginx subsystem exists (`nginx/` serves only the dashboard) |
+| nginx capability + `nginx.*` ops (`bootstrap`, `apply`, `status`) | **Real** (Phase 4) — the agent reports a full routing pre-flight and renders/atomically applies control-plane bundles; `nginx/` still serves only the dashboard, which is a different nginx (domain-routing.md §1) |
 
 ## 2. The Node concept
 
@@ -72,7 +74,7 @@ Self-reported in hello v2 (§4.2), stored in `servers.capabilities` JSONB:
 |---|---|---|
 | `docker` | docker.sock **connects and `/version` answers** — a binary on PATH is not enough | container.* ops, `logs.tail` |
 | `systemd` | `/run/systemd/system` exists (init is systemd) | service ops (future) |
-| `nginx` | *reserved* — reports honestly once an nginx provider exists | nginx.* ops (Phase 4) |
+| `nginx` | nginx is installed, its master is running, `nginx -t` passes, listeners 80/443 are owned-or-free — reported as one `routing_eligible` verdict plus a `reason` (domain-routing.md §5). Phase 4 | `nginx.bootstrap` / `nginx.apply` / `nginx.status` |
 
 The map is a JSONB blob with a bounded key count (`CAPABILITY_MAP_MAX_KEYS`) and
 per-entry `{present, version?, api_version?}`; a new capability is a key, not a
@@ -420,9 +422,9 @@ secret/cert delivery, behind their own review.
 | `container.restart` | container_id | new status | `container.lifecycle` | docker | 60s |
 | `container.remove` | container_id, force? | removed | `container.remove` | docker | 60s |
 | `logs.tail` | container_id, tail ≤ 500, since? | bounded line batch | `container.logs` | docker | 30s |
-| `nginx.render` | route set snapshot | rendered config hash + `nginx -t` output | `domain.manage` | nginx | 30s |
-| `nginx.apply` | rendered config + expected hash | applied + validate result | `domain.manage` | nginx | 60s |
-| `nginx.reload` | — | reload result | `domain.manage` | nginx | 30s |
+| `nginx.bootstrap` | `{}` | one-time: create the managed dirs and an empty managed config, add the two include lines (`nexusops.conf`, `routes.d/*.conf`) to the system `nginx.conf`, `nginx -t`, reload — rolling the system file back on any failure | `domain.manage` | nginx | 60s |
+| `nginx.apply` | `bundle` (fingerprint + manifest + allowlisted files), `reload` | staged → `nginx -t` → atomic swap → reload, with rollback; reports `applied`/`failed`/`rolled_back`/`rollback_failed` | `domain.manage` | nginx | 60s |
+| `nginx.status` | `{}` | live fingerprint, nginx version, `nginx -t` result — bounded, read-only | `domain.manage` | nginx | 30s |
 | `secret.env.apply` | *reserved* — defined by secrets-architecture.md §7 | delivery ack, never values | assigned with its own review | — | per §7 |
 | `certificate.install` / `certificate.remove` | *reserved* — defined by certificate-management.md §6 | file-write result, never key material | assigned with its own review | — | per cert doc |
 

@@ -146,7 +146,10 @@ export type OperationType =
   | "container.stop"
   | "container.restart"
   | "container.remove"
-  | "logs.tail";
+  | "logs.tail"
+  | "nginx.bootstrap"
+  | "nginx.apply"
+  | "nginx.status";
 
 export type OperationStatus =
   | "PENDING"
@@ -567,4 +570,176 @@ export interface SearchHit {
   title: string;
   subtitle: string;
   url_path: string;
+}
+
+/* --- Phase 4: domains and routes ------------------------------------------ */
+
+/** Domain ownership lifecycle. Only `VERIFIED` may back an enabled route. */
+export type DomainStatus =
+  | "PENDING"
+  | "VERIFYING"
+  | "VERIFIED"
+  | "STALE"
+  | "UNVERIFIED"
+  | "FAILED";
+
+/**
+ * How a route's desired configuration relates to what the node actually serves.
+ * `PENDING` means an apply is queued but not confirmed — never "applied".
+ */
+export type RouteConfigState = "PENDING" | "IN_SYNC" | "STALE" | "FAILED";
+
+/** The exact DNS record a domain owner has to publish, while it is actionable. */
+export interface DomainVerificationOut {
+  record_name: string;
+  record_type: string;
+  record_value: string;
+  active: boolean;
+}
+
+/** Best-effort A/AAAA observation — a warning only, never a gate. */
+export interface DomainReachabilityOut {
+  hostname: string | null;
+  addresses: string[];
+  expected_addresses: string[];
+  resolves_to_node: boolean | null;
+  checked_at: string | null;
+  warning: string | null;
+}
+
+/** Domain read model. `verified` is derived from `status` server-side. */
+export interface DomainOut {
+  id: string;
+  project_id: string | null;
+  project_name: string | null;
+  name: string;
+  status: DomainStatus;
+  verified: boolean;
+  verified_at: string | null;
+  last_checked_at: string | null;
+  proof_lost_at: string | null;
+  stale_expires_at: string | null;
+  attempt_count: number;
+  last_error: string;
+  ns_snapshot: string[];
+  verification: DomainVerificationOut | null;
+  reachability: DomainReachabilityOut | null;
+  route_count: number;
+  enabled_route_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DomainDetailOut extends DomainOut {
+  routes: RouteOut[];
+}
+
+/** One header a route adds: to the response, or to the upstream request. */
+export interface RouteHeader {
+  name: string;
+  value: string;
+  target: "response" | "proxy";
+}
+
+export interface RateLimit {
+  requests: number;
+  window: "1s" | "1m";
+  burst: number;
+}
+
+/** A fixed host redirect. Phase 4 has no field for a scheme change. */
+export interface RouteRedirect {
+  to_host: string;
+  code: number;
+}
+
+/** Route read model. HTTP only until Phase 5 ships certificates. */
+export interface RouteOut {
+  id: string;
+  domain_id: string;
+  domain_name: string | null;
+  hostname: string;
+  path: string;
+  url: string;
+  node_id: string;
+  node_name: string | null;
+  container_id: string | null;
+  container_name: string | null;
+  container_ref: string | null;
+  port: number;
+  scheme: string;
+  enabled: boolean;
+  config_state: RouteConfigState;
+  headers: RouteHeader[];
+  rate_limit: RateLimit | null;
+  redirect: RouteRedirect | null;
+  monitor_id: string | null;
+  monitor_optout: boolean;
+  last_applied_at: string | null;
+  last_bundle_id: string | null;
+  last_apply_error: string;
+  /** Human-readable explanation of `config_state` — never raw configuration. */
+  status_detail: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface RouteDetailOut extends RouteOut {
+  domain_status: string;
+}
+
+/** The node's reported nginx pre-flight, bounded to the useful facts. */
+export interface NodeProxyCapabilityOut {
+  present: boolean;
+  version: string | null;
+  running: boolean | null;
+  config_test_ok: boolean | null;
+  routing_eligible: boolean;
+  reason: string;
+  listener_80: "MANAGED" | "FREE" | "OTHER" | "UNKNOWN";
+  listener_443: "MANAGED" | "FREE" | "OTHER" | "UNKNOWN";
+}
+
+export interface NodeProxyStatusOut {
+  id: string;
+  node_id: string;
+  node_name: string;
+  provider: string;
+  capability: NodeProxyCapabilityOut;
+  eligible: boolean;
+  ineligible_reason: string;
+  expected_bundle_id: string | null;
+  live_bundle_id: string | null;
+  drift: boolean | null;
+  last_status_at: string | null;
+  last_status_error: string;
+  route_total: number;
+  route_enabled: number;
+  route_in_sync: number;
+  route_stale: number;
+  route_failed: number;
+  last_applied_at: string | null;
+  last_apply_error: string;
+  created_at: string;
+  updated_at: string;
+}
+
+/** One genuinely usable published port reported by the node's agent. */
+export interface UpstreamPortOut {
+  host_port: number;
+  container_port: number;
+  protocol: string;
+  bind_address: string;
+  upstream_host: string;
+}
+
+/** A container that can actually back a route on a node. */
+export interface UpstreamContainerOut {
+  id: string;
+  container_id: string;
+  name: string;
+  image_ref: string;
+  status: string;
+  upstream_ports: UpstreamPortOut[];
+  unavailable_reason: string | null;
 }

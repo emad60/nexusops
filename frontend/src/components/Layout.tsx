@@ -8,9 +8,11 @@ import {
   Boxes,
   Container,
   FolderKanban,
+  Globe,
   KeyRound,
   KeySquare,
   LayoutDashboard,
+  Route as RouteIcon,
   MonitorSmartphone,
   Rocket,
   Menu,
@@ -181,6 +183,10 @@ export function Layout() {
         {hasPermission("container.read") && navItem("/containers", "Containers", Container)}
         {hasPermission("container.read") && navItem("/docker-hosts", "Docker hosts", Boxes)}
         {hasPermission("project.read") && navItem("/projects", "Projects", FolderKanban)}
+
+        <div className="nav-group-label">Routing</div>
+        {hasPermission("domain.read") && navItem("/domains", "Domains", Globe)}
+        {hasPermission("domain.read") && navItem("/routes", "Routes", RouteIcon)}
 
         <div className="nav-group-label">Observability</div>
         {hasPermission("monitor.read") && navItem("/monitors", "Monitors", Activity)}

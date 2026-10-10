@@ -24,6 +24,11 @@ from pydantic import Field, ValidationError
 from app.core.errors import UnprocessableEntity
 from app.models.enums import OperationStatus, OperationType
 from app.schemas.base import APIModel, OutModel
+from app.schemas.proxy import (
+    NginxApplyParams,
+    NginxBootstrapParams,
+    NginxStatusParams,
+)
 
 #: Container ids are docker's 64-hex (or a 12-char short id). Anchored and
 #: character-limited at the boundary so nothing exotic reaches the node.
@@ -89,6 +94,14 @@ OPERATION_SPECS: dict[OperationType, OperationSpec] = {
         "container.remove", "docker", 60, ContainerActionParams
     ),
     OperationType.LOGS_TAIL: OperationSpec("container.logs", "docker", 30, LogsTailParams),
+    # Phase 4. All three are gated by ``domain.manage`` *and* the ``nginx``
+    # capability, and their params are typed models (a bundle of allowlisted
+    # paths, or nothing at all) — there is no generic file or command surface.
+    OperationType.NGINX_BOOTSTRAP: OperationSpec(
+        "domain.manage", "nginx", 120, NginxBootstrapParams
+    ),
+    OperationType.NGINX_APPLY: OperationSpec("domain.manage", "nginx", 180, NginxApplyParams),
+    OperationType.NGINX_STATUS: OperationSpec("domain.manage", "nginx", 60, NginxStatusParams),
 }
 
 

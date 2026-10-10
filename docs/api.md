@@ -701,6 +701,28 @@ Secret resolution at deploy time prefers the most specific scope —
 reference fails the deployment before any step runs rather than substituting an
 empty value.
 
+### Domains & routes — `domains.py`, `routes.py`
+
+Phase 4, **HTTP only**: `scheme` is `http` and no endpoint accepts TLS material
+(Phase 5). Domain ownership is proved by a DNS TXT record before any route can be
+gated live — see [domain-routing.md](domain-routing.md).
+
+| Method | Path | Permission | Notes |
+|---|---|---|---|
+| POST | `/domains` | `domain.manage` | `pending` row + a one-time verification token |
+| GET | `/domains` | `domain.read` | filters `status`, `project_id`, `q`; the token is returned only to `domain.manage` holders, and only while it is still actionable |
+| GET | `/domains/{domain_id}` | `domain.read` | detail + `verification` instructions + `reachability` |
+| GET | `/domains/{domain_id}/routes` | `domain.read` | routes served by this name |
+| POST | `/domains/{domain_id}/verify` · `/re-verify` | `domain.manage` | enqueues DNS verification; `re-verify` clears a `STALE`/`FAILED` state |
+| DELETE | `/domains/{domain_id}` | `domain.manage` | 409 while enabled routes still reference it |
+| GET | `/routes` | `domain.read` | filters `domain_id`, `node_id`, `enabled`, `config_state` |
+| POST | `/routes` | `domain.manage` | domain must be verified, hostname covered by it, upstream container on the route's node and publishing the requested port, header/rate-limit/redirect inputs from closed allowlists |
+| GET · PATCH · DELETE | `/routes/{route_id}` | `domain.read` / `domain.manage` | PATCH re-validates and re-applies when the route is enabled |
+| POST | `/routes/{route_id}/enable` · `/disable` | `domain.manage` | the live gate: re-checks domain status, container state and the node's nginx pre-flight, then queues `nginx.apply` |
+| GET | `/nodes/{server_id}/route-targets` | `domain.read` | upstream picker: containers on that node with their published host ports |
+| GET | `/nodes/{server_id}/proxy/status` | `domain.read` | last applied fingerprint, provider, drift state |
+| POST | `/nodes/{server_id}/proxy/status/refresh` · `/proxy/apply` | `domain.manage` | 409 `NGINX_PREFLIGHT_FAILED` / `NODE_CAPABILITY_STALE` when the node cannot serve HTTP right now |
+
 ### Monitoring: monitors, incidents — `monitors.py`, `incidents.py`
 
 | Method | Path | Permission | Notes |
@@ -1009,3 +1031,14 @@ owner-role DSN when RLS is expected: the runtime connects as `nexusops_app`
 - **Account lockout is undetectable from the API surface** (deliberately identical
   `INVALID_CREDENTIALS` responses); operators must check the audit/event trail to
   distinguish lockouts from bad passwords.
+- **Routes are HTTP-only until Phase 5.** `scheme` is fixed at `http` by a database
+  CHECK, no API field accepts TLS material, and the renderer emits no `ssl_`
+  directive and no `https://` redirect target — the route's `url` is what the node
+  actually serves. Serving HTTPS, and issuing/renewing the certificate behind it,
+  is the next phase ([certificate-management.md](certificate-management.md)).
+- **A route needs a node that can pass the nginx pre-flight now.** Domain
+  verification, route creation and `/enable` all refuse with `409`
+  (`NGINX_PREFLIGHT_FAILED`, `NODE_CAPABILITY_STALE`, `DOMAIN_NOT_SERVING`) when the
+  node cannot serve HTTP at that moment, and the capability report is trusted for
+  five minutes only. A node that stopped heartbeating must report again before its
+  routes can be gated live — a stale row is never treated as permission.

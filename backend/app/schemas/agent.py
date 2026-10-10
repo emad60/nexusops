@@ -64,11 +64,33 @@ class CapabilityReport(APIModel):
 
     ``present`` defaults to false, and a capability absent from the map is
     *unreported*, not "available" — dispatch treats both the same way (refuse).
+
+    The optional routing-preflight fields are populated by the ``nginx`` entry
+    and are all bounded: a listener state is one of the four
+    :class:`~app.models.enums.ListenerOwnership` values, ``reason`` is a short
+    sanitized sentence, and ``bundle_id`` is a fingerprint. An older agent that
+    sends only ``present``/``version`` still validates — that is why these are
+    optional rather than required, and why a missing ``routing_eligible`` reads
+    as "not eligible" rather than "assume yes".
     """
 
     present: bool = False
     version: str | None = Field(default=None, max_length=64)
     api_version: str | None = Field(default=None, max_length=32)
+    #: Whether the intended service is actually running (master process alive).
+    running: bool | None = None
+    #: Whether configuration testing (``nginx -t``) is supported and succeeded.
+    config_test_ok: bool | None = None
+    #: Fingerprint of the configuration tree the node currently has live.
+    bundle_id: str | None = Field(default=None, max_length=64)
+    #: Port-80 listener ownership: MANAGED / OTHER / FREE / UNKNOWN.
+    listener_80: str | None = Field(default=None, max_length=16)
+    #: Port-443 listener ownership (reserved for Phase 5, still pre-flighted).
+    listener_443: str | None = Field(default=None, max_length=16)
+    #: The agent's own verdict: NexusOps-managed routing is safe on this node.
+    routing_eligible: bool | None = None
+    #: Human-readable explanation when ``routing_eligible`` is false.
+    reason: str | None = Field(default=None, max_length=200)
 
 
 class AgentHelloIn(APIModel):
@@ -123,6 +145,34 @@ class AgentHelloOut(APIModel):
     min_agent_version: str = MIN_AGENT_VERSION
 
 
+class AgentContainerPortIn(APIModel):
+    """One published-port binding of a container, as docker reports it.
+
+    Four distinct facts, deliberately not collapsed into one integer:
+
+    * ``container_port`` — the port *inside* the container (what the app listens
+      on). Never used as a proxy target on its own.
+    * ``host_port`` — the port on the node. This is the only addressable upstream
+      port, and is ``None`` for an unpublished (expose-only) port.
+    * ``host_ip`` — the bind address (``127.0.0.1``, ``0.0.0.0``, a specific
+      address, or empty when docker did not report one).
+    * ``protocol`` — ``tcp`` or ``udp``. Only TCP can be reverse-proxied.
+    """
+
+    container_port: int = Field(ge=1, le=65535)
+    host_port: int | None = Field(default=None, ge=1, le=65535)
+    host_ip: str | None = Field(default=None, max_length=64)
+    protocol: str = Field(default="tcp", max_length=8)
+
+    @field_validator("protocol")
+    @classmethod
+    def _check_protocol(cls, value: str) -> str:
+        lowered = value.lower()
+        if lowered not in ("tcp", "udp", "sctp"):
+            raise ValueError("protocol must be tcp, udp or sctp")
+        return lowered
+
+
 class AgentContainerIn(APIModel):
     """Observed container state reported by an agent."""
 
@@ -139,6 +189,9 @@ class AgentContainerIn(APIModel):
     cpu_percent: float | None = Field(default=None, ge=0, le=10_000)
     mem_used_mb: float | None = Field(default=None, ge=0)
     mem_limit_mb: float | None = Field(default=None, ge=0)
+    #: Published ports (Phase 4). An agent that reports none sends an empty list
+    #: — which is the honest "no usable upstream" state, not a missing field.
+    ports: list[AgentContainerPortIn] = Field(default_factory=list, max_length=64)
 
     @field_validator("status")
     @classmethod

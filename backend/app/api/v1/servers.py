@@ -22,6 +22,7 @@ from app.schemas.enrollment import (
     EnrollmentTokenCreated,
     EnrollmentTokenOut,
 )
+from app.schemas.route import NodeProxyStatusOut, UpstreamContainerOut
 from app.schemas.server import (
     EnrollTokenOut,
     ServerCreate,
@@ -31,7 +32,7 @@ from app.schemas.server import (
     SystemEventOut,
 )
 from app.schemas.tag import TagOut, TagUpsertIn
-from app.services import audit_service, enrollment_service, server_service
+from app.services import audit_service, enrollment_service, proxy_service, server_service
 
 #: Prefix-less inner router: the paths below are declared once and mounted under
 #: both the canonical ``/nodes`` surface and the temporary ``/servers`` alias.
@@ -44,6 +45,12 @@ DeleteCtx = Annotated[AuthContext, Depends(require_permission("node.delete"))]
 #: Credential lifecycle actions (rotate/revoke/enrollment-token revoke) reuse the
 #: existing ``node.credential.write`` codename — no new grant is invented.
 CredentialCtx = Annotated[AuthContext, Depends(require_permission("node.credential.write"))]
+#: Proxy status is routing data, so it is gated on the routing codenames rather
+#: than on node.read: a node reader who cannot see domains should not learn the
+#: node's route inventory either. Changing proxy configuration needs the same
+#: grant as changing a route (``domain.manage``).
+ProxyReadCtx = Annotated[AuthContext, Depends(require_permission("domain.read"))]
+ProxyManageCtx = Annotated[AuthContext, Depends(require_permission("domain.manage"))]
 
 DbDep = Annotated[AsyncSession, Depends(get_session)]
 
@@ -305,6 +312,85 @@ async def revoke_agent_token(
         request=request,
     )
     return ServerOut.model_validate(node)
+
+
+@_router.get("/{server_id}/proxy/status", response_model=NodeProxyStatusOut)
+async def node_proxy_status(
+    server_id: uuid.UUID, db: DbDep, ctx: ProxyReadCtx
+) -> NodeProxyStatusOut:
+    """Provider capability, last apply and drift state for one node.
+
+    Bounded by construction: a version string, four listener states, fingerprints
+    and route counters. Never configuration text, never a file listing.
+    """
+    del ctx
+    server = await server_service.get_server(db, server_id)
+    return await proxy_service.node_proxy_status(db, node=server)
+
+
+@_router.get("/{server_id}/route-targets", response_model=list[UpstreamContainerOut])
+async def node_route_targets(
+    server_id: uuid.UUID, db: DbDep, ctx: ProxyReadCtx
+) -> list[UpstreamContainerOut]:
+    """Containers on this node that a route can point at, with usable ports.
+
+    Only genuinely addressable targets appear: an expose-only port, a UDP-only
+    port and a port colliding with the proxy's own 80/443 are excluded, and a
+    container without a usable port is returned with a reason instead of a
+    fabricated one.
+    """
+    del ctx
+    server = await server_service.get_server(db, server_id)
+    return await proxy_service.usable_upstreams(db, node_id=server.id)
+
+
+@_router.post("/{server_id}/proxy/status/refresh", response_model=NodeProxyStatusOut)
+async def refresh_node_proxy_status(
+    server_id: uuid.UUID, request: Request, db: DbDep, ctx: ProxyManageCtx
+) -> NodeProxyStatusOut:
+    """Ask the node to report its live proxy state (queues ``nginx.status``)."""
+    server = await server_service.get_server(db, server_id)
+    operation = await proxy_service.request_status(db, node=server)
+    await audit_service.record(
+        db,
+        ctx,
+        action="nginx.status_requested",
+        resource_type="node",
+        resource_id=server.id,
+        metadata={"queued": operation is not None},
+        request=request,
+    )
+    return await proxy_service.node_proxy_status(db, node=server)
+
+
+@_router.post("/{server_id}/proxy/apply", response_model=NodeProxyStatusOut)
+async def apply_node_proxy_config(
+    server_id: uuid.UUID, request: Request, db: DbDep, ctx: ProxyManageCtx
+) -> NodeProxyStatusOut:
+    """Force a re-render and apply of this node's desired configuration.
+
+    The routine path applies automatically on every route change; this exists for
+    drift recovery and for an operator who wants the desired state pushed now.
+    """
+    server = await server_service.get_server(db, server_id)
+    await proxy_service.require_eligible(server)
+    await proxy_service.enqueue_apply(
+        db,
+        node=server,
+        requested_by_id=ctx.user_id,
+        reason="operator_requested",
+        force=True,
+    )
+    await audit_service.record(
+        db,
+        ctx,
+        action="nginx.apply_requested",
+        resource_type="node",
+        resource_id=server.id,
+        metadata={"reason": "operator_requested"},
+        request=request,
+    )
+    return await proxy_service.node_proxy_status(db, node=server)
 
 
 def _enrollment_out(token: object) -> EnrollmentTokenOut:

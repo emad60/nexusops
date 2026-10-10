@@ -23,14 +23,15 @@ from app.schemas.operation import (
 )
 from app.services import operation_service
 
-#: Types the companion architecture documents reserve for Phase 2 (domains/TLS,
-#: nginx and secret delivery). None may exist yet: each needs the subsystem it
-#: belongs to, and shipping the name alone would create a pass-through.
-RESERVED_PHASE2_TYPES = (
+#: Types the companion architecture documents reserve for a later phase
+#: (certificates, secret delivery). None may exist yet: each needs the subsystem
+#: it belongs to, and shipping the name alone would create a pass-through.
+#: Phase 4's nginx surface left this list deliberately — see the positive test
+#: below, which is what replaced it.
+RESERVED_LATER_PHASE_TYPES = (
     "certificate.issue",
     "certificate.renew",
-    "nginx.apply",
-    "nginx.reload",
+    "certificate.install",
     "secret.env.apply",
 )
 
@@ -52,11 +53,30 @@ def test_no_generic_execute_grant_is_reachable() -> None:
         assert not spec.permission.endswith(".execute")
 
 
-def test_no_reserved_phase2_type_is_registered() -> None:
+def test_no_reserved_later_phase_type_is_registered() -> None:
     values = {str(member) for member in OperationType}
-    for reserved in RESERVED_PHASE2_TYPES:
+    for reserved in RESERVED_LATER_PHASE_TYPES:
         assert reserved not in values
         assert reserved not in {str(op_type) for op_type in OPERATION_SPECS}
+
+
+def test_phase4_nginx_operations_are_registered_and_gated() -> None:
+    """Phase 4 ships exactly the three nginx ops, each gated on the capability.
+
+    This is the other half of the reservation above: the names may exist now, but
+    only as reviewed specs on a capability a node can actually report — never as
+    an enum member or a params pass-through.
+    """
+    nginx_ops = {
+        OperationType.NGINX_BOOTSTRAP,
+        OperationType.NGINX_APPLY,
+        OperationType.NGINX_STATUS,
+    }
+    assert nginx_ops <= set(OPERATION_SPECS)
+    for op_type in nginx_ops:
+        spec = OPERATION_SPECS[op_type]
+        assert spec.capability == "nginx"
+        assert spec.params_model.model_config.get("extra") == "forbid", op_type
 
 
 def test_specs_reject_unknown_params() -> None:

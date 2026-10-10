@@ -145,7 +145,7 @@ the host (`cd frontend && npm run dev`; it proxies `/api`, WebSockets included, 
 | `make test-backend-unit` | pytest `-m "not integration"` | nothing external |
 | `make test-backend` | full backend suite (300+ tests) | stack up (postgres :5433, redis :6390) |
 | `make test-frontend` | vitest suite | nothing external |
-| `make e2e` | Playwright journey (`frontend/e2e/journey.spec.ts`) | a running stack (`make up` first) |
+| `make e2e` | the whole Playwright suite on a throwaway isolated stack (`frontend/e2e/*.spec.ts`) | docker only — it builds, seeds, runs and tears the stack down itself |
 
 Quality gates: `make lint` (ruff + eslint), `make typecheck` (mypy + tsc).
 
@@ -163,8 +163,9 @@ nexusops/
 │   └── tests/           # unit/ + integration/ (against dockerized postgres/redis)
 ├── docs/                # architecture.md, agent.md, api.md, deployment.md,
 │                        # development.md, security.md, troubleshooting.md
+├── e2e/                 # E2E-only tooling: mock DNS + the real-nginx node image
 ├── frontend/
-│   ├── e2e/             # Playwright journey
+│   ├── e2e/             # Playwright journeys (per phase + the demo journey)
 │   └── src/             # React SPA: pages/ components/ api/ auth/ hooks/
 ├── nginx/               # edge container: routes /, /api/, /ws/
 ├── scripts/             # generate_secrets.sh

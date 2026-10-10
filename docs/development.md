@@ -291,15 +291,43 @@ reference example.
 ### End-to-end tests
 
 ```bash
-make up     # stack must be running, migrated, and seeded
-make e2e    # cd frontend && npx playwright install chromium; npx playwright test
+make up          # dev stack, migrated and seeded — for running one spec by hand
+make e2e         # everything, on a throwaway isolated stack
 ```
+
+`make e2e` is self-contained: it brings up its own compose project on its own host
+ports (`E2E_HTTP_PORT`, …), seeds it with `ENVIRONMENT=test`, runs the suite and
+then removes the stack *and its volume*. Prefer it over hand-running Playwright:
+the phase journeys assume a freshly migrated database ("nothing is verified yet"),
+and the Phase 4 journey needs `docker-compose.e2e.yml` — see below.
+
+The overlay adds two things the journeys need and the dev stack does not have:
+
+- **`dnsmock`** (`e2e/dnsmock`) — a real authoritative nameserver for one zone
+  (`E2E_DNS_ZONE`, default `e2e.test`), with a small control API on
+  `E2E_DNS_CONTROL_URL` (default `http://127.0.0.1:8054`) that the Phase 4 spec
+  posts its minted verification token to. The api and worker resolve through it
+  (`dns:` in the overlay); anything outside its zone is forwarded to the
+  container's own resolver, so nothing else in the stack loses DNS. It is
+  stdlib-only, on an `alpine` + `python3` image.
+- **`e2e/nginxnode`** — a node image that really runs nginx. `phase4.spec.ts`
+  builds it on demand (`docker build -t nexusops-e2e-nginx-node`) and starts a
+  container from it with `--network host` and the docker socket, then enrolls the
+  real `agent/nexusops_agent.py` inside it, so the apply pipeline is exercised
+  against real nginx instead of a fake. It binds host port 80 while it runs, so
+  two Phase 4 runs cannot overlap.
+
+Specs skip themselves when their prerequisite is missing rather than failing an
+environment that cannot run them: no Docker → `phase3`/`phase4` skip; no mock DNS
+→ `phase4` skips.
 
 `frontend/playwright.config.ts`: single worker, no parallelism, 120 s test timeout,
 base URL `http://127.0.0.1:8080`, trace + screenshots retained on failure, HTML
 report written but never auto-opened (`npx playwright show-report` to view it).
-The journey (`frontend/e2e/journey.spec.ts`) drives the real UI through the edge
-against a `SIMULATION_MODE=true` stack; `frontend/e2e/fixtures.ts` bootstraps an
+`journey.spec.ts` drives the real UI through the edge against a
+`SIMULATION_MODE=true` stack, and `phase2`/`phase3`/`phase4.spec.ts` add the
+per-phase journeys (projects/secrets, a real agent enrollment, and a real nginx
+node serving a route); `frontend/e2e/fixtures.ts` bootstraps an
 authenticated API context before any test touches the browser: it logs in with
 the fixed test pair from §2 and only falls back to first-user registration on a
 completely fresh database. A database seeded under the default

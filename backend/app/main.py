@@ -141,6 +141,7 @@ def _include_routers(application: FastAPI, settings: Settings) -> None:
         containers,
         deployments,
         docker_hosts,
+        domains,
         events,
         health,
         incidents,
@@ -151,6 +152,7 @@ def _include_routers(application: FastAPI, settings: Settings) -> None:
         organizations,
         projects,
         roles,
+        routes,
         search,
         secrets,
         servers,
@@ -187,6 +189,8 @@ def _include_routers(application: FastAPI, settings: Settings) -> None:
         incidents,
         projects,
         deployments,
+        domains,
+        routes,
         operations,
     ):
         for name in (

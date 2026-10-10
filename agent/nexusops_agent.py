@@ -31,6 +31,7 @@ Security stance (docs/node-agent-architecture.md §6):
 from __future__ import annotations
 
 import argparse
+import hashlib
 import http.client
 import ipaddress
 import json
@@ -40,13 +41,14 @@ import shutil
 import signal
 import socket
 import ssl
+import subprocess
 import sys
 import tempfile
 import time
 import urllib.parse
-from datetime import datetime
+from datetime import UTC, datetime
 
-AGENT_VERSION = "1.1.0"
+AGENT_VERSION = "1.2.0"
 #: Wire protocol this agent speaks. The control plane negotiates the lower of the
 #: two; an old agent never receives a v2 heartbeat body.
 PROTOCOL_VERSION = 2
@@ -312,7 +314,17 @@ def systemd_capability() -> dict:
 
 
 def build_capabilities() -> dict[str, dict]:
-    return {"docker": docker_capability(), "systemd": systemd_capability()}
+    """Everything the control plane uses to decide what it may ask this node.
+
+    ``nginx`` carries the routing pre-flight alongside the binary check, so a node
+    that has nginx installed but cannot safely host managed routes reports that
+    honestly instead of looking available.
+    """
+    return {
+        "docker": docker_capability(),
+        "systemd": systemd_capability(),
+        "nginx": nginx_capability(),
+    }
 
 
 def build_facts() -> dict:
@@ -347,6 +359,41 @@ def build_facts() -> dict:
     return facts
 
 
+def _container_ports(item: dict) -> list[dict]:
+    """Normalise docker's ``Ports`` array into the four facts routing needs.
+
+    Docker reports ``/containers/json`` entries as
+    ``{IP, PrivatePort, PublicPort, Type}``. ``PublicPort`` is absent for an
+    expose-only port, which is exactly the "not addressable" case we must not
+    invent a host port for — a missing fact stays missing (``None``), so the
+    control plane can tell "unpublished" from "published on port 0".
+    """
+    raw = item.get("Ports")
+    if not isinstance(raw, list):
+        return []
+    ports: list[dict] = []
+    for binding in raw[:64]:
+        if not isinstance(binding, dict):
+            continue
+        private = binding.get("PrivatePort")
+        public = binding.get("PublicPort")
+        if not isinstance(private, int) or isinstance(private, bool):
+            continue
+        if not (1 <= private <= 65535):
+            continue
+        entry: dict = {
+            "container_port": private,
+            "protocol": str(binding.get("Type") or "tcp").lower()[:8],
+        }
+        if isinstance(public, int) and not isinstance(public, bool) and 1 <= public <= 65535:
+            entry["host_port"] = public
+        host_ip = binding.get("IP")
+        if isinstance(host_ip, str) and host_ip:
+            entry["host_ip"] = host_ip[:64]
+        ports.append(entry)
+    return ports
+
+
 def collect_containers(max_inspect: int = 10) -> list[dict]:
     """Best-effort container list; empty when no docker socket is present."""
     try:
@@ -379,6 +426,11 @@ def collect_containers(max_inspect: int = 10) -> list[dict]:
             "health": health or None,
             "image_ref": str(item.get("Image", ""))[:300],
             "restart_count": 0,
+            # Phase 4: the published-port bindings, straight from the list call.
+            # Without these the route editor cannot offer a truthful upstream —
+            # and with them, an unpublished or UDP-only port is visibly absent
+            # rather than silently unusable.
+            "ports": _container_ports(item),
         }
 
         # RestartCount/Health need inspect; cap it so a huge fleet stays cheap.
@@ -461,6 +513,858 @@ def collect_container_stats(
     return updates, new_prev
 
 
+# --- nginx: capability, routing pre-flight, and the managed apply pipeline -----
+#
+# Phase 4 owns the node-side half of the reverse proxy. Three properties matter:
+#
+# * **No shell, ever.** Every external command is a fixed argv list executed with
+#   ``subprocess.run(..., shell=False)`` and no user-controlled element: the only
+#   variable is which absolute path holds the configuration, and that path is
+#   computed from a constant. There is no ``node.execute`` and no file-write
+#   primitive — the bundle arrives as data with an allowlisted path per file.
+# * **The pre-flight answers the real question.** "nginx is installed" says
+#   nothing about whether this instance owns :80. The capability report names
+#   which of the four listener states each required port is in, so the control
+#   plane can refuse instead of guessing.
+# * **A failed apply never costs the working configuration.** The live tree
+#   changes only after the staged tree validates, the previous tree is preserved,
+#   and a failing reload restores it.
+
+#: Managed root. Fixed, not configurable from the control plane.
+NGINX_MANAGED_ROOT = os.environ.get("NEXUSOPS_NGINX_ROOT", "/etc/nexusops/nginx")
+NGINX_MANAGED_CONF = f"{NGINX_MANAGED_ROOT}/nexusops.conf"
+NGINX_ROUTES_DIR = f"{NGINX_MANAGED_ROOT}/routes.d"
+NGINX_STAGED_DIR = f"{NGINX_MANAGED_ROOT}/staged"
+NGINX_BACKUP_DIR = f"{NGINX_MANAGED_ROOT}/backup"
+NGINX_STATE_DIR = f"{NGINX_MANAGED_ROOT}/state"
+#: The customer's own nginx configuration, which bootstrap edits minimally.
+NGINX_SYSTEM_CONF = os.environ.get("NEXUSOPS_NGINX_CONF", "/etc/nginx/nginx.conf")
+#: nginx's master pid, used for the running check and the SIGHUP fallback.
+NGINX_PID_FILE = os.environ.get("NEXUSOPS_NGINX_PID", "/run/nginx.pid")
+#: The exact include lines bootstrap adds — the whole of its system-file change.
+NGINX_INCLUDE_HTTP = f"include {NGINX_MANAGED_ROOT}/nexusops.conf;"
+NGINX_INCLUDE_ROUTES = f"include {NGINX_MANAGED_ROOT}/routes.d/*.conf;"
+
+NGINX_TEMPLATE_VERSION = 1
+NGINX_PROVIDER = "nginx"
+NGINX_MAX_BUNDLE_FILES = 64
+NGINX_MAX_FILE_BYTES = 64 * 1024
+NGINX_MAX_BUNDLE_BYTES = 512 * 1024
+NGINX_MAX_ROUTES = 40
+NGINX_ROUTE_FILE_RE = re.compile(r"^r-[0-9a-f]{32}\.conf$")
+NGINX_TEMPLATE_BANNER_RE = re.compile(r"^# templates v(\d+)$", re.MULTILINE)
+#: Ports Phase 4 requires: 80 serves the routes; 443 is reserved for Phase 5 and
+#: must be either unused or already owned by the managed nginx instance.
+NGINX_REQUIRED_PORTS = (80, 443)
+
+
+def _nginx_binary() -> str | None:
+    """Absolute path of the nginx binary, or ``None`` when it is not installed."""
+    override = os.environ.get("NEXUSOPS_NGINX_BIN")
+    if override and os.path.isfile(override):
+        return override
+    found = shutil.which("nginx")
+    if found:
+        return found
+    for candidate in ("/usr/sbin/nginx", "/usr/local/sbin/nginx", "/sbin/nginx"):
+        if os.path.isfile(candidate):
+            return candidate
+    return None
+
+
+def _nginx_version(binary: str) -> str | None:
+    """``nginx -v`` prints its version to stderr; bounded and non-shell."""
+    try:
+        result = subprocess.run(  # noqa: S603 - fixed argv, shell=False
+            [binary, "-v"],
+            capture_output=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    raw = (result.stderr or result.stdout or b"").decode("utf-8", "replace")
+    match = re.search(r"nginx/([\w.\-]+)", raw)
+    return match.group(1)[:64] if match else None
+
+
+def _pid_alive(path: str) -> bool | None:
+    """Whether the pid in *path* names a live process; ``None`` if unreadable."""
+    try:
+        with open(path, encoding="utf-8") as handle:
+            raw = handle.read(32).strip()
+    except OSError:
+        return None
+    if not raw.isdigit():
+        return None
+    pid = int(raw)
+    if pid <= 0:
+        return None
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # Someone else's process: it exists, which is all we asked.
+        return True
+    except OSError:
+        return None
+    return True
+
+
+def _nginx_running() -> bool | None:
+    """Whether the intended nginx instance is running.
+
+    The pid file is the primary answer because it names *the* master process.
+    ``systemctl is-active`` is only a fallback for a service whose pid file the
+    unit puts elsewhere, and ``None`` — unknown — is a distinct answer from
+    ``False``: an unknown state fails the pre-flight rather than being read as
+    running.
+    """
+    pid_state = _pid_alive(NGINX_PID_FILE)
+    if pid_state is not None:
+        return pid_state
+    if shutil.which("systemctl"):
+        try:
+            result = subprocess.run(  # noqa: S603 - fixed argv, shell=False
+                ["systemctl", "is-active", "nginx"],
+                capture_output=True,
+                timeout=5,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        state = (result.stdout or b"").decode("utf-8", "replace").strip()
+        if state in ("active", "activating", "reloading"):
+            return True
+        if state in ("inactive", "failed", "deactivating"):
+            return False
+    return None
+
+
+def _listening_ports() -> set[int] | None:
+    """TCP ports in LISTEN state, read from ``/proc`` (no shell, no tooling).
+
+    ``None`` means the listener table could not be read at all — which the caller
+    must treat as *unknown*, never as "nothing is listening".
+    """
+    ports: set[int] = set()
+    readable = False
+    for path in ("/proc/net/tcp", "/proc/net/tcp6"):
+        try:
+            with open(path, encoding="utf-8") as handle:
+                lines = handle.read().splitlines()
+        except OSError:
+            continue
+        readable = True
+        for line in lines[1:]:
+            fields = line.split()
+            if len(fields) < 4 or fields[3] != "0A":  # 0A = LISTEN
+                continue
+            local = fields[1]
+            _, _, port_hex = local.rpartition(":")
+            try:
+                ports.add(int(port_hex, 16))
+            except ValueError:
+                continue
+    return ports if readable else None
+
+
+def _nginx_owned_ports(binary: str) -> set[int] | None:
+    """Ports declared by ``listen`` directives in the *loaded* configuration.
+
+    ``nginx -T`` dumps every included file, so this answers "which ports does the
+    intended instance itself claim" without any process inspection — which is
+    exactly what separates "nginx owns this port" from "something else does".
+    """
+    try:
+        result = subprocess.run(  # noqa: S603 - fixed argv, shell=False
+            [binary, "-T"],
+            capture_output=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    text = (result.stdout or b"").decode("utf-8", "replace")
+    if not text.strip():
+        text = (result.stderr or b"").decode("utf-8", "replace")
+    ports: set[int] = set()
+    for match in re.finditer(r"^\s*listen\s+([^;]+);", text, re.MULTILINE):
+        value = match.group(1).strip()
+        if value.startswith("unix:"):
+            continue
+        for token in value.split():
+            # Parameters may accompany the address (``default_server``, ``ssl``,
+            # ``http2``, ``backlog=511``); only the address token is a port.
+            if "=" in token:
+                continue
+            if not (token[0].isdigit() or token[0] in "[:"):
+                continue
+            if token.startswith("["):  # [::]:80 or [::1]:8080
+                _, _, token = token.rpartition(":")
+            elif token.count(":") == 1:  # 127.0.0.1:8080
+                token = token.rsplit(":", 1)[-1]
+            if token.isdigit():
+                port = int(token)
+                if 0 < port <= 65535:
+                    ports.add(port)
+    return ports
+
+
+def _listener_ownership(port: int, owned: set[int] | None, in_use: set[int] | None) -> str:
+    """One of ``MANAGED`` / ``OTHER`` / ``FREE`` / ``UNKNOWN`` (never guessed)."""
+    if owned is None or in_use is None:
+        return "UNKNOWN"
+    if port in owned:
+        return "MANAGED"
+    if port in in_use:
+        return "OTHER"
+    return "FREE"
+
+
+def _nginx_config_test(binary: str, conf: str | None = None) -> tuple[bool, str]:
+    """Run ``nginx -t`` (optionally against a specific config); bounded output."""
+    argv = [binary, "-t"]
+    if conf:
+        argv += ["-c", conf, "-p", os.path.dirname(conf) or "/"]
+    try:
+        result = subprocess.run(  # noqa: S603 - fixed argv, shell=False
+            argv, capture_output=True, timeout=20, check=False
+        )
+    except subprocess.TimeoutExpired:
+        return False, "nginx -t timed out"
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, _sanitize_text(str(exc), max_bytes=200)
+    if result.returncode == 0:
+        return True, ""
+    detail = (result.stderr or result.stdout or b"").decode("utf-8", "replace")
+    return False, _sanitize_text(_nginx_failure_summary(detail), max_bytes=400)
+
+
+def _nginx_failure_summary(text: str) -> str:
+    """Keep the meaningful line of an nginx failure, drop the noise.
+
+    nginx reports ``nginx: [emerg] unknown directive ...`` followed by boilerplate.
+    Only the ``[emerg]``/``[alert]`` lines are kept, and the result is bounded — the
+    control plane stores this as a sanitized explanation, not a log dump.
+    """
+    lines = [
+        line.strip()
+        for line in text.splitlines()
+        if "[emerg]" in line or "[alert]" in line or "[error]" in line
+    ]
+    if not lines:
+        lines = [line.strip() for line in text.splitlines() if line.strip()][:1]
+    joined = " | ".join(lines[:3])
+    return joined or "nginx reported a configuration error"
+
+
+def nginx_capability() -> dict:
+    """The nginx capability *and* the routing pre-flight, as one report.
+
+    ``present`` is true only when the binary is there; every other field is a
+    separate, honest fact. ``routing_eligible`` is this agent's own verdict and is
+    computed from the listener states, so the control plane never has to
+    re-interpret a partial report — and can never report a successful pre-flight
+    merely because a package exists.
+    """
+    binary = _nginx_binary()
+    if binary is None:
+        return {"present": False, "routing_eligible": False, "reason": "nginx is not installed"}
+    version = _nginx_version(binary)
+    running = _nginx_running()
+    config_ok, config_detail = _nginx_config_test(binary)
+    in_use = _listening_ports()
+    owned = _nginx_owned_ports(binary) if running and config_ok else set()
+    listener_80 = _listener_ownership(80, owned, in_use)
+    listener_443 = _listener_ownership(443, owned, in_use)
+
+    reason = ""
+    if running is not True:
+        reason = "the nginx service is not running (or its master process was not found)"
+    elif not config_ok:
+        reason = f"nginx -t failed: {config_detail}"
+    elif listener_80 != "MANAGED":
+        reason = {
+            "OTHER": "port 80 is held by a process that is not the intended nginx instance",
+            "FREE": "the running nginx does not listen on port 80",
+            "UNKNOWN": "the listener owner for port 80 could not be determined",
+        }.get(listener_80, "port 80 is not owned by this nginx instance")
+    elif listener_443 == "OTHER":
+        reason = "port 443 is held by a process that is not the intended nginx instance"
+    elif listener_443 == "UNKNOWN":
+        reason = "the listener owner for port 443 could not be determined"
+    eligible = reason == ""
+    return {
+        "present": True,
+        "version": version,
+        "api_version": "http-1",
+        "running": running is True,
+        "config_test_ok": config_ok,
+        "listener_80": listener_80,
+        "listener_443": listener_443,
+        "routing_eligible": eligible,
+        "reason": reason[:200],
+        "bundle_id": _live_bundle_id()[0],
+    }
+
+
+def _tree_fingerprint(files: list[tuple[str, str]], template_version: int) -> str:
+    """The bundle fingerprint — byte-identical to the control plane's algorithm.
+
+    Independently recomputed here so a corrupted or hand-edited bundle cannot be
+    applied just because the control plane said it was fine.
+    """
+    digest = hashlib.sha256()
+    digest.update(f"{NGINX_PROVIDER}:{template_version}\n".encode())
+    for path, content in sorted(files, key=lambda item: item[0]):
+        encoded = content.encode("utf-8")
+        digest.update(f"{path}\0{len(encoded)}\0".encode())
+        digest.update(encoded)
+        digest.update(b"\n")
+    return digest.hexdigest()
+
+
+def _template_version_of(conf_text: str) -> int:
+    match = NGINX_TEMPLATE_BANNER_RE.search(conf_text)
+    if match:
+        try:
+            return int(match.group(1))
+        except ValueError:
+            return NGINX_TEMPLATE_VERSION
+    return NGINX_TEMPLATE_VERSION
+
+
+def _live_files() -> list[tuple[str, str]] | None:
+    """Read the live managed tree, or ``None`` when it does not exist yet."""
+    try:
+        with open(NGINX_MANAGED_CONF, encoding="utf-8") as handle:
+            conf = handle.read()
+    except OSError:
+        return None
+    files: list[tuple[str, str]] = [(NGINX_MANAGED_CONF, conf)]
+    try:
+        names = sorted(os.listdir(NGINX_ROUTES_DIR))
+    except OSError:
+        names = []
+    for name in names:
+        if not NGINX_ROUTE_FILE_RE.match(name):
+            continue
+        try:
+            with open(os.path.join(NGINX_ROUTES_DIR, name), encoding="utf-8") as handle:
+                files.append((f"{NGINX_ROUTES_DIR}/{name}", handle.read()))
+        except OSError:
+            continue
+    return files
+
+
+def _live_bundle_id() -> tuple[str | None, int]:
+    """Fingerprint of the configuration tree currently on disk."""
+    files = _live_files()
+    if not files:
+        return None, 0
+    version = _template_version_of(files[0][1])
+    return _tree_fingerprint(files, version), len(files) - 1
+
+
+def read_state() -> dict:
+    try:
+        with open(f"{NGINX_STATE_DIR}/applied.json", encoding="utf-8") as handle:
+            data = json.loads(handle.read())
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def write_state(payload: dict) -> None:
+    """Persist the last apply outcome atomically (temp + rename)."""
+    try:
+        os.makedirs(NGINX_STATE_DIR, exist_ok=True)
+        target = f"{NGINX_STATE_DIR}/applied.json"
+        tmp = f"{target}.tmp"
+        with open(tmp, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, sort_keys=True)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, target)
+    except OSError as exc:
+        print(f"[nexusops-agent] could not persist nginx state: {exc}", file=sys.stderr)
+
+
+def _allowed_bundle_path(path: object) -> bool:
+    if not isinstance(path, str):
+        return False
+    if path == NGINX_MANAGED_CONF:
+        return True
+    if not path.startswith(NGINX_ROUTES_DIR + "/"):
+        return False
+    return NGINX_ROUTE_FILE_RE.match(path[len(NGINX_ROUTES_DIR) + 1 :]) is not None
+
+
+def _validate_bundle(raw: object) -> dict:
+    """Independently validate a bundle. Anything unexpected is refused."""
+    if not isinstance(raw, dict):
+        raise OperationError("INVALID_PARAMS", "bundle must be an object")
+    allowed = {"bundle_id", "provider", "template_version", "manifest", "files"}
+    if set(raw) - allowed:
+        raise OperationError("INVALID_PARAMS", "bundle contains unexpected fields")
+    bundle_id = raw.get("bundle_id")
+    if not isinstance(bundle_id, str) or not re.fullmatch(r"[0-9a-f]{64}", bundle_id):
+        raise OperationError("INVALID_BUNDLE", "bundle_id is missing or malformed")
+    if raw.get("provider", NGINX_PROVIDER) != NGINX_PROVIDER:
+        raise OperationError("INVALID_BUNDLE", "bundle is for a different provider")
+    version = raw.get("template_version", NGINX_TEMPLATE_VERSION)
+    if not isinstance(version, int) or isinstance(version, bool) or not 1 <= version <= 1000:
+        raise OperationError("INVALID_BUNDLE", "template_version is out of range")
+    manifest = raw.get("manifest", [])
+    if not isinstance(manifest, list) or len(manifest) > NGINX_MAX_ROUTES:
+        raise OperationError("INVALID_BUNDLE", "manifest is malformed or too large")
+    for item in manifest:
+        if not isinstance(item, str) or len(item) > 36:
+            raise OperationError("INVALID_BUNDLE", "manifest entries must be identifiers")
+    files = raw.get("files")
+    if not isinstance(files, list) or not files or len(files) > NGINX_MAX_BUNDLE_FILES:
+        raise OperationError("INVALID_BUNDLE", "bundle must contain a bounded list of files")
+
+    cleaned: list[tuple[str, str]] = []
+    total = 0
+    for entry in files:
+        if not isinstance(entry, dict) or set(entry) - {"path", "content"}:
+            raise OperationError("INVALID_BUNDLE", "file entries must be {path, content}")
+        path = entry.get("path")
+        content = entry.get("content")
+        if not _allowed_bundle_path(path):
+            raise OperationError("INVALID_BUNDLE", "a file path is outside the managed tree")
+        if not isinstance(content, str) or "\x00" in content:
+            raise OperationError("INVALID_BUNDLE", "file content is malformed")
+        size = len(content.encode("utf-8"))
+        if size > NGINX_MAX_FILE_BYTES:
+            raise OperationError("INVALID_BUNDLE", "a file exceeds the maximum size")
+        total += size
+        cleaned.append((path, content))
+    if total > NGINX_MAX_BUNDLE_BYTES:
+        raise OperationError("INVALID_BUNDLE", "bundle exceeds the maximum size")
+    if len({path for path, _ in cleaned}) != len(cleaned):
+        raise OperationError("INVALID_BUNDLE", "bundle contains duplicate paths")
+    if not any(path == NGINX_MANAGED_CONF for path, _ in cleaned):
+        raise OperationError("INVALID_BUNDLE", "bundle is missing the managed configuration")
+    recomputed = _tree_fingerprint(cleaned, version)
+    if recomputed != bundle_id:
+        raise OperationError("INVALID_BUNDLE", "bundle fingerprint does not match its contents")
+    return {
+        "bundle_id": bundle_id,
+        "template_version": version,
+        "manifest": list(manifest),
+        "files": cleaned,
+    }
+
+
+def _write_file(path: str, content: str) -> None:
+    """Write *content* to *path* atomically: temp file, fsync, rename.
+
+    The parent directory is checked to be inside the staged root first, so a
+    crafted path cannot escape even if the allowlist above were ever loosened.
+    """
+    parent = os.path.dirname(path)
+    root = os.path.realpath(NGINX_MANAGED_ROOT)
+    real_parent = os.path.realpath(parent)
+    if not (real_parent == root or real_parent.startswith(root + os.sep)):
+        raise OperationError("INVALID_BUNDLE", "a file path escapes the managed tree")
+    if os.path.islink(path):
+        raise OperationError("INVALID_BUNDLE", "refusing to write through a symlink")
+    os.makedirs(parent, exist_ok=True)
+    tmp = f"{path}.tmp"
+    with open(tmp, "w", encoding="utf-8") as handle:
+        handle.write(content)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(tmp, path)
+
+
+def _write_system_conf(content: str) -> None:
+    """Atomically write the customer's own ``nginx.conf``.
+
+    Deliberately not :func:`_write_file`: that helper refuses any path whose
+    parent is outside the managed tree, and hooking the managed include into the
+    customer's configuration is precisely the one write that *belongs* outside it.
+    The path is not user input — it is the fixed ``NEXUSOPS_NGINX_CONF`` this
+    agent was started with (and the renderer can never name a file at all) — so
+    the same temp-file + fsync + rename discipline applies, minus the tree check.
+    The original mode is preserved, and a symlink is written through never.
+    """
+    if os.path.islink(NGINX_SYSTEM_CONF):
+        raise OperationError("NGINX_CONFIG_UNSAFE", "refusing to write through a symlink")
+    try:
+        mode = os.stat(NGINX_SYSTEM_CONF).st_mode & 0o777
+    except OSError:
+        mode = 0o644
+    tmp = f"{NGINX_SYSTEM_CONF}.nexusops-tmp"
+    with open(tmp, "w", encoding="utf-8") as handle:
+        handle.write(content)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.chmod(tmp, mode)
+    os.replace(tmp, NGINX_SYSTEM_CONF)
+
+
+def _stage_bundle(bundle: dict) -> str:
+    """Materialize the bundle under ``staged/<id>/`` and return that directory."""
+    stage = os.path.join(NGINX_STAGED_DIR, bundle["bundle_id"])
+    os.makedirs(os.path.join(stage, "logs"), exist_ok=True)
+    for path, content in bundle["files"]:
+        if path == NGINX_MANAGED_CONF:
+            target = os.path.join(stage, "nexusops.conf")
+        else:
+            target = os.path.join(stage, "routes.d", os.path.basename(path))
+        _write_file(target, content)
+    return stage
+
+
+def _staged_test_conf(stage: str) -> str:
+    """Build a self-contained config for ``nginx -t`` over the staged tree.
+
+    The managed file and every fragment are included at *http* level, which is
+    where they belong, so validating this file is validating exactly the tree
+    that would go live — without touching the customer's own configuration.
+    """
+    parts = ["# generated by nexusops-agent for validation only\n", "events {}\n", "http {\n"]
+    with open(os.path.join(stage, "nexusops.conf"), encoding="utf-8") as handle:
+        parts.append(handle.read())
+    routes_dir = os.path.join(stage, "routes.d")
+    for name in sorted(os.listdir(routes_dir)):
+        if not NGINX_ROUTE_FILE_RE.match(name):
+            continue
+        with open(os.path.join(routes_dir, name), encoding="utf-8") as handle:
+            parts.append(handle.read())
+    parts.append("}\n")
+    target = os.path.join(stage, "test.conf")
+    _write_file(target, "".join(parts))
+    return target
+
+
+def _swap_tree(stage: str) -> None:
+    """Move the staged tree over the live one, keeping the previous as backup."""
+    os.makedirs(NGINX_BACKUP_DIR, exist_ok=True)
+    previous_conf = os.path.join(NGINX_BACKUP_DIR, "nexusops.conf.prev")
+    previous_routes = os.path.join(NGINX_BACKUP_DIR, "routes.d.prev")
+
+    if os.path.exists(NGINX_MANAGED_CONF):
+        shutil.copy2(NGINX_MANAGED_CONF, previous_conf)
+    if os.path.isdir(NGINX_ROUTES_DIR):
+        if os.path.isdir(previous_routes):
+            shutil.rmtree(previous_routes)
+        shutil.copytree(NGINX_ROUTES_DIR, previous_routes)
+
+    # Routes first (a directory swap), then the http-level file: a crash between
+    # the two leaves fragments that reference only zones declared in the new file
+    # — which the reload then refuses, and the rollback restores.
+    staged_routes = os.path.join(stage, "routes.d")
+    if os.path.isdir(NGINX_ROUTES_DIR):
+        shutil.rmtree(NGINX_ROUTES_DIR)
+    if os.path.isdir(staged_routes):
+        os.replace(staged_routes, NGINX_ROUTES_DIR)
+    else:
+        os.makedirs(NGINX_ROUTES_DIR, exist_ok=True)
+    os.replace(os.path.join(stage, "nexusops.conf"), NGINX_MANAGED_CONF)
+    _fsync_dir(NGINX_MANAGED_ROOT)
+
+
+def _restore_tree() -> bool:
+    """Put the previous known-good tree back. Returns whether it was possible."""
+    previous_conf = os.path.join(NGINX_BACKUP_DIR, "nexusops.conf.prev")
+    previous_routes = os.path.join(NGINX_BACKUP_DIR, "routes.d.prev")
+    if not os.path.exists(previous_conf):
+        return False
+    try:
+        if os.path.isdir(previous_routes):
+            if os.path.isdir(NGINX_ROUTES_DIR):
+                shutil.rmtree(NGINX_ROUTES_DIR)
+            shutil.copytree(previous_routes, NGINX_ROUTES_DIR)
+        elif os.path.isdir(NGINX_ROUTES_DIR):
+            shutil.rmtree(NGINX_ROUTES_DIR)
+            os.makedirs(NGINX_ROUTES_DIR, exist_ok=True)
+        shutil.copy2(previous_conf, NGINX_MANAGED_CONF)
+        _fsync_dir(NGINX_MANAGED_ROOT)
+        return True
+    except OSError as exc:
+        print(f"[nexusops-agent] restore failed: {exc}", file=sys.stderr)
+        return False
+
+
+def _fsync_dir(path: str) -> None:
+    try:
+        fd = os.open(path, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
+def _reload_nginx(binary: str) -> tuple[bool, str]:
+    """Reload nginx via ``-s reload``, falling back to a SIGHUP of the master."""
+    argv = [binary, "-s", "reload"]
+    if os.path.exists(NGINX_SYSTEM_CONF):
+        argv += ["-c", NGINX_SYSTEM_CONF]
+    try:
+        result = subprocess.run(  # noqa: S603 - fixed argv, shell=False
+            argv, capture_output=True, timeout=20, check=False
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        result = None
+        fallback_error = _sanitize_text(str(exc), max_bytes=200)
+    else:
+        fallback_error = ""
+    if result is not None and result.returncode == 0:
+        return True, ""
+    pid_state = _pid_alive(NGINX_PID_FILE)
+    if pid_state:
+        try:
+            with open(NGINX_PID_FILE, encoding="utf-8") as handle:
+                pid = int(handle.read(32).strip())
+            os.kill(pid, signal.SIGHUP)
+            return True, ""
+        except (OSError, ValueError) as exc:
+            return False, _sanitize_text(str(exc), max_bytes=200)
+    if result is not None:
+        detail = (result.stderr or result.stdout or b"").decode("utf-8", "replace")
+        return False, _sanitize_text(_nginx_failure_summary(detail), max_bytes=300)
+    return False, fallback_error or "nginx could not be reloaded"
+
+
+def _nginx_bootstrap() -> dict:
+    """Idempotent, minimal, reversible hook-up of the managed include.
+
+    The only change it ever makes to a file it does not own is inserting the two
+    documented include lines inside the ``http`` block — after validating the
+    file's shape, after taking a recoverable backup, and only if the change
+    validates. Anything ambiguous is refused rather than guessed at.
+    """
+    binary = _nginx_binary()
+    if binary is None:
+        raise OperationError("NGINX_NOT_INSTALLED", "nginx is not installed on this node")
+    running = _nginx_running()
+    if running is None:
+        # Explicitly *not* treated as success: the include would be added to a
+        # file whose runtime effect cannot be confirmed.
+        raise OperationError(
+            "NGINX_STATE_UNKNOWN",
+            "the nginx master process could not be identified; refusing to change the "
+            "system configuration",
+        )
+
+    os.makedirs(NGINX_BACKUP_DIR, exist_ok=True)
+    os.makedirs(NGINX_STAGED_DIR, exist_ok=True)
+    os.makedirs(NGINX_STATE_DIR, exist_ok=True)
+    os.makedirs(NGINX_ROUTES_DIR, exist_ok=True)
+    for directory in (NGINX_ROUTES_DIR, NGINX_STAGED_DIR, NGINX_STATE_DIR):
+        try:
+            os.chmod(directory, 0o755)
+        except OSError:
+            pass
+
+    try:
+        with open(NGINX_SYSTEM_CONF, encoding="utf-8") as handle:
+            original = handle.read()
+    except OSError as exc:
+        raise OperationError(
+            "NGINX_CONFIG_UNREADABLE",
+            f"could not read {NGINX_SYSTEM_CONF}: {_sanitize_text(str(exc), max_bytes=150)}",
+        ) from exc
+
+    if NGINX_INCLUDE_HTTP in original and NGINX_INCLUDE_ROUTES in original:
+        ok, detail = _nginx_config_test(binary)
+        if not ok:
+            raise OperationError("NGINX_CONFIG_INVALID", detail)
+        return {"bootstrapped": True, "changed": False, "config_test_ok": True}
+
+    modified = _insert_http_includes(original)
+    if modified is None:
+        raise OperationError(
+            "NGINX_CONFIG_AMBIGUOUS",
+            "could not locate a single http block to extend; refusing to modify the "
+            "customer's configuration",
+        )
+    # The include only validates once its target exists, and bootstrap may not
+    # finish in a state where the customer's own `nginx -t` fails: nginx refuses to
+    # (re)load on a missing non-wildcard include. The stub is replaced by the first
+    # rendered bundle; until then the node simply has nothing to serve.
+    if not os.path.exists(NGINX_MANAGED_CONF):
+        _write_file(NGINX_MANAGED_CONF, f"# {NGINX_PROVIDER}: replaced by the next apply\n")
+    shutil.copy2(NGINX_SYSTEM_CONF, os.path.join(NGINX_BACKUP_DIR, "nginx.conf.prev"))
+    _write_system_conf(modified)
+    ok, detail = _nginx_config_test(binary)
+    if not ok:
+        shutil.copy2(os.path.join(NGINX_BACKUP_DIR, "nginx.conf.prev"), NGINX_SYSTEM_CONF)
+        raise OperationError("NGINX_CONFIG_INVALID", detail)
+    reloaded, reload_detail = _reload_nginx(binary)
+    if not reloaded:
+        shutil.copy2(os.path.join(NGINX_BACKUP_DIR, "nginx.conf.prev"), NGINX_SYSTEM_CONF)
+        _reload_nginx(binary)
+        raise OperationError("NGINX_RELOAD_FAILED", reload_detail)
+    return {"bootstrapped": True, "changed": True, "config_test_ok": True}
+
+
+def _insert_http_includes(text: str) -> str | None:
+    """Insert the include lines at the end of the single top-level ``http`` block.
+
+    A bounded brace scan, not a regex substitution: the directives must land at
+    http level, and inserting them into a nested block (or a ``stream`` block)
+    would either fail validation or, worse, change meaning. Returns ``None`` when
+    the file's shape is not what this operation knows how to edit safely.
+    """
+    lines = text.splitlines(keepends=True)
+    start = None
+    depth = 0
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if start is None:
+            if re.match(r"^http\s*\{", stripped):
+                start = index
+                depth = stripped.count("{") - stripped.count("}")
+                continue
+            continue
+        depth += stripped.count("{") - stripped.count("}")
+        if depth <= 0:
+            insertion = f"    {NGINX_INCLUDE_HTTP}\n    {NGINX_INCLUDE_ROUTES}\n"
+            return "".join(lines[:index]) + insertion + "".join(lines[index:])
+    return None
+
+
+def _nginx_apply(params: dict) -> dict:
+    """Stage → validate → swap → reload, with a rollback on a failed reload."""
+    binary = _nginx_binary()
+    if binary is None:
+        raise OperationError("NGINX_NOT_INSTALLED", "nginx is not installed on this node")
+    if _nginx_running() is not True:
+        raise OperationError("NGINX_NOT_RUNNING", "the nginx service is not running")
+    bundle = _validate_bundle(params.get("bundle"))
+    previous, _routes = _live_bundle_id()
+
+    try:
+        stage = _stage_bundle(bundle)
+        test_conf = _staged_test_conf(stage)
+    except OperationError:
+        raise
+    except OSError as exc:
+        raise OperationError(
+            "STAGE_FAILED", f"could not stage the bundle: {_sanitize_text(str(exc), max_bytes=150)}"
+        ) from exc
+
+    ok, detail = _nginx_config_test(binary, test_conf)
+    if not ok:
+        # The live tree was never touched.
+        _remove_tree(stage)
+        write_state(
+            {
+                "bundle_id": previous,
+                "outcome": "failed",
+                "error": detail,
+                "at": _utc_iso(),
+            }
+        )
+        raise OperationError("NGINX_CONFIG_INVALID", detail)
+
+    try:
+        _swap_tree(stage)
+    except OSError as exc:
+        _remove_tree(stage)
+        raise OperationError(
+            "SWAP_FAILED", f"could not activate the bundle: {_sanitize_text(str(exc), max_bytes=150)}"
+        ) from exc
+    reloaded, reload_detail = _reload_nginx(binary)
+    if reloaded:
+        live, _count = _live_bundle_id()
+        write_state(
+            {
+                "bundle_id": bundle["bundle_id"],
+                "live_bundle_id": live,
+                "manifest": bundle["manifest"][:NGINX_MAX_ROUTES],
+                "template_version": bundle["template_version"],
+                "outcome": "applied",
+                "at": _utc_iso(),
+            }
+        )
+        _remove_tree(stage)
+        return {
+            "outcome": "applied",
+            "bundle_id": bundle["bundle_id"],
+            "live_bundle_id": live,
+            "manifest": bundle["manifest"][:NGINX_MAX_ROUTES],
+            "previous_bundle_id": previous,
+            "config_test_ok": True,
+            "nginx_version": _nginx_version(binary),
+        }
+
+    restored = _restore_tree()
+    if restored:
+        reloaded_again, second_detail = _reload_nginx(binary)
+        live, _count = _live_bundle_id()
+        write_state(
+            {
+                "bundle_id": live if reloaded_again else previous,
+                "outcome": "rolled_back" if reloaded_again else "rollback_failed",
+                "error": reload_detail or second_detail,
+                "live_bundle_id": live,
+                "at": _utc_iso(),
+            }
+        )
+        _remove_tree(stage)
+        if reloaded_again:
+            return {
+                "outcome": "rolled_back",
+                "bundle_id": bundle["bundle_id"],
+                "live_bundle_id": live,
+                "previous_bundle_id": previous,
+                "config_test_ok": True,
+                "error": reload_detail,
+            }
+        raise OperationError(
+            "ROLLBACK_FAILED",
+            f"the reload failed and the rollback reload also failed: {second_detail}",
+        )
+    raise OperationError(
+        "ROLLBACK_FAILED",
+        f"the reload failed and the previous configuration could not be restored: {reload_detail}",
+    )
+
+
+def _remove_tree(path: str) -> None:
+    try:
+        shutil.rmtree(path, ignore_errors=True)
+    except OSError:
+        pass
+
+
+def _utc_iso() -> str:
+    return datetime.now(UTC).isoformat()
+
+
+def _nginx_status() -> dict:
+    """Bounded live state: version, validation, fingerprints, last apply."""
+    binary = _nginx_binary()
+    if binary is None:
+        raise OperationError("NGINX_NOT_INSTALLED", "nginx is not installed on this node")
+    config_ok, detail = _nginx_config_test(binary)
+    live, fragment_count = _live_bundle_id()
+    state = read_state()
+    return {
+        "nginx_version": _nginx_version(binary),
+        "running": _nginx_running() is True,
+        "config_test_ok": config_ok,
+        "config_test_error": detail,
+        "live_bundle_id": live,
+        "fragments": fragment_count,
+        "last_applied_bundle_id": state.get("bundle_id") if isinstance(state, dict) else None,
+        "last_outcome": state.get("outcome") if isinstance(state, dict) else None,
+        "last_applied_at": state.get("at") if isinstance(state, dict) else None,
+    }
+
+
 # --- Operation executor (the only place the agent acts) -----------------------
 #
 # The registry is compile-time. A control-plane payload names one of these keys
@@ -486,6 +1390,13 @@ OPERATION_REGISTRY: dict[str, dict] = {
     "container.restart": {"capability": "docker", "timeout": 60, "action": "restart"},
     "container.remove": {"capability": "docker", "timeout": 60, "action": "remove"},
     "logs.tail": {"capability": "docker", "timeout": 30, "action": "logs"},
+    # Phase 4. Three nginx operations, nothing else: no file primitive and no
+    # command primitive. ``nginx.bootstrap`` edits exactly one customer file, once,
+    # minimally and reversibly; ``nginx.apply`` writes only inside the managed
+    # directory; ``nginx.status`` only reads.
+    "nginx.bootstrap": {"capability": "nginx", "timeout": 120, "action": "bootstrap"},
+    "nginx.apply": {"capability": "nginx", "timeout": 180, "action": "apply"},
+    "nginx.status": {"capability": "nginx", "timeout": 60, "action": "status"},
 }
 
 
@@ -508,6 +1419,21 @@ def _validate_params(op_type: str, params: object) -> dict:
     """Re-validate the operation's parameters locally, against a closed shape."""
     if not isinstance(params, dict):
         raise OperationError("INVALID_PARAMS", "operation params must be an object")
+    if op_type in ("nginx.bootstrap", "nginx.status"):
+        if params:
+            raise OperationError("INVALID_PARAMS", f"{op_type} takes no parameters")
+        return {}
+    if op_type == "nginx.apply":
+        if set(params) - {"bundle", "reload"}:
+            raise OperationError("INVALID_PARAMS", "unexpected nginx.apply parameters")
+        reload = params.get("reload", True)
+        if not isinstance(reload, bool):
+            raise OperationError("INVALID_PARAMS", "reload must be a boolean")
+        # The bundle itself is validated by _validate_bundle during execution; a
+        # first pass here keeps the error categorised as a parameter problem.
+        if not isinstance(params.get("bundle"), dict):
+            raise OperationError("INVALID_PARAMS", "a bundle object is required")
+        return params
     if op_type == "logs.tail":
         allowed = {"container_id", "tail", "since"}
         if set(params) - allowed:
@@ -664,12 +1590,40 @@ def execute_operation(
     timeout = max(min(remaining, spec["timeout"]), 1.0)
 
     try:
-        output = _run_docker_action(spec["action"], validated, timeout)
+        if capability == "docker":
+            output = _run_docker_action(spec["action"], validated, timeout)
+        else:
+            output = _run_nginx_action(spec["action"], validated, timeout)
     except OperationError as exc:
         return False, {}, exc.code, exc.message
     except Exception as exc:  # never leak an unhandled traceback over the wire
         return False, {}, "AGENT_ERROR", _sanitize_text(str(exc), max_bytes=200)
     return True, output, None, None
+
+
+def _run_nginx_action(action: str, params: dict, timeout: float) -> dict:
+    """Dispatch one nginx operation. ``timeout`` is the operation's own bound.
+
+    The pipeline functions are bounded already (every subprocess call has its own
+    timeout), and the control plane's execution deadline is enforced by the
+    caller; this is a last-resort guard so a hung system call cannot outlive the
+    operation.
+    """
+    deadline = time.monotonic() + max(min(timeout, 180.0), 1.0)
+    if action == "bootstrap":
+        result = _nginx_bootstrap()
+    elif action == "apply":
+        result = _nginx_apply(params)
+    elif action == "status":
+        result = _nginx_status()
+    else:
+        raise OperationError("OPERATION_UNSUPPORTED", f"unknown nginx action {action!r}")
+    if time.monotonic() > deadline:
+        # Reported honestly: the work may have partially happened, so the control
+        # plane sees a failure and keeps the previous known-good state rather than
+        # assuming success.
+        raise OperationError("OPERATION_TIMEOUT", "the nginx operation exceeded its deadline")
+    return result
 
 
 # --- Credential persistence ---------------------------------------------------

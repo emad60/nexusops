@@ -53,7 +53,13 @@ from app.schemas.operation import (
     AgentOperationResultIn,
     AgentOperationResultOut,
 )
-from app.services import audit_service, enrollment_service, operation_service, server_service
+from app.services import (
+    audit_service,
+    enrollment_service,
+    operation_service,
+    proxy_service,
+    server_service,
+)
 
 agent_router = APIRouter(prefix="/agent", tags=["agent"])
 
@@ -195,8 +201,15 @@ async def agent_hello(
     _server: Server = Depends(require_server),
     _rl: None = Depends(_hello_limiter),
 ) -> AgentHelloOut:
-    """First contact after enrollment: persist static host facts, negotiate cadence."""
+    """First contact after enrollment: persist static host facts, negotiate cadence.
+
+    Hello is also where a node reports its routing pre-flight (nginx installed,
+    running, listener ownership). When the capability appears, the idempotent
+    ``nginx.bootstrap`` operation is queued — nothing is installed here, and a
+    node that fails the pre-flight simply never becomes routable.
+    """
     out = await server_service.register_agent_hello(db, server=_server, payload=data)
+    await proxy_service.after_hello(db, node=_server)
     log.info(
         "agent_hello",
         server=_server.name,
@@ -316,6 +329,10 @@ async def report_operation_result(
         error_code=data.error_code,
         error_message=data.error_message,
     )
+    # Proxy operations additionally move their routes' ``config_state`` and the
+    # node's bounded proxy state. Attribution comes from the bundle manifest, so
+    # only routes this bundle actually carried are touched.
+    await proxy_service.handle_operation_result(db, operation)
     await audit_service.record(
         db,
         None,

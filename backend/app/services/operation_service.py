@@ -136,7 +136,31 @@ async def create_operation(
     node = await db.get(Server, payload.node_id)
     if node is None:
         raise NotFound("Node not found", code="NODE_NOT_FOUND")
+    return await queue_operation(
+        db,
+        node=node,
+        op_type=payload.type,
+        params=payload.params,
+        requested_by_id=ctx.user_id,
+    )
 
+
+async def queue_operation(
+    db: AsyncSession,
+    *,
+    node: Server,
+    op_type: Any,
+    params: dict[str, Any],
+    requested_by_id: uuid.UUID | None = None,
+) -> Operation:
+    """Queue one whitelisted action for one node — the single implementation.
+
+    Shared by the operator endpoint and by internal dispatchers (the route apply
+    pipeline queues ``nginx.apply`` without a user in hand, from a worker or from
+    an API write). Every guard lives here so an internal caller cannot skip one:
+    enrolled agent, node not OFFLINE, whitelisted type, known capability, the
+    per-node capability map, and full params validation.
+    """
     if node.agent_enrolled_at is None:
         raise BadRequest(
             "Node has no enrolled agent; enroll it before dispatching operations",
@@ -148,9 +172,9 @@ async def create_operation(
             code="NODE_OFFLINE",
         )
 
-    spec = ensure_dispatchable(payload.type)
-    ensure_node_can_run(node, payload.type)
-    params = validate_params(payload.type, payload.params)
+    spec = ensure_dispatchable(op_type)
+    ensure_node_can_run(node, op_type)
+    stored_params = validate_params(op_type, params)
 
     now = _utcnow()
     # The queue deadline is deliberately *not* the operation's execution timeout.
@@ -167,10 +191,10 @@ async def create_operation(
 
     operation = Operation(
         node_id=node.id,
-        type=payload.type,
+        type=op_type,
         status=OperationStatus.PENDING,
-        params=params,
-        requested_by_id=ctx.user_id,
+        params=stored_params,
+        requested_by_id=requested_by_id,
         available_until=available_until,
         # While pending, the hard deadline is the queue deadline; claiming moves
         # it to the execution deadline plus the result-reporting grace.
@@ -182,9 +206,28 @@ async def create_operation(
         "operation_created",
         operation=str(operation.id),
         node=str(node.id),
-        type=str(payload.type),
+        type=str(op_type),
     )
     return operation
+
+
+async def has_live_operation(db: AsyncSession, *, node_id: uuid.UUID, op_type: Any) -> bool:
+    """Whether a live (pending/claimed/running) operation of this type exists.
+
+    Used to keep a retry loop from piling duplicate applies on one node: the
+    desired state is idempotent, so one in-flight op is enough and a second adds
+    nothing but agent load.
+    """
+    found = await db.scalar(
+        select(Operation.id)
+        .where(
+            Operation.node_id == node_id,
+            Operation.type == op_type,
+            Operation.status.in_(LIVE_STATUSES),
+        )
+        .limit(1)
+    )
+    return found is not None
 
 
 async def list_operations(

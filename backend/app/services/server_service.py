@@ -701,6 +701,24 @@ def _apply_agent_entry(
     if entry.mem_limit_mb is not None:
         row.mem_limit_mb = entry.mem_limit_mb
     row.observed_at = now
+    # Phase 4: the real published-port bindings. Before this, every agent-observed
+    # container kept ``ports=[]``, which made a truthful upstream picker
+    # impossible; the route editor and the renderer both read this shape:
+    # ``{container_port, host_port, host_ip, protocol}`` with ``host_port=None``
+    # for an unpublished port. Only the *reported* facts are stored — a port the
+    # agent could not read stays absent rather than being guessed.
+    if entry.ports:
+        row.ports = [
+            {
+                "container_port": port.container_port,
+                "host_port": port.host_port,
+                "host_ip": port.host_ip or "",
+                "protocol": port.protocol,
+            }
+            for port in entry.ports
+        ]
+    elif row.ports is None:
+        row.ports = []
     # Real agent telemetry, never simulation. This used to be hard-coded True,
     # which left every agent-observed container flagged as simulated data.
     row.simulated = server.simulated

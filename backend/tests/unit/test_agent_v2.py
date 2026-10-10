@@ -13,9 +13,13 @@ pin the shipped file rather than a copy. They answer four questions:
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
 import os
+import socket
+import ssl
 import stat
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -354,6 +358,116 @@ def test_a_missing_private_ca_bundle_fails_closed(agent: Any, tmp_path: Path) ->
             "nxa_test",
             ca_bundle=str(tmp_path / "does-not-exist.pem"),
         )
+
+
+def _self_signed_cert(tmp_path: Path) -> tuple[str, str]:
+    """A throwaway key + self-signed cert for ``localhost`` (real handshakes)."""
+    import datetime as dt
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from cryptography.x509.oid import NameOID
+
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "localhost")])
+    now = dt.datetime.now(dt.UTC)
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - dt.timedelta(days=1))
+        .not_valid_after(now + dt.timedelta(days=1))
+        .add_extension(x509.SubjectAlternativeName([x509.DNSName("localhost")]), critical=False)
+        # Mark it a CA so serving it as a trust anchor is unambiguously valid.
+        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+        .sign(key, hashes.SHA256())
+    )
+    cert_path, key_path = tmp_path / "cert.pem", tmp_path / "key.pem"
+    cert_path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+    key_path.write_bytes(
+        key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.TraditionalOpenSSL,
+            serialization.NoEncryption(),
+        )
+    )
+    return str(cert_path), str(key_path)
+
+
+class _TlsResponder(threading.Thread):
+    """A one-shot HTTPS server; records a failed handshake instead of crashing."""
+
+    def __init__(self, cert_path: str, key_path: str) -> None:
+        super().__init__(daemon=True)
+        self._ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        self._ctx.load_cert_chain(cert_path, key_path)
+        self._listener = socket.socket()
+        self._listener.bind(("127.0.0.1", 0))
+        self._listener.listen(1)
+        self.port = self._listener.getsockname()[1]
+        self.handshake_error: Exception | None = None
+        self._served = False
+        self._finished = threading.Event()
+
+    def run(self) -> None:
+        try:
+            conn, _ = self._listener.accept()
+            tls = self._ctx.wrap_socket(conn, server_side=True)
+            try:
+                tls.recv(65536)
+                body = b'{"name": "tls-node", "heartbeat_interval_seconds": 30}'
+                tls.sendall(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                    b"Content-Length: %d\r\nConnection: close\r\n\r\n" % len(body) + body
+                )
+                self._served = True
+            finally:
+                # A close_notify lets the client drain the response; an abrupt
+                # close would reset the socket before it could be read.
+                with contextlib.suppress(ssl.SSLError, OSError):
+                    tls.unwrap()
+                tls.close()
+        except Exception as exc:  # the expected path when the client rejects the cert
+            self.handshake_error = exc
+        finally:
+            self._finished.set()
+
+    def stop(self) -> None:
+        self._finished.wait(5)
+        self._listener.close()
+
+
+def test_an_untrusted_certificate_is_rejected(agent: Any, tmp_path: Path) -> None:
+    """A real handshake against a self-signed server must fail verification."""
+    cert, key = _self_signed_cert(tmp_path)
+    server = _TlsResponder(cert, key)
+    server.start()
+    try:
+        client = agent.AgentClient(f"https://localhost:{server.port}", "nxa_secret")
+        with pytest.raises(ssl.SSLCertVerificationError):
+            client.request("POST", "/agent/hello", {"agent_version": "1.1.0"})
+    finally:
+        server.stop()
+    assert server.handshake_error is not None, "the server must have seen the refusal"
+    assert server._served is False
+
+
+def test_a_trusted_private_ca_is_accepted(agent: Any, tmp_path: Path) -> None:
+    """Trusting that same cert as a CA lets the identical handshake through."""
+    cert, key = _self_signed_cert(tmp_path)
+    server = _TlsResponder(cert, key)
+    server.start()
+    try:
+        client = agent.AgentClient(f"https://localhost:{server.port}", "nxa_secret", ca_bundle=cert)
+        status, data = client.request("POST", "/agent/hello", {"agent_version": "1.1.0"})
+    finally:
+        server.stop()
+    assert status == 200
+    assert data.get("name") == "tls-node"
+    assert server.handshake_error is None and server._served is True
 
 
 def test_a_refused_transport_sends_no_credential(

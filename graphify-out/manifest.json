@@ -1596,9 +1596,9 @@
     "semantic_hash": ""
   },
   "docs/node-agent-architecture.md": {
-    "mtime": 1791584832.4027584,
-    "seen": 1791587770.9540854,
-    "ast_hash": "fabe9d50760a89c01e78bf40b54c9661",
+    "mtime": 1791590506.2760928,
+    "seen": 1791590706.6523628,
+    "ast_hash": "6c65bfa4775e7996320ecd0342294de1",
     "semantic_hash": ""
   },
   "docs/platform-security-model.md": {
@@ -1962,9 +1962,9 @@
     "semantic_hash": ""
   },
   "backend/tests/unit/test_agent_v2.py": {
-    "mtime": 1791588794.5381875,
-    "seen": 1791589467.5167668,
-    "ast_hash": "5e2cb590cd2cee1fc2c7eb00d1711b4e",
+    "mtime": 1791590506.5160928,
+    "seen": 1791590706.652189,
+    "ast_hash": "c4171d5979d34657a3616ab05788505a",
     "semantic_hash": ""
   },
   "frontend/e2e/phase3.spec.ts": {

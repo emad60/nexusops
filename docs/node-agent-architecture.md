@@ -550,8 +550,13 @@ override flag. `--allow-insecure-transport` and the `--insecure`
 `ssl._create_unverified_context()` path were removed in accordance with the
 roadmap: certificate verification is never disabled, and a private/self-hosted CA
 is trusted through `NEXUSOPS_CA_BUNDLE` (or the system trust store). Only
-loopback/link-local targets are exempt from the HTTPS requirement (the credential
-cannot leave the host). The token authenticates every call, and the enrollment
+**genuine loopback** targets are exempt from the HTTPS requirement — the exact
+name `localhost`, `127.0.0.0/8`, `::1` and IPv4-mapped loopback, where the
+credential cannot leave the host. Everything else requires `https://` with
+verification enabled, including link-local (`169.254.0.0/16`, `fe80::/10`), the
+private LAN, public addresses and every DNS name (a look-alike such as
+`localhost.evil.example` is treated as remote). The token authenticates every
+call, and the enrollment
 token (§3.2) is more sensitive still — it mints node identities — so the same rule
 applies to enrollment (§3.2) and rotation delivery (§3.3). install.sh only enrolls
 against `https://`, and it reports an untrusted-cert failure with the exact

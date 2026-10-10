@@ -1593,6 +1593,12 @@ async def _flip_name_to(client, second_org, name: str) -> dict:
     return outcome
 
 
+async def _removal_audits(org_db, action: str) -> list[AuditLog]:
+    """Audit rows for one removal action in the organization being inspected."""
+    rows = (await org_db.execute(select(AuditLog).where(AuditLog.action == action))).scalars().all()
+    return list(rows)
+
+
 async def test_a_transfer_pulls_the_previous_owners_route_from_its_node(
     client, owner, second_org, org_db
 ):
@@ -1637,11 +1643,38 @@ async def test_a_transfer_pulls_the_previous_owners_route_from_its_node(
     assert released[0].metadata_["routes_pulled"] == 1
     assert released[0].metadata_["nodes_affected"] == 1
 
-    # The route is visibly not being served, and nothing has claimed otherwise.
+    # The route is visibly not being served, and nothing has claimed otherwise: the
+    # removal is *requested* — no node has confirmed it — so the row must not read
+    # as if the name had already stopped answering.
     state = (await client.get(f"{API}/routes/{route_id}", headers=owner["headers"])).json()
     assert state["enabled"] is True  # still the old owner's row, still its to fix
     assert state["config_state"] == "STALE"
     assert state["last_apply_error"]
+    assert state["removal_state"] == "REQUESTED"
+    assert "Removal requested" in state["status_detail"]
+    assert "has not confirmed" in state["status_detail"]
+    assert "verified by another organization" in state["last_apply_error"]
+    proxy_pending = (
+        await client.get(f"{API}/nodes/{node['id']}/proxy/status", headers=owner["headers"])
+    ).json()
+    assert proxy_pending["route_removal_pending"] == 1
+    assert (
+        await client.get(
+            f"{API}/events",
+            headers=owner["headers"],
+            params={"types": "ROUTE_REMOVAL_CONFIRMED"},
+        )
+    ).json()["items"] == []
+    requested = (
+        await client.get(
+            f"{API}/events",
+            headers=owner["headers"],
+            params={"types": "ROUTE_REMOVAL_REQUESTED"},
+        )
+    ).json()["items"]
+    assert requested, "the previous owner is told the removal was requested"
+    assert "no node has confirmed the removal yet" in requested[0]["message"]
+    assert await _removal_audits(org_db, "route.removal_confirmed") == []
 
     # ...and the node really was asked to remove it: the queued bundle excludes it.
     handled = await _drain(client, agent_token)
@@ -1655,9 +1688,27 @@ async def test_a_transfer_pulls_the_previous_owners_route_from_its_node(
     assert proxy["drift"] is False
     # The route stays unresolved even so: it is not in the desired tree, so it is
     # never reported as applied again until its domain is verified.
-    assert (await client.get(f"{API}/routes/{route_id}", headers=owner["headers"])).json()[
-        "config_state"
-    ] == "STALE"
+    served = (await client.get(f"{API}/routes/{route_id}", headers=owner["headers"])).json()
+    assert served["config_state"] == "STALE"
+    # ...but the removal is no longer *pending*: the node's own applied bundle is
+    # what turned it into a confirmed fact, and the row now says so.
+    assert served["removal_state"] == "CONFIRMED"
+    assert "Removal confirmed" in served["status_detail"]
+    assert "applied a configuration without this route" in served["status_detail"]
+    assert served["removal_confirmed_at"]
+    assert proxy["route_removal_pending"] == 0
+    confirmed_events = (
+        await client.get(
+            f"{API}/events",
+            headers=owner["headers"],
+            params={"types": "ROUTE_REMOVAL_CONFIRMED"},
+        )
+    ).json()["items"]
+    assert confirmed_events, "the confirmation is announced from the agent's outcome"
+    assert "applied a configuration without this route" in confirmed_events[0]["message"]
+    confirmed_audits = await _removal_audits(org_db, "route.removal_confirmed")
+    assert len(confirmed_audits) == 1
+    assert confirmed_audits[0].metadata_["bundle_id"] == proxy["live_bundle_id"]
 
     # Neither organization can reach the other's resources.
     assert (
@@ -1727,17 +1778,30 @@ async def test_an_offline_node_keeps_the_revoked_route_unresolved_until_it_retur
     assert outcome["released_nodes"] == "1"
 
     # Nothing was queued for a node that cannot take it, and the route reads as
-    # unresolved rather than as removed.
+    # unresolved rather than as removed — requested, explicitly not confirmed, and
+    # *pending* at the node level so the UI can say so without guessing.
     assert await _live_operations(client, owner, node["id"]) == []
     state = (await client.get(f"{API}/routes/{route_id}", headers=owner["headers"])).json()
     assert state["config_state"] == "STALE"
     assert state["last_apply_error"]
+    assert state["removal_state"] == "REQUESTED"
+    assert state["removal_confirmed_at"] is None
+    assert "Removal requested" in state["status_detail"]
+    assert "may still be serving" in state["status_detail"]
     proxy = (
         await client.get(f"{API}/nodes/{node['id']}/proxy/status", headers=owner["headers"])
     ).json()
     assert proxy["eligible"] is False
     assert proxy["drift"] is True
     assert proxy["expected_bundle_id"] != proxy["live_bundle_id"]
+    assert proxy["route_removal_pending"] == 1
+    assert (
+        await client.get(
+            f"{API}/events",
+            headers=owner["headers"],
+            params={"types": "ROUTE_REMOVAL_CONFIRMED"},
+        )
+    ).json()["items"] == []
 
     # The sweep keeps retrying and stays bounded: no operation is created and the
     # difference is never announced as repaired.
@@ -1778,7 +1842,35 @@ async def test_an_offline_node_keeps_the_revoked_route_unresolved_until_it_retur
     # The route itself is still not served, and still says why.
     state = (await client.get(f"{API}/routes/{route_id}", headers=owner["headers"])).json()
     assert state["config_state"] == "STALE"
-    assert "unverified" in state["last_apply_error"]
+    # The specific reason the release recorded survives the renderer's later, more
+    # generic pass: a revoked route keeps saying *why* it was revoked.
+    assert "verified by another organization" in state["last_apply_error"]
+    # apply the returning node processed, not from the wait having elapsed.
+    assert state["removal_state"] == "CONFIRMED"
+    assert "Removal confirmed" in state["status_detail"]
+    assert proxy["route_removal_pending"] == 0
+    confirmed = (
+        await client.get(
+            f"{API}/events",
+            headers=owner["headers"],
+            params={"types": "ROUTE_REMOVAL_CONFIRMED"},
+        )
+    ).json()["items"]
+    assert len(confirmed) == 1, "one confirmation for one removal"
+    # Idempotence: further ticks re-render the same excluded route and must not
+    # re-announce it — nor quietly drop the confirmation they did not create.
+    await asyncio.to_thread(sweep_routes)
+    await asyncio.to_thread(sweep_routes)
+    again = (await client.get(f"{API}/routes/{route_id}", headers=owner["headers"])).json()
+    assert again["removal_state"] == "CONFIRMED"
+    confirmed_again = (
+        await client.get(
+            f"{API}/events",
+            headers=owner["headers"],
+            params={"types": "ROUTE_REMOVAL_CONFIRMED"},
+        )
+    ).json()["items"]
+    assert len(confirmed_again) == 1, "a later tick must not re-announce the same removal"
 
 
 async def test_the_sweep_repairs_drift_and_bounds_a_repeatedly_failing_node(client, owner):

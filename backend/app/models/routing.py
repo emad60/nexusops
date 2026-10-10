@@ -184,6 +184,20 @@ class Route(OrgScoped, TimestampMixin, Base):
     #: Fingerprint of the bundle the node last confirmed as live for this route.
     last_bundle_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     last_apply_error: Mapped[str] = mapped_column(String(500), default="", nullable=False)
+    #: The two halves of a removal, kept apart on purpose. **Requested** means the
+    #: route is out of the node's *desired* configuration (its domain stopped
+    #: serving, an operator disabled it, the upstream vanished); the node may still
+    #: be running the previous configuration, so nothing may claim it stopped
+    #: serving. **Confirmed** means a node reported an *applied* bundle that does
+    #: not contain this route. Between the two the honest report is "removal
+    #: requested, not confirmed" — which is exactly the state a node that is offline
+    #: or failing sits in, and the reason `STALE` alone cannot express it.
+    removal_requested_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    removal_confirmed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
         return f"<Route {self.hostname}{self.path} -> {self.port} {self.config_state}>"

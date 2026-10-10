@@ -3,7 +3,7 @@ import { Link, useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ApiError, apiDelete, apiGet, apiPost } from "../api/client";
 import type { DomainDetailOut, RouteOut } from "../api/types";
-import { LoadingBlock, ErrorBlock, Modal, StatusBadge } from "../components/ui";
+import { LoadingBlock, ErrorBlock, Modal, RemovalChip, StatusBadge } from "../components/ui";
 import { useToast } from "../components/toast";
 import { useAuth } from "../auth/AuthContext";
 import { formatDateTime, formatRelative } from "../lib/format";
@@ -123,6 +123,9 @@ function RoutesCard({ routes }: { routes: RouteOut[] }) {
                 </td>
                 <td>
                   <StatusBadge value={route.config_state} />
+                  {/* A route whose domain stopped serving is on its way out; say
+                      which half of the removal it is in, not just `STALE`. */}
+                  <RemovalChip state={route.removal_state} />
                   {route.status_detail ? (
                     <span className="small muted">{route.status_detail}</span>
                   ) : null}

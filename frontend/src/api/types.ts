@@ -589,6 +589,16 @@ export type DomainStatus =
  */
 export type RouteConfigState = "PENDING" | "IN_SYNC" | "STALE" | "FAILED";
 
+/**
+ * Which half of a removal a route is in, when it is in one.
+ *
+ * `REQUESTED` means the route left the node's *desired* configuration but no
+ * node has confirmed it stopped serving it — the node may still be answering
+ * with the old configuration. `CONFIRMED` means a node applied a configuration
+ * without this route. The two must never be displayed as if they were the same.
+ */
+export type RouteRemovalState = "REQUESTED" | "CONFIRMED";
+
 /** The exact DNS record a domain owner has to publish, while it is actionable. */
 export interface DomainVerificationOut {
   record_name: string;
@@ -678,6 +688,10 @@ export interface RouteOut {
   last_applied_at: string | null;
   last_bundle_id: string | null;
   last_apply_error: string;
+  /** Which half of a removal this route is in, or null when it is in neither. */
+  removal_state: RouteRemovalState | null;
+  removal_requested_at: string | null;
+  removal_confirmed_at: string | null;
   /** Human-readable explanation of `config_state` — never raw configuration. */
   status_detail: string;
   created_at: string;
@@ -718,6 +732,8 @@ export interface NodeProxyStatusOut {
   route_in_sync: number;
   route_stale: number;
   route_failed: number;
+  /** Enabled routes out of the desired configuration whose removal is unconfirmed. */
+  route_removal_pending: number;
   last_applied_at: string | null;
   last_apply_error: string;
   created_at: string;

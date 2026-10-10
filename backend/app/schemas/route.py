@@ -12,7 +12,7 @@ from uuid import UUID
 
 from pydantic import Field, field_validator
 
-from app.models.enums import RouteConfigState
+from app.models.enums import RouteConfigState, RouteRemovalState
 from app.schemas.base import APIModel, OutModel
 from app.schemas.proxy import RateLimit, RouteHeader, RouteRedirect
 
@@ -118,6 +118,13 @@ class RouteOut(OutModel):
     last_applied_at: datetime | None = None
     last_bundle_id: str | None = None
     last_apply_error: str = ""
+    #: Which half of a removal this route is in, when it is in one: ``REQUESTED``
+    #: (out of the desired configuration, no node has confirmed it is gone) or
+    #: ``CONFIRMED`` (a node applied a bundle without it). ``None`` when no removal
+    #: is in flight. Derived from the row's own timestamps.
+    removal_state: RouteRemovalState | None = None
+    removal_requested_at: datetime | None = None
+    removal_confirmed_at: datetime | None = None
     #: Human-readable explanation of ``config_state`` — never raw configuration.
     status_detail: str = ""
 
@@ -166,5 +173,9 @@ class NodeProxyStatusOut(OutModel):
     route_in_sync: int = 0
     route_stale: int = 0
     route_failed: int = 0
+    #: Enabled routes that are out of the desired configuration but whose removal
+    #: no node has confirmed. Non-zero means a node may still be running the
+    #: configuration that serves them — never that they are gone.
+    route_removal_pending: int = 0
     last_applied_at: datetime | None = None
     last_apply_error: str = ""

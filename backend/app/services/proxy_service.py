@@ -403,6 +403,103 @@ async def _mark_route_stale(db: AsyncSession, route: Route, detail: str) -> None
         await db.flush()
 
 
+# --- removal: requested is not confirmed --------------------------------------
+
+
+def removal_requested_detail(reason: str) -> str:
+    """The honest state of a route that left the desired tree but is not gone.
+
+    One sentence, built here so the renderer, the release path, the audit trail,
+    the events feed and the UI all reuse it and no path can spell "requested" the
+    way it spells "confirmed". Note what it does **not** say: that the route
+    stopped being served.
+    """
+    return (
+        f"removal requested: {reason.strip().rstrip('.')}; no node has confirmed the removal yet"
+    )[:500]
+
+
+def removal_confirmed_detail(node_name: str) -> str:
+    """What an agent's applied bundle that omits the route actually proves."""
+    return (f"removal confirmed: {node_name} applied a configuration without this route")[:500]
+
+
+async def mark_removal_requested(db: AsyncSession, *, route: Route, reason: str) -> bool:
+    """Record that *route* must leave its node's configuration. True when new.
+
+    Called from the two places a route can stop being eligible — the renderer
+    (:func:`render_for_node`) and the cross-organization release path — and it
+    deliberately does **not** touch ``removal_confirmed_at``. A confirmation stays
+    a fact while the route is still excluded, so a re-render on the next sweep
+    tick can neither erase it nor manufacture one: the only writer of that column
+    is the apply-result handler, driven by what a node said it applied.
+
+    ``config_state`` becomes ``STALE`` (not confirmed live at the desired
+    configuration, which is exactly true), ``last_apply_error`` keeps the plain
+    *reason* — why the route is excluded, which is what an operator needs first —
+    and the half of the removal is carried by the two timestamps, surfaced as
+    ``RouteRemovalState`` on the read model.
+    """
+    now = _utcnow()
+    detail = reason.strip()[:500]
+    first = route.removal_requested_at is None
+    changed = first or route.config_state != RouteConfigState.STALE
+    route.config_state = RouteConfigState.STALE
+    if first:
+        route.removal_requested_at = now
+        # The *first* writer of an episode states why, and later ticks do not
+        # rewrite it: the release path knows the name was claimed by another
+        # organization, while the renderer — which runs again on every sweep —
+        # only knows the domain is not serving. Letting the later, vaguer reason
+        # win would erase the specific one within seconds.
+        route.last_apply_error = detail
+    if changed:
+        await db.flush()
+    return first
+
+
+async def _confirm_pending_removals(
+    db: AsyncSession, *, node: Server, applied: list[str], now: datetime
+) -> list[Route]:
+    """Mark the removals an applied bundle proves, and return them.
+
+    *applied* is the route-id manifest the agent echoed back, so "the node no
+    longer serves this" is read from the node's own report rather than from the
+    fact that the control plane stopped rendering it. Only routes whose removal
+    was already **requested** and never confirmed qualify — a route excluded for
+    an unrelated reason (a stopped upstream, say) keeps its own explanation
+    instead of being relabelled as a removal.
+
+    Returns the rows so the caller can audit and announce them.
+    """
+    rows = (
+        (
+            await db.execute(
+                select(Route).where(
+                    Route.node_id == node.id,
+                    Route.enabled.is_(True),
+                    Route.removal_requested_at.is_not(None),
+                    Route.removal_confirmed_at.is_(None),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    served = set(applied)
+    confirmed: list[Route] = []
+    for route in rows:
+        if str(route.id) in served:
+            continue
+        # The *why* stays on the row (it is what the operator reads); what changes
+        # is that the node's own report now backs the removal.
+        route.removal_confirmed_at = now
+        confirmed.append(route)
+    if confirmed:
+        await db.flush()
+    return confirmed
+
+
 async def _mark_enabled_routes_stale(db: AsyncSession, *, node: Server, detail: str) -> None:
     """Mark every enabled route on *node* unresolved, with one reason.
 
@@ -442,12 +539,23 @@ async def render_for_node(db: AsyncSession, *, node: Server) -> tuple[NginxBundl
         status = DomainStatus(domain.status)
         if status is not DomainStatus.VERIFIED:
             # Domain lost its proof (or never had it): the route is pulled from
-            # the rendered tree immediately and labelled with why.
-            await _mark_route_stale(db, route, f"the domain is {status.value.lower()}")
+            # the rendered tree immediately and labelled as a removal the node has
+            # not confirmed. It is not "stale" in the vague sense any more — it is
+            # excluded, and whether it still answers is a fact only the node has.
+            await mark_removal_requested(
+                db, route=route, reason=f"the domain is {status.value.lower()}"
+            )
             continue
         item = await _resolved_for(db, route)
         if item is None:
             continue
+        if route.removal_requested_at is not None or route.removal_confirmed_at is not None:
+            # Desired again, so the removal episode is over: the markers clear here
+            # while ``config_state`` still reports that the apply which puts the
+            # route back in service has not happened yet.
+            route.removal_requested_at = None
+            route.removal_confirmed_at = None
+            await db.flush()
         resolved.append(item)
         included.append(route)
 
@@ -867,6 +975,11 @@ async def _handle_apply_result(db: AsyncSession, *, node: Server, operation: Ope
             route.last_applied_at = now
             route.last_bundle_id = bundle_id
             route.last_apply_error = ""
+            # Served again: whatever removal episode this route was in is over, so
+            # a later loss starts a fresh one rather than inheriting a stale
+            # confirmation.
+            route.removal_requested_at = None
+            route.removal_confirmed_at = None
         state["applied_bundle_id"] = bundle_id
         state["live_bundle_id"] = bundle_id
         state["last_applied_at"] = now.isoformat()
@@ -954,6 +1067,37 @@ async def _handle_apply_result(db: AsyncSession, *, node: Server, operation: Ope
             resource_type="route",
             resource_id=str(route.id),
             data={"hostname": route.hostname, "path": route.path, "outcome": outcome.value},
+        )
+
+    # Removals this applied bundle proves, reported only now: the routes above are
+    # the ones the node is serving, and these are the ones it just stopped serving.
+    # Nothing here runs for a failed or rolled-back apply, which is the whole point
+    # — an offline or failing node cannot produce this list.
+    confirmed_removals: list[Route] = []
+    if outcome is ProxyApplyOutcome.APPLIED:
+        confirmed_removals = await _confirm_pending_removals(
+            db, node=node, applied=manifest, now=now
+        )
+    for route in confirmed_removals:
+        await audit_service.record(
+            db,
+            None,
+            action="route.removal_confirmed",
+            resource_type="route",
+            resource_id=route.id,
+            org_id=node.org_id,
+            actor_email=f"agent:{node.name}",
+            metadata={"bundle_id": bundle_id, "hostname": route.hostname, "path": route.path},
+        )
+        await event_bus.publish(
+            db,
+            type="ROUTE_REMOVAL_CONFIRMED",
+            level=EventLevel.INFO,
+            org_id=node.org_id,
+            message=(f"Route {route.hostname}{route.path}: {removal_confirmed_detail(node.name)}"),
+            resource_type="route",
+            resource_id=str(route.id),
+            data={"hostname": route.hostname, "path": route.path, "bundle_id": bundle_id},
         )
 
     if was_recovery and outcome is ProxyApplyOutcome.APPLIED:
@@ -1117,6 +1261,13 @@ async def node_proxy_status(db: AsyncSession, *, node: Server) -> NodeProxyStatu
                 .label("in_sync"),
                 func.count().filter(Route.config_state == RouteConfigState.STALE).label("stale"),
                 func.count().filter(Route.config_state == RouteConfigState.FAILED).label("failed"),
+                func.count()
+                .filter(
+                    Route.enabled.is_(True),
+                    Route.removal_requested_at.is_not(None),
+                    Route.removal_confirmed_at.is_(None),
+                )
+                .label("removal_pending"),
                 func.max(Route.last_applied_at).label("last_applied"),
             ).where(Route.node_id == node.id)
         )
@@ -1155,6 +1306,7 @@ async def node_proxy_status(db: AsyncSession, *, node: Server) -> NodeProxyStatu
         route_in_sync=int(counts.in_sync or 0),
         route_stale=int(counts.stale or 0),
         route_failed=int(counts.failed or 0),
+        route_removal_pending=int(counts.removal_pending or 0),
         last_applied_at=counts.last_applied,
         last_apply_error=str(state.get("last_apply_error") or "")[:200],
     )
@@ -1193,10 +1345,13 @@ __all__ = [
     "expected_bundle_id",
     "get_route_or_404",
     "handle_operation_result",
+    "mark_removal_requested",
     "node_proxy_status",
     "provider",
     "reconcile_node",
     "recovery_backoff",
+    "removal_confirmed_detail",
+    "removal_requested_detail",
     "render_for_node",
     "request_status",
     "require_eligible",

@@ -37,7 +37,7 @@ from sqlalchemy import select, update
 from app.core.errors import Conflict
 from app.core.logging import get_logger
 from app.models import Domain, Route, Server
-from app.models.enums import DomainStatus, RouteConfigState
+from app.models.enums import DomainStatus
 from app.tasks._util import org_for, org_session, run_async, sweep_session
 from app.tasks.celery_app import app
 
@@ -235,15 +235,14 @@ async def _release_competing_claim(
     later, inside its own organization, by :func:`_apply_for_node`.
     """
     from app.models.enums import EventLevel
-    from app.services import audit_service, domain_service, event_bus
+    from app.services import audit_service, event_bus, proxy_service
 
-    # The state a *lost* name forces on its routes. The single rule lives in
-    # ``domain_service`` so this path cannot drift from the renderer's.
-    pulled_state = domain_service.route_config_state_for(DomainStatus.UNVERIFIED)
-    pulled_detail = (
-        "this domain is now verified by another organization, so the route is no "
-        "longer served; the node has been asked to remove it"
-    )
+    # Why the route is being pulled, in the words the route row carries. The
+    # wording is deliberately about the *request*: at this moment no node has been
+    # told anything yet, and a node that never takes the apply must not read as
+    # "removed" (``proxy_service.removal_confirmed_detail`` is the other half, and
+    # only an agent's applied result can produce it).
+    pulled_reason = "this name is now verified by another organization"
 
     async with sweep_session("task.verify_domain.release_competing_claim") as db:
         rows = (
@@ -260,27 +259,41 @@ async def _release_competing_claim(
         for domain_id, org_id in rows:
             # Discovery first, while the routes are still visible to this scope.
             routes = (
-                await db.execute(
-                    select(Route.id, Route.node_id).where(
-                        Route.domain_id == domain_id,
-                        # Explicit tenant predicate: system scope turns the guard
-                        # off, and a wide statement here is exactly what the guard
-                        # exists to prevent.
-                        Route.org_id == org_id,
-                        Route.enabled.is_(True),
+                (
+                    await db.execute(
+                        select(Route).where(
+                            Route.domain_id == domain_id,
+                            # Explicit tenant predicate: system scope turns the guard
+                            # off, and a wide statement here is exactly what the guard
+                            # exists to prevent.
+                            Route.org_id == org_id,
+                            Route.enabled.is_(True),
+                        )
                     )
                 )
-            ).all()
-            for route_id, node_id in routes:
-                await db.execute(
-                    update(Route)
-                    .where(Route.id == route_id, Route.org_id == org_id)
-                    .values(
-                        config_state=pulled_state or RouteConfigState.STALE,
-                        last_apply_error=pulled_detail,
-                    )
+                .scalars()
+                .all()
+            )
+            for route in routes:
+                await proxy_service.mark_removal_requested(db, route=route, reason=pulled_reason)
+                affected_nodes.append(uuid.UUID(str(route.node_id)))
+                await event_bus.publish(
+                    db,
+                    type="ROUTE_REMOVAL_REQUESTED",
+                    level=EventLevel.WARNING,
+                    org_id=org_id,
+                    message=(
+                        f"Route {route.hostname}{route.path}: "
+                        f"{proxy_service.removal_requested_detail(pulled_reason)}"
+                    ),
+                    resource_type="route",
+                    resource_id=str(route.id),
+                    data={
+                        "hostname": route.hostname,
+                        "path": route.path,
+                        "reason": "claimed_by_another_organization",
+                    },
                 )
-                affected_nodes.append(uuid.UUID(str(node_id)))
 
             await db.execute(
                 update(Domain)
@@ -308,7 +321,12 @@ async def _release_competing_claim(
                     "name": name,
                     "reason": "verified by another organization",
                     "routes_pulled": len(routes),
-                    "nodes_affected": len({uuid.UUID(str(node)) for _r, node in routes}),
+                    "nodes_affected": len({uuid.UUID(str(route.node_id)) for route in routes}),
+                    # The routes left this organization's desired configuration; each
+                    # node still has to confirm it stopped serving them. Saying which
+                    # half this is keeps the audit trail from reading like a removal
+                    # that already happened.
+                    "removal": "requested",
                 },
             )
             await event_bus.publish(
@@ -317,12 +335,17 @@ async def _release_competing_claim(
                 level=EventLevel.WARNING,
                 message=(
                     f"Domain {name} is now verified by another organization; its routes "
-                    "were pulled from this organization"
+                    "are out of this organization's desired configuration, and every "
+                    "node that serves them still has to confirm the removal"
                 ),
                 org_id=org_id,
                 resource_type="domain",
                 resource_id=str(domain_id),
-                data={"name": name, "reason": "claimed_by_another_organization"},
+                data={
+                    "name": name,
+                    "reason": "claimed_by_another_organization",
+                    "removal": "requested",
+                },
             )
             released.append(uuid.UUID(str(org_id)))
         await db.flush()

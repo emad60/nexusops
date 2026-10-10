@@ -92,6 +92,7 @@ async def routes_for_domain(db: AsyncSession, domain_id: uuid.UUID) -> list[Rout
             payload.container_name = container.name
             payload.container_ref = container.container_id
         payload.url = f"http://{route.hostname}{route.path}"
+        payload.removal_state = route_service.removal_state_of(route)
         payload.status_detail = await route_service.route_status_detail(route)
         out.append(payload)
     return out

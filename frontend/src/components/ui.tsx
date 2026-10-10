@@ -1,9 +1,42 @@
 import { useEffect, useRef } from "react";
 import type { KeyboardEvent as ReactKeyboardEvent, ReactNode } from "react";
+import type { RouteRemovalState } from "../api/types";
 
 /** Status pill — color derives from the status word itself via styles.css. */
 export function StatusBadge({ value, className }: { value: string; className?: string }) {
   return <span className={`badge ${value} ${className ?? ""}`}>{value.replaceAll("_", " ")}</span>;
+}
+
+/**
+ * The removal half of a route's status, shown apart from `config_state`.
+ *
+ * A route on its way out is `STALE` either way, so the badge alone cannot say
+ * whether the name may still be answering. "Removal pending" is the honest
+ * label for `REQUESTED` — the node has not confirmed anything — and the title
+ * spells out which of the two halves the platform actually knows.
+ */
+export function RemovalChip({ state }: { state: RouteRemovalState | null }) {
+  if (state === "CONFIRMED") {
+    return (
+      <span
+        className="badge INFO"
+        title="The node applied a configuration without this route, so it is no longer served"
+      >
+        removal confirmed
+      </span>
+    );
+  }
+  if (state === "REQUESTED") {
+    return (
+      <span
+        className="badge WARN"
+        title="This route left the node's desired configuration, but the node has not confirmed the removal — it may still be serving it"
+      >
+        removal pending
+      </span>
+    );
+  }
+  return null;
 }
 
 export function TagChip({ name, color }: { name: string; color?: string }) {

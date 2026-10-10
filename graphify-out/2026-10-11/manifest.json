@@ -12,9 +12,9 @@
     "semantic_hash": ""
   },
   "agent/nexusops_agent.py": {
-    "mtime": 1791660324.8705208,
-    "seen": 1791661929.3419483,
-    "ast_hash": "376bc5ac04b2dcaceb5217cab1846396",
+    "mtime": 1791665706.824223,
+    "seen": 1791670460.0652373,
+    "ast_hash": "75f26b8000f0e49f022e8a179e6f063a",
     "semantic_hash": ""
   },
   "backend/alembic/env.py": {
@@ -990,9 +990,9 @@
     "semantic_hash": "73adb437ee6dde07075637b62afef4b6"
   },
   "frontend/e2e/fixtures.ts": {
-    "mtime": 1791501852.9486976,
-    "seen": 1791502365.998643,
-    "ast_hash": "55b0981897c67916a1a0189f167ad33b",
+    "mtime": 1791669822.7318883,
+    "seen": 1791670460.065546,
+    "ast_hash": "cb7a25e99fd37aa2e45866922d76e414",
     "semantic_hash": ""
   },
   "frontend/e2e/journey.spec.ts": {
@@ -1464,9 +1464,9 @@
     "semantic_hash": "82efb97a359f5c7290bf2513d14686be"
   },
   "README.md": {
-    "mtime": 1791661193.2914727,
-    "seen": 1791661929.3423164,
-    "ast_hash": "407f1606001b9147d15a28bc71f1514a",
+    "mtime": 1791663699.177334,
+    "seen": 1791670460.0656612,
+    "ast_hash": "46a91bb3fc615803d32b37c897f4bd61",
     "semantic_hash": ""
   },
   "docker-compose.dev.yml": {
@@ -1500,9 +1500,9 @@
     "semantic_hash": ""
   },
   "docs/architecture.md": {
-    "mtime": 1791658868.5886014,
-    "seen": 1791661929.3423228,
-    "ast_hash": "d47600a9e1a6af08cbdcf223425638b7",
+    "mtime": 1791663692.473648,
+    "seen": 1791670460.065674,
+    "ast_hash": "18d109d66e9bacee8dad95738c05f96c",
     "semantic_hash": ""
   },
   "docs/deployment.md": {
@@ -1512,9 +1512,9 @@
     "semantic_hash": ""
   },
   "docs/development.md": {
-    "mtime": 1791661219.8334713,
-    "seen": 1791661929.3423276,
-    "ast_hash": "37a670a07f6a7df4a111829ba8963116",
+    "mtime": 1791663692.4563346,
+    "seen": 1791670460.0656793,
+    "ast_hash": "45ee7c96ae31f5a1c392b94af69a7ccb",
     "semantic_hash": ""
   },
   "docs/engineering-report.md": {
@@ -1584,9 +1584,9 @@
     "semantic_hash": ""
   },
   "docs/domain-routing.md": {
-    "mtime": 1791661272.5894682,
-    "seen": 1791661929.3423293,
-    "ast_hash": "5efd4245a3d81b2c6df700b58f31340e",
+    "mtime": 1791668420.860966,
+    "seen": 1791670460.0656815,
+    "ast_hash": "ccefa3a783be07ac7b6c2cd85b379cd5",
     "semantic_hash": ""
   },
   "docs/multi-tenancy.md": {
@@ -1614,9 +1614,9 @@
     "semantic_hash": ""
   },
   "docs/product-roadmap.md": {
-    "mtime": 1791661233.7144704,
-    "seen": 1791661929.3423362,
-    "ast_hash": "78ae10fddc647dec6e03c7a7216807ae",
+    "mtime": 1791668568.4409578,
+    "seen": 1791670460.0656886,
+    "ast_hash": "3271bfc4e7b8a3791b2a9a7786768adf",
     "semantic_hash": ""
   },
   "docs/secrets-architecture.md": {
@@ -1782,9 +1782,9 @@
     "semantic_hash": ""
   },
   "docker-compose.e2e.yml": {
-    "mtime": 1791659515.8953846,
-    "seen": 1791661929.342319,
-    "ast_hash": "01b6e1721c625758cdb5689137c67abb",
+    "mtime": 1791663732.9533322,
+    "seen": 1791670460.0656643,
+    "ast_hash": "44c719f66246c76b0dc480f8153612b3",
     "semantic_hash": ""
   },
   "docs/phase1-report.md": {
@@ -2058,9 +2058,9 @@
     "semantic_hash": ""
   },
   "backend/app/services/proxy_service.py": {
-    "mtime": 1791658166.961677,
-    "seen": 1791661929.3421311,
-    "ast_hash": "8e0d034fe156e19247c6e0bb86577969",
+    "mtime": 1791663528.2161925,
+    "seen": 1791670460.0654354,
+    "ast_hash": "e3b6b00b09cc3366a45db2d0700b65a3",
     "semantic_hash": ""
   },
   "backend/app/services/route_service.py": {
@@ -2070,9 +2070,9 @@
     "semantic_hash": ""
   },
   "backend/app/tasks/domain_routing.py": {
-    "mtime": 1791657912.0126543,
-    "seen": 1791661929.3421404,
-    "ast_hash": "ed9322ed9a19287d83b27e8e1a4fdf83",
+    "mtime": 1791663528.2173731,
+    "seen": 1791670460.0654526,
+    "ast_hash": "41569941e2baeb576cb4981fa27c4c82",
     "semantic_hash": ""
   },
   "backend/tests/integration/test_migration_phase4.py": {
@@ -2082,15 +2082,15 @@
     "semantic_hash": ""
   },
   "backend/tests/integration/test_phase4_routing.py": {
-    "mtime": 1791658078.491645,
-    "seen": 1791661929.3421774,
-    "ast_hash": "66cc00e332f80b9a53447838ee6a0a88",
+    "mtime": 1791663416.6493497,
+    "seen": 1791670460.0654967,
+    "ast_hash": "e105feed92aa59ae257f57cf61cdb257",
     "semantic_hash": ""
   },
   "backend/tests/test_agent_nginx_contract.py": {
-    "mtime": 1791661118.0164769,
-    "seen": 1791661929.3421843,
-    "ast_hash": "3182c2e7053d3d14e2da0313de320328",
+    "mtime": 1791665834.351216,
+    "seen": 1791670460.065504,
+    "ast_hash": "3f39ed46dbc3ba722903a6bec7dd97c5",
     "semantic_hash": ""
   },
   "backend/tests/unit/test_dns_verifier.py": {
@@ -2118,9 +2118,9 @@
     "semantic_hash": ""
   },
   "frontend/e2e/phase4.spec.ts": {
-    "mtime": 1791660925.1364875,
-    "seen": 1791661929.3422203,
-    "ast_hash": "0f0c8c54a482db4a9f478926a30b9dbf",
+    "mtime": 1791666193.1011963,
+    "seen": 1791670460.06555,
+    "ast_hash": "3856aba5d8318cefb58ddecab49637c4",
     "semantic_hash": ""
   },
   "frontend/src/pages/DomainDetailPage.tsx": {

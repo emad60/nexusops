@@ -12,7 +12,7 @@ import type {
 } from "../api/types";
 import { Pagination } from "../components/Pagination";
 import { TableSkeleton } from "../components/Skeleton";
-import { EmptyState, ErrorBlock, Modal, StatusBadge } from "../components/ui";
+import { EmptyState, ErrorBlock, Modal, RemovalChip, StatusBadge } from "../components/ui";
 import { CheckboxField, SelectField, TextField } from "../components/form";
 import { useToast } from "../components/toast";
 import { useAuth } from "../auth/AuthContext";
@@ -396,8 +396,12 @@ export default function RouteListPage() {
                     </td>
                     <td>
                       <StatusBadge value={route.config_state} />
+                      {/* `STALE` alone cannot say whether the name may still be
+                          answering; the removal half says which, and the reason
+                          follows it. */}
+                      <RemovalChip state={route.removal_state} />
                       {route.last_apply_error ? (
-                        <span className="small muted" title={route.last_apply_error}>
+                        <span className="small muted" title={route.status_detail}>
                           {route.last_apply_error}
                         </span>
                       ) : null}

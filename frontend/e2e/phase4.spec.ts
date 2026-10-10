@@ -61,8 +61,9 @@ function dockerAvailable(): boolean {
 }
 
 function docker(args: string[]): string {
-  // stderr is captured rather than inherited: a cleared-up container makes
-  // `rm -f`/`unpause` fail, and that noise belongs to the caller, not the report.
+  // stderr is captured rather than inherited: a container that is already gone
+  // makes `rm -f` (or a `kill` of a process that exited) fail, and that noise
+  // belongs to the caller, not to the test report.
   return execFileSync("docker", args, {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
@@ -131,6 +132,52 @@ async function dnsZone(): Promise<string | null> {
     return ((await response.json()) as { zone: string }).zone;
   } catch {
     return null;
+  }
+}
+
+/**
+ * Start (or restart) the management agent *inside* an already-running node
+ * container, as a process that can be stopped without touching nginx.
+ *
+ * `exec` keeps the pidfile pointing at the agent itself, so `stopAgent` can end it
+ * precisely; output goes to a file in the container rather than nowhere, so a
+ * failure is diagnosable (`docker exec <node> tail /var/log/nexusops-agent.log`).
+ * The container's own environment (server URL, token, nginx root) is inherited by
+ * `docker exec`, so a restart re-runs exactly what the entrypoint used to run.
+ */
+function startAgent(container: string): void {
+  docker([
+    "exec",
+    "-d",
+    container,
+    "sh",
+    "-c",
+    "echo $$ > /run/nexusops-agent.pid; exec python3 /opt/nexusops/nexusops_agent.py " +
+      ">> /var/log/nexusops-agent.log 2>&1",
+  ]);
+}
+
+/**
+ * Stop the agent process and prove it is gone. nginx keeps running: the node is
+ * still serving whatever configuration it last applied, it has simply stopped
+ * reporting.
+ */
+function stopAgent(container: string): void {
+  docker(["exec", container, "sh", "-c", "kill $(cat /run/nexusops-agent.pid) 2>/dev/null || true"]);
+  // `[n]exusops_agent` is the classic self-match guard: the checking shell's own
+  // command line contains the bracketed form, which the pattern does not match,
+  // so this can only ever report a real agent process.
+  const stillThere = () => {
+    try {
+      return docker(["exec", container, "pgrep", "-f", "[n]exusops_agent.py"]) !== "";
+    } catch {
+      return false; // pgrep exits non-zero when nothing matches
+    }
+  };
+  const deadline = Date.now() + 15_000;
+  while (stillThere()) {
+    if (Date.now() > deadline) throw new Error(`agent ${container} did not stop`);
+    execFileSync("sleep", ["0.5"]);
   }
 }
 
@@ -220,10 +267,17 @@ async function startNode(
       NODE_IMAGE,
       "sh",
       "-c",
-      "nginx && exec python3 /opt/nexusops/nexusops_agent.py",
+      // nginx is the container's main process and the agent runs as a separate
+      // process inside it (see `startAgent`). That separation is what lets the
+      // transfer journey take the *management* agent away while the data plane
+      // keeps serving — which is the only way to prove that a route the control
+      // plane has asked to remove can still be answering, and that the platform
+      // does not claim otherwise.
+      "exec nginx -g 'daemon off;'",
     ],
     { stdio: ["ignore", "pipe", "pipe"] },
   );
+  startAgent(spec.container);
 
   await expect
     .poll(
@@ -317,6 +371,35 @@ async function proveName(
   return { domainId: body.id, recordName };
 }
 
+/** How many routes one apply's bundle was the desired state for. */
+function manifestLength(op: OperationBody): number {
+  return op.params?.bundle?.manifest?.length ?? -1;
+}
+
+/**
+ * `nginx.apply` operations on *nodeId* that **finished successfully with an empty
+ * manifest** — the applies whose whole job was to stop serving routes.
+ *
+ * Counting them is how this journey proves a removal was processed exactly once,
+ * instead of inferring it from a status row that a node's absence could explain.
+ */
+async function finishedRemovalApplies(
+  api: APIRequestContext,
+  tenant: Tenant,
+  nodeId: string,
+): Promise<OperationBody[]> {
+  const listed = (await (
+    await api.get("/api/v1/operations", {
+      headers: tenant.headers,
+      params: { node_id: nodeId, limit: "100" },
+    })
+  ).json()) as { items: OperationBody[] };
+  return listed.items.filter(
+    (op) =>
+      op.type === "nginx.apply" && op.status === "SUCCEEDED" && manifestLength(op) === 0,
+  );
+}
+
 /** Operations on *nodeId* of type `nginx.apply` that have not finished yet. */
 async function liveApplies(
   api: APIRequestContext,
@@ -361,6 +444,10 @@ interface RouteBody {
   config_state: string;
   last_bundle_id: string | null;
   last_apply_error: string;
+  /** `REQUESTED` (out of the desired configuration, unconfirmed) or `CONFIRMED`. */
+  removal_state: "REQUESTED" | "CONFIRMED" | null;
+  removal_requested_at: string | null;
+  removal_confirmed_at: string | null;
   status_detail: string;
 }
 
@@ -381,6 +468,8 @@ interface ProxyStatusBody {
   route_enabled: number;
   route_in_sync: number;
   route_stale: number;
+  /** Enabled routes whose removal no node has confirmed yet. */
+  route_removal_pending: number;
   capability: { routing_eligible: boolean; listener_80: string };
 }
 
@@ -388,6 +477,7 @@ interface OperationBody {
   id: string;
   type: string;
   status: string;
+  params?: { bundle?: { manifest?: string[] } };
 }
 
 interface EventBody {
@@ -757,18 +847,26 @@ test.describe("domains and routes — a real nginx node, a real URL", () => {
    * Ownership transfer — the same name, a second organization, a second node.
    *
    * The name is proven by organization A and served from A's node; A's node is then
-   * made genuinely unreachable (its agent is stopped, so the control plane marks it
-   * OFFLINE) while organization B proves control of the same name through the same
-   * authoritative mock. What this journey has to show — on the wire, not in status
-   * rows — is:
+   * made genuinely unreachable while organization B proves control of the same name
+   * through the same authoritative mock.
    *
-   *   A's domain goes UNVERIFIED and A is told why;
-   *   the route is excluded from the desired configuration and reads unresolved;
-   *   **nothing is claimed while the node cannot apply**: no apply is queued, and
-   *   the difference is never announced as repaired;
-   *   the node comes back, the reconciler queues exactly one apply, the node applies
-   *   it, the fragment is gone from disk and the old Host gets the managed 444
-   *   instead of the old upstream;
+   * **Only the management agent is taken away, never nginx.** Stopping the whole
+   * container would have made "the route is still being served" impossible to
+   * observe — and that is exactly the fact this journey exists to pin: a revoked
+   * name whose node cannot be reached keeps answering, so the platform must keep
+   * saying "removal requested, not confirmed" until an agent reports otherwise.
+   *
+   * What it has to show — on the wire, not in status rows — is:
+   *
+   *   A's route serves A's upstream (real HTTP);
+   *   the agent stops reporting and the node goes OFFLINE while nginx keeps serving;
+   *   A's domain goes UNVERIFIED and A is told why, without learning who took it;
+   *   the route is excluded from the desired configuration, marked **removal
+   *   pending**, and still answers with A's marker — the platform claims nothing;
+   *   no apply is queued and nothing is announced as repaired while the agent is away;
+   *   the agent returns, exactly one apply is processed, the fragment is gone from
+   *   disk and the old Host gets the managed 444 instead of the old upstream;
+   *   the removal is then — and only then — reported as confirmed;
    *   the new owner serves the name from its own node;
    *   and neither organization can read or modify the other's resources.
    */
@@ -868,10 +966,12 @@ test.describe("domains and routes — a real nginx node, a real URL", () => {
       orgB = { id: membership.organization.id, headers: { "X-Org-Id": membership.organization.id } };
       expect(orgB.id).not.toBe(orgA.id);
 
-      // 3. A's node goes unreachable *before* the name changes hands: the agent is
-      //    frozen, so nothing refreshes its heartbeat and the control plane marks it
-      //    OFFLINE (30 s threshold, checked every 15 s).
-      docker(["pause", nodeAContainer]);
+      // 3. Only the *management agent* goes away before the name changes hands —
+      //    nginx keeps running, which is the whole point: a node whose control
+      //    plane has lost contact is still perfectly capable of answering for a
+      //    name it no longer owns. Nothing refreshes the heartbeat, so the control
+      //    plane marks it OFFLINE (30 s threshold, checked every 15 s).
+      stopAgent(nodeAContainer);
       await expect
         .poll(
           async () => {
@@ -882,6 +982,12 @@ test.describe("domains and routes — a real nginx node, a real URL", () => {
           { timeout: 150_000, intervals: [3_000, 5_000] },
         )
         .toBe("OFFLINE");
+      // ...and the data plane is demonstrably still up: with the agent gone, the
+      // route this journey is about to revoke still answers on its own host.
+      expect(
+        httpGet("http://127.0.0.1/", domainName).body,
+        "nginx must keep serving while only the agent is stopped",
+      ).toContain(markerA);
 
       // 4. B proves control of the same name through the authoritative fixture.
       const provenB = await proveName(api, orgB, domainName);
@@ -929,7 +1035,26 @@ test.describe("domains and routes — a real nginx node, a real URL", () => {
       expect(statusWhileOffline.expected_bundle_id).not.toBe(statusWhileOffline.live_bundle_id);
       expect(statusWhileOffline.route_in_sync).toBe(0);
       expect(statusWhileOffline.route_stale).toBe(1);
+      // The removal is *requested* and visibly pending — not confirmed, and not
+      // "recovered". The label is what stops an operator reading a revoked name as
+      // already gone while the node is still answering for it.
+      expect(stateWhileOffline.removal_state).toBe("REQUESTED");
+      expect(stateWhileOffline.removal_confirmed_at).toBeNull();
+      expect(stateWhileOffline.status_detail).toContain("Removal requested");
+      expect(stateWhileOffline.status_detail).toContain("may still be serving");
+      expect(statusWhileOffline.route_removal_pending).toBe(1);
       expect(await liveApplies(api, orgA, nodeA.id)).toHaveLength(0);
+      // Not one apply has *finished* for this node since the name changed hands:
+      // the only successful apply so far is the one that originally enabled the
+      // route, and it carried a manifest.
+      expect(await finishedRemovalApplies(api, orgA, nodeA.id)).toHaveLength(0);
+      // The truth behind the label: the revoked name still reaches A's upstream,
+      // because deleting a route from the desired state does not delete it from a
+      // node that cannot be reached.
+      expect(
+        httpGet("http://127.0.0.1/", domainName).body,
+        "the old route must still be answering while its removal is unconfirmed",
+      ).toContain(markerA);
 
       // 7. The reconciler does not lie or pile up: several sweep ticks (15 s each on
       //    this stack) queue nothing, and the difference is never announced as
@@ -949,10 +1074,10 @@ test.describe("domains and routes — a real nginx node, a real URL", () => {
         ).json()) as RouteBody,
       ).toMatchObject({ config_state: "STALE" });
 
-      // 8. The node comes back. The next sweep tick queues exactly one apply, the
+      // 8. The agent comes back. The next sweep tick queues exactly one apply, the
       //    agent applies it, and only then is the name gone — verified against the
       //    fragment on disk and against a real HTTP request.
-      docker(["unpause", nodeAContainer]);
+      startAgent(nodeAContainer);
       await expect
         .poll(
           async () => {
@@ -983,6 +1108,30 @@ test.describe("domains and routes — a real nginx node, a real URL", () => {
       expect(recoveredResponseAfter.status(), await recoveredResponseAfter.text()).toBe(200);
       const recoveredEvents = (await recoveredResponseAfter.json()) as { items: EventBody[] };
       expect(recoveredEvents.items.length).toBeGreaterThan(0);
+
+      // Exactly one removal was processed by the returning agent — not one per
+      // sweep tick, and not zero: the reconciler queues a single apply and the
+      // node's own report is what turns the request into a confirmation.
+      const removalApplies = await finishedRemovalApplies(api, orgA, nodeA.id);
+      expect(removalApplies).toHaveLength(1);
+      const confirmed = (await (
+        await api.get(`/api/v1/routes/${routeA}`, { headers: orgA.headers })
+      ).json()) as RouteBody;
+      expect(confirmed.removal_state).toBe("CONFIRMED");
+      expect(confirmed.removal_confirmed_at).not.toBeNull();
+      expect(confirmed.status_detail).toContain("Removal confirmed");
+      const confirmedEvents = (await (
+        await api.get("/api/v1/events", {
+          headers: orgA.headers,
+          params: { types: "ROUTE_REMOVAL_CONFIRMED" },
+        })
+      ).json()) as { items: EventBody[] };
+      expect(confirmedEvents.items).toHaveLength(1);
+      expect(
+        (await (
+          await api.get(`/api/v1/nodes/${nodeA.id}/proxy/status`, { headers: orgA.headers })
+        ).json()) as ProxyStatusBody,
+      ).toMatchObject({ route_removal_pending: 0 });
 
       // Nothing that answered for the name is left on the node...
       const routesDir = docker(["exec", nodeAContainer, "ls", "/etc/nexusops/nginx/routes.d"]);
@@ -1095,11 +1244,8 @@ test.describe("domains and routes — a real nginx node, a real URL", () => {
       await dnsClear(recordName).catch(() => undefined);
       for (const container of [nodeAContainer, nodeBContainer]) {
         try {
-          docker(["unpause", container]);
-        } catch {
-          /* not paused, or already gone */
-        }
-        try {
+          // The node container is the unit of teardown: whatever the agent was
+          // doing (stopped, restarting) goes with it.
           docker(["rm", "-f", container]);
         } catch {
           /* already gone */

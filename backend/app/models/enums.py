@@ -202,6 +202,25 @@ class RouteConfigState(StrEnum):
     FAILED = "FAILED"
 
 
+class RouteRemovalState(StrEnum):
+    """How far a route's *removal* has got, which ``config_state`` cannot say.
+
+    A route that must stop being served leaves its node's desired configuration
+    at once, but the node may still be running the configuration that serves it:
+    that is two different facts, and only one of them is a fact the control plane
+    can know by itself.
+
+    ``REQUESTED`` — the route is out of the desired tree (its domain stopped
+    serving, so it is no longer allowed to answer). Nothing may claim it stopped
+    serving; a node that is offline or failing sits here.
+    ``CONFIRMED`` — a node reported an *applied* bundle that does not contain this
+    route. Only the apply-result handler moves a route here.
+    """
+
+    REQUESTED = "REQUESTED"
+    CONFIRMED = "CONFIRMED"
+
+
 class ProxyApplyOutcome(StrEnum):
     """Terminal outcome of one ``nginx.apply`` operation on a node."""
 

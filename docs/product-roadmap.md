@@ -386,6 +386,16 @@ redirect, and nothing in the renderer can emit one (`CHECK (scheme = 'http')`, n
   exactly one `nginx.apply` when they differ, with a bounded exponential retry for a
   node that keeps failing and a fingerprint refresh interval for one that is
   converged. `NGINX_DRIFT_RECOVERED` is published only from an applied outcome.
+- **Truthfulness pass (2026-10-11).** "Out of the desired configuration" and "gone
+  from the node" are now separate, persisted facts (`removal_requested_at` /
+  `removal_confirmed_at`, surfaced as `route.removal_state` and the node's
+  `route_removal_pending` count). Only an agent's *applied* bundle can confirm a
+  removal, so a revoked route whose node is unreachable reads "removal requested,
+  may still be serving it" — and the E2E proves the name really is still answering
+  in that window. Events `ROUTE_REMOVAL_REQUESTED`/`ROUTE_REMOVAL_CONFIRMED` and the
+  audit row `route.removal_confirmed` carry the distinction into the trail and the
+  UI, and the module registry's `DOMAIN_UNVERIFIED` wording no longer implies the
+  routes stopped being served the moment the name changed hands.
 - **Testing:** mock-DNS unit + integration suites (verification lifecycle, grace
   window, cross-org flip), a 66-test HTTP integration suite for domains/routes/
   apply/rollback/drift/tenancy — including the ownership-transfer scenario with the
@@ -409,14 +419,17 @@ redirect, and nothing in the renderer can emit one (`CHECK (scheme = 'http')`, n
   fixed and pinned by contract tests.
 - **E2E, ownership transfer:** a second scenario in the same spec gives a name to a
   second organization (its own node, its own container, the same mock DNS fixture)
-  and proves on the wire that the first organization's route stops being served: the
-  old domain goes `UNVERIFIED` and the old owner's audit/event trail says why without
-  naming the winner, the old route is excluded from the desired configuration, the
-  old node — held unreachable for part of the run — applies the bundle without the
-  fragment, an HTTP request with the old Host gets the managed 444 instead of the
-  old upstream, no success is claimed while the node cannot apply, the new owner
-  serves the name from its own node, and neither organization can read or modify the
-  other's rows. It also found the second real defect of this pass, on the agent side:
+  and proves on the wire that the first organization's route stops being served —
+  with only the **agent** taken away, nginx left running, which is the only setup in
+  which the interesting fact is observable: the revoked name keeps answering until
+  the node is actually told. The old domain goes `UNVERIFIED` and the old owner's
+  audit/event trail says why without naming the winner, the old route reads removal
+  pending and still reaches A's upstream, no apply is queued and no success is
+  claimed while the agent is away, the returning agent processes exactly one removal
+  apply (counted from the operations API), the fragment leaves the node, an HTTP
+  request with the old Host then gets the managed 444, the removal is reported
+  confirmed, the new owner serves the name from its own node, and neither
+  organization can read or modify the other's rows. It also found the second real defect of this pass, on the agent side:
   a bundle containing **no route fragments** — what every revocation of the last route
   on a node renders to — could not be staged, so the apply failed and rolled back and
   the routes stayed live on the node. The stage writer now creates `routes.d`

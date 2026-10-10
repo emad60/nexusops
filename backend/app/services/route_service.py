@@ -48,6 +48,7 @@ from app.models.enums import (
     MonitorStatus,
     MonitorTargetType,
     RouteConfigState,
+    RouteRemovalState,
 )
 from app.schemas.route import RouteCreate, RouteUpdate
 from app.services import audit_service, event_bus, proxy_service
@@ -662,14 +663,47 @@ async def _sync_route_monitor(db: AsyncSession, *, route: Route, ctx: AuthContex
     await db.flush()
 
 
+def removal_state_of(route: Route) -> RouteRemovalState | None:
+    """Which half of a removal *route* is in, or ``None`` when it is in neither.
+
+    Read straight off the row's two timestamps, so the API, the UI and the tests
+    all see the same fact: ``CONFIRMED`` only ever means a node reported an
+    applied bundle without this route, and ``REQUESTED`` is the honest state of
+    everything else that is on its way out — including a route whose node is
+    offline and may still be serving it.
+    """
+    if route.removal_confirmed_at is not None:
+        return RouteRemovalState.CONFIRMED
+    if route.removal_requested_at is not None:
+        return RouteRemovalState.REQUESTED
+    return None
+
+
 async def route_status_detail(route: Route) -> str:
-    """A short, sanitized explanation of ``config_state`` for the UI."""
+    """A short, sanitized explanation of ``config_state`` for the UI.
+
+    A route on its way out is described by the half it is in, in words that
+    cannot be mistaken for the other one: ``last_apply_error`` carries the full
+    sentence the writer recorded (see ``proxy_service.removal_requested_detail``
+    and its confirmed counterpart).
+    """
     state = RouteConfigState(route.config_state)
     if state is RouteConfigState.IN_SYNC:
         return "Configuration applied on the node"
     if state is RouteConfigState.PENDING:
         return "Waiting for the node to apply the configuration"
     if state is RouteConfigState.STALE:
+        reason = route.last_apply_error or "this route is excluded from the desired configuration"
+        if route.removal_confirmed_at is not None:
+            return (
+                f"Removal confirmed — {reason}; the node applied a configuration without "
+                "this route, so it is no longer served"
+            )
+        if route.removal_requested_at is not None:
+            return (
+                f"Removal requested — {reason}; the node has not confirmed the removal, "
+                "so it may still be serving it"
+            )
         return route.last_apply_error or "Not currently served by the node"
     return route.last_apply_error or "The node failed to apply the configuration"
 

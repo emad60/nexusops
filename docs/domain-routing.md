@@ -121,7 +121,8 @@ org has verified — it stays `PENDING` until it can prove ownership itself.
 | `headers` / `rate_limit` / `redirect` | JSONB, nullable | Structured, allowlisted (§6, §9). `redirect` is host-only — there is no `to_scheme`, so no HTTPS redirect is expressible |
 | `enabled` | Bool | Live gate: requires domain `VERIFIED` AND upstream present |
 | `config_state` | String(16) + CHECK | `PENDING` / `IN_SYNC` / `STALE` / `FAILED` — last apply outcome on its node. `STALE` is "not confirmed live at the desired configuration", which covers both "pulled" and "awaiting the node's removal" |
-| `last_applied_at` / `last_bundle_id` / `last_apply_error` | DateTime / String(64) / String(500) | Which bundle the node confirmed for this route, and the sanitized reason when it did not |
+| `last_applied_at` / `last_bundle_id` / `last_apply_error` | DateTime / String(64) / String(500) | Which bundle the node confirmed for this route, and the sanitized *reason* it is not being served |
+| `removal_requested_at` / `removal_confirmed_at` | DateTime, nullable | The two halves of a removal, kept apart (§8.4). **Requested** = the route left the node's desired configuration. **Confirmed** = a node reported an *applied* bundle that omits it. Surfaced as `removal_state` (`REQUESTED`/`CONFIRMED`) and as the node's `route_removal_pending` count |
 | `monitor_optout` | Bool, default false | Auto-attached uptime monitor (§13) |
 
 Uniqueness: `(node_id, hostname, path)` unique among `enabled = true` routes — one
@@ -181,10 +182,17 @@ Lifecycle: `PENDING → VERIFYING → VERIFIED`; `VERIFIED → STALE` (72h TXT g
 `→ UNVERIFIED`; apex NS change or cross-org flip ⇒ `UNVERIFIED` immediately;
 `UNVERIFIED → VERIFYING` on re-verify. While `STALE` or `UNVERIFIED`, the domain's
 routes are excluded from every render — and because the desired configuration no
-longer contains them, the node's own next apply removes their fragments. A route
-that was live does not keep serving on stale proof: the exclusion is a fact of the
-render, and the apply that carries it is queued (and, if a node is unreachable,
-retried) rather than assumed (§8.4).
+longer contains them, the node's own next apply removes their fragments.
+
+**The exclusion is immediate; the removal is not.** Those are two different facts
+and the platform reports them differently (§8.4): the moment the name stops being
+served the routes leave the *desired* configuration and are marked `REQUESTED` —
+never "removed" — because a node that has not been reached is still running the
+configuration that answers for the name. `CONFIRMED` is written by exactly one
+thing: an agent reporting an applied bundle that omits the route. So a route that
+was live does not keep serving on stale proof *only once its node has applied the
+exclusion*; until then it reads as removal pending, and an operator is told the
+truth rather than an intention.
 
 ### 4.4 Sequence: add-domain → verified
 
@@ -449,9 +457,11 @@ misreporting, it is running the wrong tree — so:
    `drift`/`drift_since` on the node, and publishes `NGINX_DRIFT_DETECTED`. The
    status path queues nothing.
 2. **Reconcile (one step per tick, per node).** `sweep-routes` calls
-   `proxy_service.reconcile_node`, which renders the desired tree (marking every
-   route it must exclude `STALE` *with the reason it was excluded* — "the domain is
-   unverified", "the upstream container is not running", …) and then:
+   `proxy_service.reconcile_node`, which renders the desired tree — marking every
+   route it must exclude `STALE` *with the reason it was excluded* ("the domain is
+   unverified", "the upstream container is not running", …), recording
+   `removal_requested_at` for the ones excluded because their domain stopped
+   serving, and leaving `removal_confirmed_at` strictly alone — and then:
    - the live bundle already **is** the desired one ⇒ nothing to repair. The node is
      asked for a fresh fingerprint only when the last report is older than
      `STATUS_REFRESH_AFTER` (10 min), so a healthy fleet is not a poll loop;
@@ -469,6 +479,38 @@ misreporting, it is running the wrong tree — so:
 
 The database is the only source of truth for desired state; out-of-band node edits
 are corrected by step 2 rather than tolerated.
+
+#### Requested is not confirmed
+
+A removal has two halves, and only one of them is something the control plane can
+know by itself:
+
+| Half | Written by | What it means | Wire |
+|---|---|---|---|
+| **Requested** | the renderer (a route left the desired tree) and the cross-org release path | this route must stop being served; **the node may still be running the configuration that serves it** | `route.removal_state = REQUESTED`, `status_detail` "Removal requested — … ; the node has not confirmed the removal, so it may still be serving it", `node.route_removal_pending` counts it, event `ROUTE_REMOVAL_REQUESTED` |
+| **Confirmed** | the apply-result handler, and nothing else | an agent reported an *applied* bundle whose manifest omits this route, so the node's live configuration no longer contains it | `route.removal_state = CONFIRMED`, `status_detail` "Removal confirmed — … ; the node applied a configuration without this route", the count drops, event `ROUTE_REMOVAL_CONFIRMED` + audit `route.removal_confirmed` |
+
+Consequences the implementation is built around:
+
+- **An offline or failing node never reads as removed.** Deferral changes no
+  removal column, so the route stays `REQUESTED` and `route_removal_pending` stays
+  non-zero until an agent actually applies. The name being served by a node the
+  platform cannot reach is a *visible* state, not an assumption.
+- **Exactly once, and only from the report.** Confirmation is recorded from the
+  agent-echoed manifest of a successful apply; a failed or rolled-back apply
+  produces none. A route that is already confirmed is not confirmed again, however
+  many ticks re-render the same exclusion.
+- **The reason survives.** `last_apply_error` keeps the *why* ("this name is now
+  verified by another organization", "the domain is unverified") — the first writer
+  of an episode owns it, so the renderer's later generic pass cannot erase the
+  specific statement the release path recorded.
+- **Re-verification ends the episode.** When a route is rendered and applied again
+  the markers clear; a later loss of the name starts a fresh removal rather than
+  inheriting an old confirmation.
+
+The production E2E pins the honest case end to end: with only the *agent* stopped
+(nginx still running), the revoked name keeps answering through the node until the
+agent returns and applies the removal — see §11.
 
 ### 8.5 How deployments hook routing (post-deploy route sync)
 
@@ -558,15 +600,23 @@ request through the node's port 80 that reaches the container's marker, the mana
 catch-all answering 444 for a Host nobody mapped, `drift: false` with matching
 bundle ids — and the dashboard showing the same state.
 
-**Ownership transfer is proven the same way.** A second scenario gives the name to a
-second organization (its own node, its own container, the same mock DNS fixture) and
-asserts, on the wire rather than in status rows: the first organization's domain goes
-`UNVERIFIED` and its audit/event trail says why; the old route is excluded from the
-desired configuration; the old node — kept unreachable for part of the run — applies
-the bundle that removes the fragment, and an HTTP request with the old Host no longer
-reaches the old upstream (the managed catch-all answers 444); no success is reported
-while the node cannot apply; the new owner serves the name from its own node; and
-neither organization can read or modify the other's rows.
+**Ownership transfer is proven the same way — and with only the agent taken away.**
+A second scenario gives the name to a second organization (its own node, its own
+container, the same mock DNS fixture). The node's nginx is the container's main
+process and the agent runs as a separate process, so the journey stops **the agent**
+and leaves the data plane running: that is the only configuration in which "the old
+route is still being served" is observable at all. It then asserts, on the wire
+rather than in status rows: A's route serves A's upstream before anything changes
+hands; with the agent gone, A's node goes `OFFLINE` **while nginx keeps answering**
+for the name A is about to lose; B's verification flips A's domain to `UNVERIFIED`
+and A's event trail says why without naming the winner; the old route reads removal
+pending (`REQUESTED`, `route_removal_pending` 1) and **a real request with the old
+Host still reaches A's upstream** — the platform claims no removal it cannot
+evidence; no apply is queued and nothing is announced as repaired; when the agent
+returns, **exactly one** apply with an empty manifest is processed (asserted from
+the operations API, not inferred), the fragment is gone from disk, the old Host gets
+the managed 444, the removal is then reported confirmed, the new owner serves the
+name from its own node, and neither organization can read or modify the other's rows.
 
 ## 12. API surface, permissions, audit
 
@@ -594,13 +644,18 @@ Audit actions (append-only; `resource.action` naming, domain-model.md §2.6):
 `domain.deleted` · `route.created`/`updated`/`deleted` (user) · `route.enabled`/
 `disabled` · `route.apply_requested` (control plane, with the bundle summary) ·
 `route.applied`/`apply_failed`/`rolled_back`/`rollback_failed` (agent) ·
-`nginx.bootstrap_completed`/`failed` · `nginx.drift_detected` ·
+`route.removal_confirmed` (agent, once per removal, with the bundle that omits the
+route) · `nginx.bootstrap_completed`/`failed` · `nginx.drift_detected` ·
 `nginx.drift_recovered` (only from an applied outcome). Events: `DOMAIN_VERIFIED`,
 `DOMAIN_UNVERIFIED`, `ROUTE_CREATED`, `ROUTE_ENABLED`, `ROUTE_APPLIED`,
-`ROUTE_APPLY_FAILED`, `NGINX_DRIFT_DETECTED` and `NGINX_DRIFT_RECOVERED` publish
-id/status-only frames on `org:{org_id}:domains` (event_bus.py frame shape) — no
-tokens, no config text, and every frame carries the organization it belongs to, so
-the organization that lost a name is told why without learning who took it. The verification token is
+`ROUTE_APPLY_FAILED`, `ROUTE_REMOVAL_REQUESTED`, `ROUTE_REMOVAL_CONFIRMED`,
+`NGINX_DRIFT_DETECTED` and `NGINX_DRIFT_RECOVERED` publish id/status-only frames on
+`org:{org_id}:domains` (event_bus.py frame shape) — no tokens, no config text, and
+every frame carries the organization it belongs to, so the organization that lost a
+name is told why without learning who took it. The `domain.claim_released` audit row
+records `removal: "requested"` alongside `routes_pulled`/`nodes_affected`, because at
+that moment no node has been told anything; the confirmation is a separate row,
+written when an agent reports it. The verification token is
 never written into an audit row, an event or a log: it is returned once to a
 `domain.manage` holder while it is still actionable, and never again.
 

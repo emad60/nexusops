@@ -62,6 +62,9 @@ function makeRoute(overrides: Partial<RouteOut> = {}): RouteOut {
     last_applied_at: "2026-10-10T12:00:00Z",
     last_bundle_id: "f".repeat(64),
     last_apply_error: "",
+    removal_state: null,
+    removal_requested_at: null,
+    removal_confirmed_at: null,
     status_detail: "The node is serving this route.",
     created_at: "2026-10-09T00:00:00Z",
     updated_at: "2026-10-10T12:00:00Z",
@@ -163,6 +166,7 @@ const PROXY: NodeProxyStatusOut = {
   route_in_sync: 1,
   route_stale: 0,
   route_failed: 0,
+  route_removal_pending: 0,
   last_applied_at: null,
   last_apply_error: "",
   created_at: "2026-10-01T00:00:00Z",
@@ -250,6 +254,45 @@ describe("RouteListPage", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Enable" }));
 
     await waitFor(() => expect(mockedPost).toHaveBeenCalledWith("/routes/r1/enable"));
+  });
+
+  it("distinguishes a requested removal from a confirmed one", async () => {
+    // Both rows are STALE. Only the removal half may say whether the name can
+    // still be answering, so the two must not render the same label.
+    mockApi({
+      items: [
+        makeRoute({
+          id: "r-pending",
+          config_state: "STALE",
+          removal_state: "REQUESTED",
+          removal_requested_at: "2026-10-11T09:00:00Z",
+          last_apply_error: "the domain is unverified",
+          status_detail: "Removal requested — the domain is unverified; the node has not confirmed the removal, so it may still be serving it",
+        }),
+        makeRoute({
+          id: "r-confirmed",
+          config_state: "STALE",
+          removal_state: "CONFIRMED",
+          removal_requested_at: "2026-10-11T09:00:00Z",
+          removal_confirmed_at: "2026-10-11T09:05:00Z",
+          last_apply_error: "the domain is unverified",
+          status_detail: "Removal confirmed — the domain is unverified; the node applied a configuration without this route, so it is no longer served",
+        }),
+      ],
+      total: 2,
+      limit: 25,
+      offset: 0,
+    });
+
+    renderPage();
+
+    const pending = await screen.findByText("removal pending");
+    expect(pending.getAttribute("title")).toContain("may still be serving it");
+    const confirmed = await screen.findByText("removal confirmed");
+    expect(confirmed.getAttribute("title")).toContain("no longer served");
+    // Exactly one of each: neither label leaks onto the other row.
+    expect(screen.getAllByText("removal pending")).toHaveLength(1);
+    expect(screen.getAllByText("removal confirmed")).toHaveLength(1);
   });
 
   it("deletes a route after confirmation", async () => {

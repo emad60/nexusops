@@ -497,6 +497,9 @@ double-process. What you will see in worker logs:
 | 15 s | `nx.sweep_servers` | Mark servers OFFLINE after `SERVER_OFFLINE_AFTER_SECONDS` without a heartbeat. |
 | `MONITOR_DISPATCH_INTERVAL_SECONDS` (10 s) | `nx.run_due_monitors` | Dispatch due monitor checks. |
 | 30 s | `nx.sync_docker_hosts` | Reconcile Docker host/container state. |
+| `DOMAIN_SWEEP_INTERVAL_SECONDS` (300 s) | `nx.sweep_domains` | Re-prove control of due domains (hourly re-check, bounded failure backoff, the 72 h stale grace). A lost name pulls its routes from the nodes serving them. |
+| `ROUTE_SWEEP_INTERVAL_SECONDS` (60 s) | `nx.sweep_routes` | Reconcile each routed node: refresh the live fingerprint of a converged node on an interval, and queue **exactly one** `nginx.apply` when the desired bundle and the node's live one differ. A node that cannot take it (offline, failing) stays unresolved and backs off. |
+| 60 s | `nx.expire_operations` | Expire operations past their execution deadline. |
 | 120 s | `nx.sweep_deployments` | Time out / finalize stuck deployments. |
 | 60 s | `nx.retry_notifications` | Retry failed notification deliveries. |
 | 600 s | `nx.expire_sessions` | Expire stale user sessions. |

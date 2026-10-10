@@ -63,6 +63,36 @@ log = get_logger("nexusops.proxy")
 #: exists to avoid.
 CAPABILITY_STALE_AFTER = timedelta(minutes=5)
 
+#: How long a node whose live bundle already *is* the desired one may go without
+#: a fresh fingerprint before the reconciler asks for one. A status poll costs a
+#: round trip to the node, so a converged node is re-checked on an interval — and
+#: a node that is known **not** to match is never merely asked again: that poll
+#: loop cannot converge (see :func:`reconcile_node`).
+STATUS_REFRESH_AFTER = timedelta(minutes=10)
+
+#: Bounded retry schedule for a node that keeps failing to converge. Attempt *n*
+#: waits ``min(RECOVERY_BACKOFF_MAX, RECOVERY_BACKOFF_START * 2 ** (n - 1))``, so
+#: a node whose apply keeps failing — the exact shape of a hand-broken nginx — is
+#: retried at a bounded rate instead of on every sweep tick. ``recovery_attempts``
+#: is reset by the first successful apply.
+RECOVERY_BACKOFF_START = timedelta(minutes=1)
+RECOVERY_BACKOFF_MAX = timedelta(minutes=30)
+
+# --- reconciliation reason codes ----------------------------------------------
+#
+# ``reconcile_node`` returns one of these instead of a boolean: "did anything
+# happen" is not the useful answer (a node already in sync and a node that cannot
+# be reached both change nothing), while *why* is what an operator and the sweep
+# counters need.
+RECONCILE_IN_SYNC = "in_sync"
+RECONCILE_STATUS_REQUESTED = "status_requested"
+RECONCILE_RECOVERY_QUEUED = "recovery_queued"
+RECONCILE_APPLY_IN_FLIGHT = "apply_in_flight"
+RECONCILE_DEFERRED = "deferred"
+RECONCILE_BLOCKED = "blocked"
+RECONCILE_NO_CHANGE = "no_change"
+RECONCILE_IDLE = "idle"
+
 #: Host ports the proxy owns on a node. A container publishing on one of these
 #: can never be routed to: nginx needs them for the routes themselves.
 RESERVED_HOST_PORTS: frozenset[int] = frozenset({80, 443})
@@ -373,6 +403,23 @@ async def _mark_route_stale(db: AsyncSession, route: Route, detail: str) -> None
         await db.flush()
 
 
+async def _mark_enabled_routes_stale(db: AsyncSession, *, node: Server, detail: str) -> None:
+    """Mark every enabled route on *node* unresolved, with one reason.
+
+    Used when the desired tree itself could not be computed: none of these routes
+    can be confirmed against a bundle that does not exist, and saying so is the
+    honest report. It never claims a route stopped serving — ``STALE`` is "not
+    confirmed live at the desired configuration", which is exactly the case.
+    """
+    rows = (
+        (await db.execute(select(Route).where(Route.node_id == node.id, Route.enabled.is_(True))))
+        .scalars()
+        .all()
+    )
+    for route in rows:
+        await _mark_route_stale(db, route, detail)
+
+
 async def render_for_node(db: AsyncSession, *, node: Server) -> tuple[NginxBundle, list[Route]]:
     """Render the complete desired state for *node* from the database.
 
@@ -576,6 +623,133 @@ async def request_status(db: AsyncSession, *, node: Server) -> Operation | None:
         return None
 
 
+# --- reconciliation -----------------------------------------------------------
+
+
+def recovery_backoff(attempts: int) -> timedelta:
+    """How long to wait before the next automatic recovery attempt.
+
+    Exponential from :data:`RECOVERY_BACKOFF_START`, capped at
+    :data:`RECOVERY_BACKOFF_MAX`. ``attempts`` is 1-based.
+    """
+    exponent = min(max(int(attempts), 1) - 1, 10)
+    return min(RECOVERY_BACKOFF_START * (2**exponent), RECOVERY_BACKOFF_MAX)
+
+
+def _is_due(raw: Any, window: timedelta) -> bool:
+    """Whether a stored timestamp is missing or older than *window*."""
+    stamp = _parse_dt(raw)
+    return stamp is None or (_utcnow() - stamp) >= window
+
+
+async def reconcile_node(db: AsyncSession, *, node: Server) -> str:
+    """Bring one node's live configuration back to the desired bundle — bounded.
+
+    This is the unattended half of the apply pipeline, and the rule it exists to
+    enforce is short: **a difference between the desired bundle and what the node
+    is running is repaired, not merely observed.** Asking an out-of-sync node for
+    its fingerprint again cannot converge — the node is not misreporting, it is
+    running the wrong configuration — so a status poll happens only once there is
+    nothing left to repair, and a detected difference queues (at most) one apply.
+
+    Every bound is explicit:
+
+    * one apply at a time — a live ``nginx.apply`` short-circuits the branch, and
+      :func:`enqueue_apply` refuses a duplicate anyway;
+    * nothing is queued to a node that cannot take it (offline, stale capability,
+      listener conflict): the routes stay unresolved and the next tick retries,
+      which is also why an offline node never accumulates a queue;
+    * a node that keeps failing backs off through ``next_recovery_at`` instead of
+      being re-applied on every tick;
+    * a difference is reported as repaired only from an actual apply outcome
+      (:func:`_handle_apply_result`), never from the attempt.
+
+    Returns one of the ``RECONCILE_*`` reason codes. The caller owns the
+    transaction and the tenancy scope: this is per-node work and runs inside the
+    node's own organization.
+    """
+    state = dict(node.proxy_state or {})
+    applied = str(state.get("applied_bundle_id") or "")
+    live = str(state.get("live_bundle_id") or "")
+    confirmed = applied or live
+
+    try:
+        bundle, included = await render_for_node(db, node=node)
+    except Conflict as exc:
+        # The desired tree cannot be computed, so nothing on this node can be
+        # confirmed against it. Leave the live configuration untouched and say so.
+        await _mark_enabled_routes_stale(
+            db,
+            node=node,
+            detail=f"the desired configuration could not be rendered: {exc.message}",
+        )
+        state["reconcile_error"] = exc.message[:200]
+        node.proxy_state = state
+        await db.flush()
+        log.warning("nginx_reconcile_blocked", node=str(node.id), code=exc.code)
+        return RECONCILE_BLOCKED
+
+    if not await _has_enabled_routes(db, node_id=node.id) and not confirmed:
+        # Nothing is served from here and nothing ever was.
+        return RECONCILE_IDLE
+
+    desired = bundle.bundle_id
+    if desired == confirmed:
+        state["drift"] = False
+        state["drift_since"] = None
+        state["reconcile_error"] = ""
+        node.proxy_state = state
+        await db.flush()
+        # Converged. Only now is a fingerprint worth asking for, and only when the
+        # last one is old enough to matter.
+        if not _is_due(state.get("last_status_at"), STATUS_REFRESH_AFTER):
+            return RECONCILE_IN_SYNC
+        queued = await request_status(db, node=node)
+        return RECONCILE_STATUS_REQUESTED if queued is not None else RECONCILE_IN_SYNC
+
+    # A genuine difference. The render above already marked every route it had to
+    # exclude as STALE *with the reason it was excluded* (the domain is no longer
+    # verified, the upstream is gone, …), so the operator reads why the route is
+    # not being served; the routes it kept become PENDING when the apply is
+    # queued. Nothing here has claimed a route stopped serving yet.
+    next_at = _parse_dt(state.get("next_recovery_at"))
+    if next_at is not None and next_at > _utcnow():
+        log.info(
+            "nginx_recovery_backoff",
+            node=str(node.id),
+            attempts=int(state.get("recovery_attempts") or 0),
+        )
+        return RECONCILE_DEFERRED
+    if await operation_service.has_live_operation(
+        db, node_id=node.id, op_type=OperationType.NGINX_APPLY
+    ):
+        return RECONCILE_APPLY_IN_FLIGHT
+    try:
+        operation = await enqueue_apply(db, node=node, reason="sweep_drift_recovery")
+    except Conflict as exc:
+        state["reconcile_error"] = exc.message[:200]
+        node.proxy_state = state
+        await db.flush()
+        log.info("nginx_reconcile_deferred", node=str(node.id), code=exc.code)
+        return RECONCILE_DEFERRED
+    if operation is None:
+        return RECONCILE_NO_CHANGE
+
+    state = dict(node.proxy_state or {})
+    state["recovery_pending"] = True
+    state["recovery_queued_at"] = _utcnow().isoformat()
+    state["reconcile_error"] = ""
+    node.proxy_state = state
+    await db.flush()
+    log.info(
+        "nginx_recovery_queued",
+        node=str(node.id),
+        bundle_id=desired,
+        routes=len(included),
+    )
+    return RECONCILE_RECOVERY_QUEUED
+
+
 # --- result handling ----------------------------------------------------------
 
 
@@ -682,6 +856,10 @@ async def _handle_apply_result(db: AsyncSession, *, node: Server, operation: Ope
     detail = "" if outcome is ProxyApplyOutcome.APPLIED else _sanitized_error(operation)
     state = dict(node.proxy_state or {})
     now = _utcnow()
+    # Whether the reconciler queued this apply: only then is an applied bundle a
+    # *recovery* worth announcing as one.
+    was_recovery = bool(state.get("recovery_pending"))
+    attempts = int(state.get("recovery_attempts") or 0)
 
     if outcome is ProxyApplyOutcome.APPLIED:
         for route in routes:
@@ -695,6 +873,13 @@ async def _handle_apply_result(db: AsyncSession, *, node: Server, operation: Ope
         state["last_apply_outcome"] = outcome.value
         state["last_apply_error"] = ""
         state["drift"] = False
+        state["drift_since"] = None
+        # Converged: the retry budget resets, so the *next* failure starts its
+        # backoff from the beginning rather than inheriting an old one.
+        state["recovery_pending"] = False
+        state["recovery_attempts"] = 0
+        state["next_recovery_at"] = None
+        state["reconcile_error"] = ""
     elif outcome is ProxyApplyOutcome.ROLLED_BACK:
         # The previous configuration is live again. The bundle manifest is the
         # full *desired* tree, so it names routes that were already serving from
@@ -724,6 +909,14 @@ async def _handle_apply_result(db: AsyncSession, *, node: Server, operation: Ope
         state["last_apply_error"] = detail
         if outcome is ProxyApplyOutcome.ROLLBACK_FAILED:
             state["drift"] = True
+    if outcome is not ProxyApplyOutcome.APPLIED:
+        # The node is still on its previous configuration, so whatever difference
+        # triggered this apply is still outstanding. Count the attempt and push the
+        # next automatic one out: a node that fails every apply must not be
+        # retried on every sweep tick. ``recovery_pending`` deliberately stays set,
+        # so the apply that finally succeeds is still reported as the recovery.
+        state["recovery_attempts"] = attempts + 1
+        state["next_recovery_at"] = (now + recovery_backoff(attempts + 1)).isoformat()
     node.proxy_state = state
     await db.flush()
 
@@ -761,6 +954,31 @@ async def _handle_apply_result(db: AsyncSession, *, node: Server, operation: Ope
             resource_type="route",
             resource_id=str(route.id),
             data={"hostname": route.hostname, "path": route.path, "outcome": outcome.value},
+        )
+
+    if was_recovery and outcome is ProxyApplyOutcome.APPLIED:
+        # Announced from the *outcome*, never from the attempt: the difference is
+        # only repaired once a node has actually applied the bundle. A queued or
+        # merely attempted apply publishes nothing here.
+        await event_bus.publish(
+            db,
+            type="NGINX_DRIFT_RECOVERED",
+            level=EventLevel.INFO,
+            org_id=node.org_id,
+            message=f"{node.name} was re-applied and now matches the desired configuration",
+            resource_type="node",
+            resource_id=str(node.id),
+            data={"bundle_id": bundle_id, "routes": len(routes)},
+        )
+        await audit_service.record(
+            db,
+            None,
+            action="nginx.drift_recovered",
+            resource_type="node",
+            resource_id=node.id,
+            org_id=node.org_id,
+            actor_email=f"agent:{node.name}",
+            metadata={"bundle_id": bundle_id},
         )
 
     if outcome is ProxyApplyOutcome.ROLLBACK_FAILED:
@@ -811,6 +1029,9 @@ async def _handle_status_result(db: AsyncSession, *, node: Server, operation: Op
         state["last_status_error"] = exc.message[:200]
     drift = bool(expected) and (live or None) != expected
     state["drift"] = drift
+    # When the difference was first seen. Reported by the status read model so a
+    # long-standing divergence is distinguishable from one that just appeared.
+    state["drift_since"] = (state.get("drift_since") or now.isoformat()) if drift else None
     node.proxy_state = state
     await db.flush()
     if not drift:
@@ -828,6 +1049,10 @@ async def _handle_status_result(db: AsyncSession, *, node: Server, operation: Op
                 "configuration drift: the live bundle does not match the desired one"
             )
     await db.flush()
+    # The difference is recorded here and repaired by the reconciler
+    # (:func:`reconcile_node`), which owns the retry bounds and the apply queue.
+    # Asking for another fingerprint from this path would leave the node exactly
+    # as it is — that is the loop this separation exists to prevent.
     await event_bus.publish(
         db,
         type="NGINX_DRIFT_DETECTED",
@@ -954,7 +1179,10 @@ async def get_route_or_404(db: AsyncSession, route_id: uuid.UUID) -> Route:
 
 __all__ = [
     "CAPABILITY_STALE_AFTER",
+    "RECOVERY_BACKOFF_MAX",
+    "RECOVERY_BACKOFF_START",
     "RESERVED_HOST_PORTS",
+    "STATUS_REFRESH_AFTER",
     "after_hello",
     "capability_of",
     "capability_out",
@@ -967,6 +1195,8 @@ __all__ = [
     "handle_operation_result",
     "node_proxy_status",
     "provider",
+    "reconcile_node",
+    "recovery_backoff",
     "render_for_node",
     "request_status",
     "require_eligible",

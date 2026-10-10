@@ -134,12 +134,21 @@ export const test = base.extend<{
           data: { email: ADMIN.email, password: ADMIN.password },
         });
         expect(login.ok(), `api-token bootstrap login failed: ${login.status()}`).toBeTruthy();
-        const body = (await login.json()) as { access_token: string; active_organization_id: string | null };
-        expect(
-          body.active_organization_id,
-          "login returned no active organization — cannot scope API calls",
-        ).toBeTruthy();
-        await use({ token: body.access_token, orgId: body.active_organization_id as string });
+        const body = (await login.json()) as {
+          access_token: string;
+          active_organization_id: string | null;
+          organizations: Array<{ organization: { id: string } }>;
+        };
+        // ``active_organization_id`` is set only when the choice is unambiguous
+        // (auth_service.IssuedTokens): an account that belongs to more than one
+        // organization — which the cross-tenant journeys create and cannot
+        // delete — must therefore *pick*, the way any client does. The list comes
+        // oldest first, so index 0 is the organization the platform itself named
+        // while the account still had exactly one, and a single-membership run
+        // resolves to the identical value as before.
+        const orgId = body.active_organization_id ?? body.organizations[0]?.organization.id ?? null;
+        expect(orgId, "login returned no organization to scope API calls with").toBeTruthy();
+        await use({ token: body.access_token, orgId: orgId as string });
       } finally {
         await ctx.dispose();
       }

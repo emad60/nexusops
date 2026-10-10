@@ -13,6 +13,18 @@ Two properties shape this module:
   The window between the two steps can only ever leave the name served by
   *nobody* — never by two owners — because the partial unique index would refuse
   the second claim otherwise.
+* **A lost name must reach the nodes that were serving it.** Releasing a claim
+  changes a *different* organization's routes, so the nodes that have to drop them
+  are discovered inside that same system-scoped step — the last moment they are
+  visible to the worker at all — and each one is then told to re-render and apply
+  inside its **own** organization. Discovering the work and doing it are separate
+  scopes on purpose: the discovery is cross-tenant lifecycle handling, the apply
+  is ordinary per-tenant work.
+* **Reconciliation repairs, it does not re-ask.** The route sweep calls
+  :func:`app.services.proxy_service.reconcile_node`, which polls a converged node
+  for its fingerprint and queues exactly one apply when the desired bundle and the
+  node's live one differ. A difference is never reported as repaired until an
+  agent says the apply succeeded.
 """
 
 from __future__ import annotations
@@ -25,7 +37,7 @@ from sqlalchemy import select, update
 from app.core.errors import Conflict
 from app.core.logging import get_logger
 from app.models import Domain, Route, Server
-from app.models.enums import DomainStatus
+from app.models.enums import DomainStatus, RouteConfigState
 from app.tasks._util import org_for, org_session, run_async, sweep_session
 from app.tasks.celery_app import app
 
@@ -86,8 +98,9 @@ async def _verify(domain_id: uuid.UUID, *, trigger: str) -> dict[str, str]:
     )
 
     flipped: list[uuid.UUID] = []
+    released_nodes: list[uuid.UUID] = []
     if decision.ok:
-        flipped = await _release_competing_claim(name=name, owner_id=domain_id)
+        flipped, released_nodes = await _release_competing_claim(name=name, owner_id=domain_id)
 
     async with org_session(org_id) as db:
         domain = await db.get(Domain, domain_id)
@@ -122,11 +135,18 @@ async def _verify(domain_id: uuid.UUID, *, trigger: str) -> dict[str, str]:
 
     for node_id in affected_nodes:
         await _apply_for_node(node_id, reason=f"domain_{status.value.lower()}")
+    # ...and every node the *previous* owner was serving the name from. Without
+    # this pass a released organization keeps answering for a name it no longer
+    # controls: its routes stop being rendered, but the configuration already on
+    # the node keeps carrying them until something asks for a new one.
+    for node_id in dict.fromkeys(released_nodes):
+        await _apply_for_node(node_id, reason="domain_claim_released")
 
     return {
         "status": str(status.value),
         "reason": decision.reason,
         "flipped": str(len(flipped)),
+        "released_nodes": str(len(set(released_nodes))),
     }
 
 
@@ -192,16 +212,38 @@ async def _announce(
     )
 
 
-async def _release_competing_claim(*, name: str, owner_id: uuid.UUID) -> list[uuid.UUID]:
+async def _release_competing_claim(
+    *, name: str, owner_id: uuid.UUID
+) -> tuple[list[uuid.UUID], list[uuid.UUID]]:
     """Move another organization's ``VERIFIED`` claim on *name* to ``UNVERIFIED``.
 
     Its own transaction, before the new claim is written, so the platform-wide
     unique index is never asked to allow two verified owners. Both the previous
     owner's audit trail and its event stream learn what happened and why — a
     silent loss of a name would be indistinguishable from a bug.
+
+    Returns ``(released_org_ids, affected_node_ids)``: the organizations that lost
+    the name, and every node still serving one of their routes for it. The node
+    ids are gathered **here**, under the system scope, because this is the only
+    scope that can see another organization's routes at all — once the claim is
+    released, an ordinary tenant scope has no way to find them. The routes are
+    also marked unresolved immediately, so the previous owner's view is honest
+    from the first moment instead of claiming a route is live until the next
+    sweep touches it.
+
+    Nothing in here applies configuration: each node is re-rendered and applied
+    later, inside its own organization, by :func:`_apply_for_node`.
     """
     from app.models.enums import EventLevel
-    from app.services import audit_service, event_bus
+    from app.services import audit_service, domain_service, event_bus
+
+    # The state a *lost* name forces on its routes. The single rule lives in
+    # ``domain_service`` so this path cannot drift from the renderer's.
+    pulled_state = domain_service.route_config_state_for(DomainStatus.UNVERIFIED)
+    pulled_detail = (
+        "this domain is now verified by another organization, so the route is no "
+        "longer served; the node has been asked to remove it"
+    )
 
     async with sweep_session("task.verify_domain.release_competing_claim") as db:
         rows = (
@@ -214,7 +256,32 @@ async def _release_competing_claim(*, name: str, owner_id: uuid.UUID) -> list[uu
             )
         ).all()
         released: list[uuid.UUID] = []
+        affected_nodes: list[uuid.UUID] = []
         for domain_id, org_id in rows:
+            # Discovery first, while the routes are still visible to this scope.
+            routes = (
+                await db.execute(
+                    select(Route.id, Route.node_id).where(
+                        Route.domain_id == domain_id,
+                        # Explicit tenant predicate: system scope turns the guard
+                        # off, and a wide statement here is exactly what the guard
+                        # exists to prevent.
+                        Route.org_id == org_id,
+                        Route.enabled.is_(True),
+                    )
+                )
+            ).all()
+            for route_id, node_id in routes:
+                await db.execute(
+                    update(Route)
+                    .where(Route.id == route_id, Route.org_id == org_id)
+                    .values(
+                        config_state=pulled_state or RouteConfigState.STALE,
+                        last_apply_error=pulled_detail,
+                    )
+                )
+                affected_nodes.append(uuid.UUID(str(node_id)))
+
             await db.execute(
                 update(Domain)
                 .where(Domain.id == domain_id, Domain.org_id == org_id)
@@ -234,7 +301,15 @@ async def _release_competing_claim(*, name: str, owner_id: uuid.UUID) -> list[uu
                 resource_id=domain_id,
                 org_id=org_id,
                 actor_email="system:verify_domain",
-                metadata={"name": name, "reason": "verified by another organization"},
+                metadata={
+                    # Names, counts and ids only: nothing about the organization
+                    # that claimed the name is visible to the organization that
+                    # lost it.
+                    "name": name,
+                    "reason": "verified by another organization",
+                    "routes_pulled": len(routes),
+                    "nodes_affected": len({uuid.UUID(str(node)) for _r, node in routes}),
+                },
             )
             await event_bus.publish(
                 db,
@@ -250,7 +325,8 @@ async def _release_competing_claim(*, name: str, owner_id: uuid.UUID) -> list[uu
                 data={"name": name, "reason": "claimed_by_another_organization"},
             )
             released.append(uuid.UUID(str(org_id)))
-        return released
+        await db.flush()
+        return released, affected_nodes
 
 
 async def _record_reachability(db, *, domain: Domain, org_id: uuid.UUID) -> None:
@@ -282,9 +358,16 @@ async def _affected_node_ids(db, *, domain_id: uuid.UUID) -> list[uuid.UUID]:
 async def _apply_for_node(node_id: uuid.UUID, *, reason: str) -> None:
     """Push a fresh bundle to one node, tolerating anything that blocks it.
 
-    A domain flip must never fail because a node went offline mid-sweep: the
-    route sweep will retry, and the route's state already records why it is not
-    being served.
+    A domain flip must never fail because a node went offline mid-sweep, so a
+    refusal is logged rather than raised. That is safe precisely because the
+    work is retried by the route sweep (``proxy_service.reconcile_node``), and
+    because the affected routes already read as unresolved
+    — the control plane never claims a node stopped serving a route it has not
+    been told about.
+
+    The node's own organization is resolved first and the apply runs inside it,
+    so the cross-tenant discovery that produced *node_id* never leaks into the
+    work itself.
     """
     from app.services import proxy_service
 
@@ -373,12 +456,17 @@ def sweep_domains() -> dict[str, int]:
 def sweep_routes() -> dict[str, int]:
     """Keep every routed node's live configuration matching the desired bundle.
 
-    Two mechanisms, both bounded: ask a node that has an applied bundle for its
-    live fingerprint (``nginx.status``), and re-apply where the node has routes
-    the control plane believes are applied but whose bundle is not the current
-    desired one. ``nginx.apply`` is only queued when none is in flight, so a node
-    that stays offline accumulates a single pending operation rather than a queue
-    of duplicates.
+    One bounded step per node, taken by
+    :func:`app.services.proxy_service.reconcile_node`: a converged node is asked
+    for a fresh fingerprint on an interval, and a node whose live bundle is not
+    the desired one gets exactly one ``nginx.apply`` queued. That is the whole
+    difference between a reconciler and a poll — ask a node for its status while
+    its configuration is known to be wrong and it will keep answering the same
+    way forever, because it is not misreporting: it is running the wrong tree.
+
+    Every bound lives in the reconciler, and the per-outcome counters are
+    returned so a tick that queues nothing is distinguishable from one that
+    could not reach a node.
     """
     from app.services import proxy_service
 
@@ -402,25 +490,32 @@ def sweep_routes() -> dict[str, int]:
                     node = await db.get(Server, node_id)
                     if node is None:
                         continue
-                    state = node.proxy_state or {}
-                    if state.get("applied_bundle_id"):
-                        if await proxy_service.request_status(db, node=node) is not None:
-                            counts["status_requests"] += 1
-                        continue
-                    if await proxy_service.enqueue_apply(
-                        db, node=node, reason="sweep_missing_apply"
-                    ):
-                        counts["reapplies"] += 1
+                    outcome = await proxy_service.reconcile_node(db, node=node)
             except Conflict as exc:
+                # A named refusal (offline, listener conflict, render refused) is
+                # a deferred tick, not a failure: the routes stay unresolved and
+                # the next tick tries again.
                 logger.info("route_sweep_deferred", node=str(node_id), code=exc.code)
+                counts[proxy_service.RECONCILE_DEFERRED] = (
+                    counts.get(proxy_service.RECONCILE_DEFERRED, 0) + 1
+                )
+                continue
             except Exception as exc:
                 logger.warning(
                     "route_sweep_failed", node=str(node_id), error=exc.__class__.__name__
                 )
+                continue
+            counts[outcome] = counts.get(outcome, 0) + 1
+            if outcome == proxy_service.RECONCILE_STATUS_REQUESTED:
+                counts["status_requests"] += 1
+            elif outcome == proxy_service.RECONCILE_RECOVERY_QUEUED:
+                counts["reapplies"] += 1
         return counts
 
     counts = run_async(_run())
-    if counts["status_requests"] or counts["reapplies"]:
+    # Logged whenever anything happened other than a converged node: a tick that
+    # repaired, deferred or blocked is the one worth reading in a worker log.
+    if counts["status_requests"] or counts["reapplies"] or counts.get("deferred"):
         logger.info("route_sweep_done", **counts)
     return counts
 

@@ -1009,9 +1009,19 @@ def _write_system_conf(content: str) -> None:
 
 
 def _stage_bundle(bundle: dict) -> str:
-    """Materialize the bundle under ``staged/<id>/`` and return that directory."""
+    """Materialize the bundle under ``staged/<id>/`` and return that directory.
+
+    ``routes.d`` is created **unconditionally**, before any file is written. A
+    desired tree can legitimately contain no fragments at all — that is exactly
+    what "this node must stop serving these routes" renders to, including the
+    last route on a node — and a staged tree without the directory would fail
+    validation (:func:`_staged_test_conf`) and then roll the whole apply back,
+    leaving the routes it was meant to remove live on the node. An empty directory
+    is a valid desired state; a missing one is a bug.
+    """
     stage = os.path.join(NGINX_STAGED_DIR, bundle["bundle_id"])
     os.makedirs(os.path.join(stage, "logs"), exist_ok=True)
+    os.makedirs(os.path.join(stage, "routes.d"), exist_ok=True)
     for path, content in bundle["files"]:
         if path == NGINX_MANAGED_CONF:
             target = os.path.join(stage, "nexusops.conf")
@@ -1032,7 +1042,14 @@ def _staged_test_conf(stage: str) -> str:
     with open(os.path.join(stage, "nexusops.conf"), encoding="utf-8") as handle:
         parts.append(handle.read())
     routes_dir = os.path.join(stage, "routes.d")
-    for name in sorted(os.listdir(routes_dir)):
+    try:
+        # A missing directory is an empty tree, not an error: reading it as "no
+        # fragments" is what the tree means, and refusing here would block the
+        # one apply that can never be blocked — the removal of the last route.
+        names = sorted(os.listdir(routes_dir))
+    except OSError:
+        names = []
+    for name in names:
         if not NGINX_ROUTE_FILE_RE.match(name):
             continue
         with open(os.path.join(routes_dir, name), encoding="utf-8") as handle:

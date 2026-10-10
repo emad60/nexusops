@@ -1,8 +1,10 @@
 # Domain Routing — NexusOps
 
-**Status:** Implemented for HTTP routing (Phase 4, 2026-10-10). Certificates, TLS
-and post-deploy route sync remain target design (Phases 5–6) and are marked as
-such below.
+**Status:** Implemented for HTTP routing (Phase 4, 2026-10-10; revocation and
+reconciliation hardened 2026-10-10). **No certificate issuance, no TLS listener and
+no HTTPS redirect exist yet** — every certificate-related shape in this document is
+**Phase 5 target design**, labelled as such below, and post-deploy route sync remains
+Phase 6 target design.
 **Date:** 2026-09-21 (status updated 2026-10-10)
 **Companions:** [platform-vision.md](platform-vision.md) · [domain-model.md](domain-model.md) · [multi-tenancy.md](multi-tenancy.md) · [authorization.md](authorization.md) · [node-agent-architecture.md](node-agent-architecture.md) · [certificate-management.md](certificate-management.md)
 
@@ -12,7 +14,11 @@ Phase 4 shipped the **HTTP half** of this design: the `domains` and `routes`
 tables (tenant RLS plus the anti-takeover partial unique index on the verified
 name), TXT verification with the STALE → UNVERIFIED grace lifecycle and its
 sweeps, the nginx renderer, the three `nginx.*` operations, the agent-side nginx
-provider with atomic apply and rollback, and the Domains/Routes UI.
+provider with atomic apply and rollback, and the Domains/Routes UI. Ownership
+revocation completes here too: releasing a competing claim discovers the nodes the
+previous owner was serving the name from and has each of them drop it, and a
+bounded reconciler repairs a node whose live configuration has diverged from the
+desired one (§8.4).
 Certificates, TLS and HTTPS redirects are **not** part of it: the schema has no
 `certificate_id` column and the redirect shape has no `to_scheme` field,
 deliberately, so no route can be configured into an HTTPS redirect before Phase 5
@@ -65,10 +71,19 @@ customer traffic: browser ──HTTPS──> node nginx (agent-managed) ──> 
 
 ## 3. Entities (per domain-model.md §2.4)
 
-Three rows, one relationship spine: **Organization → Domain → Route**, Route
-optionally carrying a **Certificate** (`Route |o--o| Certificate` — full spec:
-certificate-management.md §2; this doc owns Domain and Route). A route's upstream
-may be a container on the route's node (usual case) or, later, an external one.
+Three rows, one relationship spine: **Organization → Domain → Route**. The tables
+below describe what Phase 4 shipped; rows marked *(Phase 5 target)* are **not in the
+schema yet**.
+
+> **Phase 5 target design (not shipped):** Route optionally carrying a
+> **Certificate** (`Route |o--o| Certificate` — full spec:
+> certificate-management.md §2). No `certificates` table exists; `routes.scheme`
+> is a closed CHECK of `'http'` and there is no `certificate_id` column, so a TLS
+> listener and an HTTPS redirect are not merely unwired — they are
+> unrepresentable. Phase 5 adds them by migration.
+
+A route's upstream may be a container on the route's node (usual case) or, later,
+an external one.
 
 ### 3.1 Domain
 
@@ -76,16 +91,20 @@ may be a container on the route's node (usual case) or, later, an external one.
 |---|---|---|
 | `org_id` | UUID FK, NOT NULL | Tenant root; session guard applies (multi-tenancy.md §3) |
 | `project_id` | UUID FK, nullable | Optional grouping only — no access semantics |
-| `name` | String | Lowercase FQDN or `*.example.com` (punycode only); uq `(org_id, name)` |
-| `status` | String + CHECK | `pending` / `verifying` / `verified` / `stale` / `unverified` / `failed` (§4) |
-| `verification_token` | String | Per-domain random `nxs-verify=<32 urlsafe>`; minted at create |
-| `verified_at` | DateTime, nullable | Set on success; kept after `unverified` flips for history |
+| `name` | String(253) + CHECK | Canonical lowercase FQDN or `*.example.com` (punycode only); uq `(org_id, name)` |
+| `status` | String(16) + CHECK | `PENDING` / `VERIFYING` / `VERIFIED` / `STALE` / `UNVERIFIED` / `FAILED` (§4) |
+| `verification_token` | String(96) | Per-domain random `nxs-verify=<32 urlsafe>`; minted at create |
+| `verified_at` | DateTime, nullable | Set on success; kept after an `UNVERIFIED` flip for history |
 | `ns_snapshot` | JSONB | Apex NS set observed at verification; change ⇒ re-verify (§4.3) |
-| `dns_provider_id` | UUID FK → integrations, nullable | Optional auto-publish later (same DNSProvider interface as cert doc §4.2); `attempt_count`/`next_check_at` backoff cursors |
+| `proof_lost_at` / `stale_expires_at` | DateTime, nullable | The grace window's boundaries: when proof disappeared, and when it expires |
+| `last_checked_at` / `next_check_at` / `attempt_count` | DateTime / Int | Sweep cursors and the bounded attempt backoff |
+| `last_error` | String(500) | Sanitized, bounded reason for the last non-serving status |
+| `dns_reachability` | JSONB | Last observed A/AAAA answer for the §11 reachability warning (never gates anything) |
+| `dns_provider_id` *(Phase 5–6 target)* | UUID FK → integrations, nullable | **Not in the schema.** Auto-publishing the TXT record (same DNSProvider interface as cert doc §4.2) is later work |
 
-`verified` names are unique **platform-wide**: partial unique index
-`(lower(name)) WHERE status = 'verified'` (§4.3). An org may *track* a name another
-org has verified — it stays `pending` until it can prove ownership itself.
+`VERIFIED` names are unique **platform-wide**: partial unique index
+`(lower(name)) WHERE status = 'VERIFIED'` (§4.3). An org may *track* a name another
+org has verified — it stays `PENDING` until it can prove ownership itself.
 
 ### 3.2 Route
 
@@ -97,12 +116,12 @@ org has verified — it stays `pending` until it can prove ownership itself.
 | `path` | String | `/` or a prefix; strict charset (§6) |
 | `node_id` | UUID FK → servers | The serving Node; upstream must live on it (§8) |
 | `container_id` | UUID FK, nullable | Upstream container; external upstream is a later phase |
-| `port` | Int | 1–65535 |
-| `scheme` | String | `http` or `https` (listener); `https` requires `certificate_id` |
-| `certificate_id` | UUID FK, nullable | Bound cert; RESTRICT delete while referenced (cert doc §2) |
-| `headers` / `rate_limit` / `redirect` | JSONB, nullable | Structured, allowlisted (§6, §9) |
-| `enabled` | Bool | Live gate: requires domain `verified` AND upstream present |
-| `config_state` | String + CHECK | `pending` / `in_sync` / `stale` / `failed` — last apply outcome on its node |
+| `port` | Int + CHECK | 1–65535; the **host-published** port, never the container-internal one |
+| `scheme` | String(8) + CHECK | **`http` only** — `CHECK (scheme = 'http')` in Phase 4. `https` and its `certificate_id` are Phase 5 target design (§3.2 note) |
+| `headers` / `rate_limit` / `redirect` | JSONB, nullable | Structured, allowlisted (§6, §9). `redirect` is host-only — there is no `to_scheme`, so no HTTPS redirect is expressible |
+| `enabled` | Bool | Live gate: requires domain `VERIFIED` AND upstream present |
+| `config_state` | String(16) + CHECK | `PENDING` / `IN_SYNC` / `STALE` / `FAILED` — last apply outcome on its node. `STALE` is "not confirmed live at the desired configuration", which covers both "pulled" and "awaiting the node's removal" |
+| `last_applied_at` / `last_bundle_id` / `last_apply_error` | DateTime / String(64) / String(500) | Which bundle the node confirmed for this route, and the sanitized reason when it did not |
 | `monitor_optout` | Bool, default false | Auto-attached uptime monitor (§13) |
 
 Uniqueness: `(node_id, hostname, path)` unique among `enabled = true` routes — one
@@ -130,8 +149,15 @@ resolver), the TXT record and the apex NS set, then decides:
 
 Platform-wide verified-name uniqueness is not a third precondition — §4.3
 enforces it by cross-org flip: if another org already holds the name
-`verified`, this verification still succeeds and flips the earlier row to
-`unverified` (audited, event to both orgs). Success ⇒ `verified`,
+`VERIFIED`, this verification still succeeds and flips the earlier row to
+`UNVERIFIED` (audited, event to the losing org). **The release is also where the
+losing organization's nodes are discovered**: the worker has no way to find them
+later — they belong to another tenant — so the same system-scoped step records every
+enabled route on that name, marks it unresolved, and returns the node ids; each node
+is then re-rendered and applied *inside its own organization*, so the cross-tenant
+discovery never becomes a cross-tenant write (§8.4). A release that found nodes
+queues one apply per node, and the route reads as unresolved from that moment — the
+control plane never claims a removal that has not been applied. Success ⇒ `verified`,
 `verified_at` set, audit `domain.verified`, event on `org:{org_id}:domains`.
 Failure ⇒ sanitized `last_error`, backoff, `failed` after budget. DNS library
 choice: Open question 1.
@@ -143,7 +169,7 @@ choice: Open question 1.
 | **No verification, no route** — verify before any route goes live | API rejects `enabled=true` on routes of non-`verified` domains; the renderer excludes them unconditionally |
 | **Re-verify on apex change** | Any sweep observing an apex NS set ≠ `ns_snapshot` flips the domain to `unverified` immediately; routes pulled from the next render |
 | **Continuing control** | Hourly `sweep-domains` re-checks the TXT of every `verified` domain; a miss starts a 72h `stale` grace, then `unverified` |
-| **One verified owner platform-wide** | Partial unique index on verified names; a later org's successful verification flips the earlier row to `unverified` (audited, event to both orgs) |
+| **One verified owner platform-wide** | Partial unique index on verified names; a later org's successful verification flips the earlier row to `UNVERIFIED` (audited, event to the losing org). Its routes are marked unresolved immediately and every node serving them is told to drop the name (§4.2); a node that cannot take the apply retries through the reconciler (§8.4), and the route is never reported as stopped until the node confirms |
 
 The token becomes public once in DNS, so possession is not the long-term proof; the
 proof is **continued ability to control the zone's DNS** — exactly what
@@ -151,11 +177,14 @@ re-verification and NS-change detection test. A domain that changes hands (expir
 re-registered, re-delegated) cannot be re-verified by the old org unless it still
 controls the TXT record.
 
-Lifecycle: `pending → verifying → verified`; `verified → stale` (72h TXT grace)
-`→ unverified`; apex NS change or cross-org flip ⇒ `unverified` immediately;
-`unverified → verifying` on re-verify. While `stale` or `unverified`, the domain's
-routes are excluded from every render — they stop being served at the node's next
-apply. A route that was live does not keep serving on stale proof.
+Lifecycle: `PENDING → VERIFYING → VERIFIED`; `VERIFIED → STALE` (72h TXT grace)
+`→ UNVERIFIED`; apex NS change or cross-org flip ⇒ `UNVERIFIED` immediately;
+`UNVERIFIED → VERIFYING` on re-verify. While `STALE` or `UNVERIFIED`, the domain's
+routes are excluded from every render — and because the desired configuration no
+longer contains them, the node's own next apply removes their fragments. A route
+that was live does not keep serving on stale proof: the exclusion is a fact of the
+render, and the apply that carries it is queued (and, if a node is unreachable,
+retried) rather than assumed (§8.4).
 
 ### 4.4 Sequence: add-domain → verified
 
@@ -209,10 +238,18 @@ verdict, stored in `servers.capabilities`:
 
 - **installed / running / config-test** — `present`, `running`, `config_test_ok`;
 - **listener ownership** — `listener_80` / `listener_443` are each
-  `MANAGED` (the intended nginx master holds it), `FREE`, `OTHER` (some other
-  process holds it) or `UNKNOWN` (could not be determined safely);
+  `MANAGED` (the intended nginx master holds it), `FREE` (nobody holds it),
+  `OTHER` (some other process holds it) or `UNKNOWN` (could not be determined
+  safely — never treated as free);
 - **`routing_eligible` + `reason`** — the agent's own summary of the above, with
   a precise, user-facing reason when it is `false`.
+
+**The two listener ports have different rules, and they are the rule that matters:**
+
+| Port | Accepted states | Why |
+|---|---|---|
+| 80 | `MANAGED` only | Routing serves HTTP on 80. `OTHER` is a process to displace; `FREE` means the running nginx does **not** own a listener there, so NexusOps cannot confirm it manages this node's HTTP listener — adopting a port nobody can be shown to hold is how two writers end up on one port; `UNKNOWN` is unreadable, not free |
+| 443 | `MANAGED` or `FREE` | Reserved for Phase 5 certificates. `FREE` is fine today (nothing listens yet); `OTHER` is a conflict resolved **now**, not after certificates ship. Phase 4 never writes a listener — or any directive — on 443 |
 
 The control plane **trusts that verdict first**: a node reporting
 `routing_eligible: false` is refused `409 NGINX_PREFLIGHT_FAILED` with the node's
@@ -296,11 +333,26 @@ Agent-side steps for `nginx.apply`:
 
 | Step | Action | On failure |
 |---|---|---|
-| Stage | Write the tree under `/etc/nexusops/nginx/staged/<bundle_id>/` (temp + fsync) | Report failure; live tree untouched |
+| Stage | Write the tree under `/etc/nexusops/nginx/staged/<bundle_id>/` (temp + fsync), creating `routes.d` **unconditionally** | Report failure; live tree untouched |
 | Validate | `nginx -t` against a test wrapper that includes the staged tree | Keep live tree; report sanitized stderr (redaction: core/logging.py:19-60) |
 | Swap | Atomically rename staged files over `nexusops.conf` + `routes.d/`; keep the previous bundle as backup | — |
 | Reload | `systemctl reload nginx` (SIGHUP fallback) | **Rollback:** restore the backup bundle, reload again, report `rolled_back`; if that restore + reload also fails, report `rollback_failed` — defined terminal state below |
 | Report | `{status: applied|failed|rolled_back|rollback_failed, bundle_id, fingerprint, error?}` | — |
+
+**A desired tree with no route fragments is valid, and the removal of the last route
+is the case that must never fail.** When a name is pulled — revocation, apex change,
+the last route on a node being disabled or deleted — the rendered bundle carries the
+managed http-level file and nothing else, so the stage directory must contain an
+empty `routes.d` rather than none at all. That distinction was a real defect, found
+by the ownership-transfer E2E (`frontend/e2e/phase4.spec.ts`): staging created the
+directory only as a side effect of writing a fragment, `nginx -t` on the staged tree
+failed with `FileNotFoundError`, the apply reported `STAGE_FAILED` and rolled back,
+and the route the control plane had asked the node to remove **stayed live on that
+node** — the old Host kept reaching the old upstream while the route read `STALE`. The
+stage writer now creates the directory, the validation reader treats a missing one as
+an empty tree, and both are pinned by contract tests
+(`backend/tests/test_agent_nginx_contract.py`), which also check that the node's live
+fingerprint after the removal equals the bundle id the control plane computed.
 
 The live tree changes only after validation passes, and a reload failure self-heals
 to the previous known-good bundle. The one way an apply can still leave a node down
@@ -346,18 +398,24 @@ at render time from container inventory: the container's published loopback port
 (`proxy_pass http://127.0.0.1:<host_port>`) preferred, container-network IP as
 fallback.
 
-Honest grounding: the agent today reports containers with **empty port arrays**
-(`server_service.py:536-539` upserts `ports=[]`); the upstream picker and
-loopback-port rendering need the agent to start reporting ports — a wire extension
-pinned by the contract tests (`backend/tests/test_agent_contract.py`). Phase 4 work,
-not hand-waved. The deployment side completes the handoff: the 6a `container.run` op
+Grounding: the wire extension this paragraph used to flag as pending **shipped in
+Phase 4** — protocol-2 agents report each container's published ports and the
+upstream picker renders only those with a genuinely usable one (loopback bind, or a
+wildcard bind mapped to `127.0.0.1`). The shape is pinned by the agent contract
+tests (`backend/tests/test_agent_contract.py`) and exercised end to end by
+`frontend/e2e/phase4.spec.ts`, which routes to a real loopback-published container
+and checks the rendered `proxy_pass`. The deployment side completes the handoff: the 6a `container.run` op
 publishes `127.0.0.1:<port>` per the environment's declared publish spec
 (deployment-architecture.md §5.1), so an agent-deployed container always has the
 loopback address the renderer prefers — and the upstream picker lists only containers
 with reported published ports, so a deploy-then-route can never silently produce an
 unreachable upstream.
 
-### 8.2 Certificate selection rule (this doc owns it)
+### 8.2 Certificate selection rule (this doc owns it) — **Phase 5 target design**
+
+> Nothing below is implemented: there are no certificate rows, no coverage check at
+> bind time and no `scheme=https` to bind to. It is recorded here because this doc
+owns the rule, and certificate-management.md §8 implements it.
 
 A route's HTTPS certificate must cover the hostname: exact CN/SAN preferred,
 otherwise a wildcard SAN one label deep (`*.example.com` covers `api.example.com`,
@@ -375,15 +433,42 @@ already exists:
 | Container REMOVED | heartbeat reconciliation (same path) | Routes → `config_state=stale`, excluded from render as `upstream_missing`; UI surfaces; no wrong-upstream traffic |
 | Deployment succeeded + health passed | deployment engine event (Phase 6) | Post-deploy route sync (§8.5) |
 | Route / domain / cert mutation | API | Re-render the affected node's bundle |
-| Certificate issued / renewed | delivery fan-out (cert doc §6) | Re-render routes on the cert's serving nodes (fragments reference the new files) |
-| Domain `verified` / `unverified` flip | sweeps (§4) | Include / exclude the domain's routes at next render |
+| Certificate issued / renewed *(Phase 5)* | delivery fan-out (cert doc §6) | Re-render routes on the cert's serving nodes (fragments reference the new files) |
+| Domain `VERIFIED` / `UNVERIFIED` flip | sweeps (§4) | Exclude the domain's routes at the next render, and apply that render to **every** node that was serving them — including a previous owner's (§4.2) |
 | nginx capability first reported | hello | Queue `nginx.bootstrap` |
 
-### 8.4 Drift
+### 8.4 Drift and reconciliation
 
-`nginx.status` fingerprints differing from the last applied `bundle_id` mark the
-node's routes `stale` and enqueue a re-apply — out-of-band node edits are corrected
-on the next sweep; the DB is the only source of truth for desired state.
+`nginx.status` is a *detector*; the repair is separate, and the split is what makes
+the loop converge. Asking a node for its fingerprint while its live configuration is
+known not to match the desired one answers the same way forever — the node is not
+misreporting, it is running the wrong tree — so:
+
+1. **Detect and mark.** A reported `live_bundle_id` that differs from the desired
+   bundle marks the node's enabled routes `STALE` with the drift reason, records
+   `drift`/`drift_since` on the node, and publishes `NGINX_DRIFT_DETECTED`. The
+   status path queues nothing.
+2. **Reconcile (one step per tick, per node).** `sweep-routes` calls
+   `proxy_service.reconcile_node`, which renders the desired tree (marking every
+   route it must exclude `STALE` *with the reason it was excluded* — "the domain is
+   unverified", "the upstream container is not running", …) and then:
+   - the live bundle already **is** the desired one ⇒ nothing to repair. The node is
+     asked for a fresh fingerprint only when the last report is older than
+     `STATUS_REFRESH_AFTER` (10 min), so a healthy fleet is not a poll loop;
+   - it **differs** ⇒ exactly one `nginx.apply` is queued. One: a live apply
+     short-circuits the branch and the queue itself refuses a duplicate. A node that
+     cannot take it (offline, stale capability, listener conflict, unrenderable
+     desired state) is *deferred* — nothing is queued, the routes stay visibly
+     unresolved, and the next tick retries. A node that keeps failing backs off
+     through a bounded exponential window (1 min → 30 min), so a broken nginx is not
+     re-applied on every tick.
+3. **Report the repair only from the outcome.** `NGINX_DRIFT_RECOVERED` and
+   `route.config_state = IN_SYNC` come from the agent's own `applied` result — never
+   from a queued or attempted apply. A failed apply leaves the previous known-good
+   configuration live (rollback, §7) and the route `FAILED`/`STALE` with the reason.
+
+The database is the only source of truth for desired state; out-of-band node edits
+are corrected by step 2 rather than tolerated.
 
 ### 8.5 How deployments hook routing (post-deploy route sync)
 
@@ -473,6 +558,16 @@ request through the node's port 80 that reaches the container's marker, the mana
 catch-all answering 444 for a Host nobody mapped, `drift: false` with matching
 bundle ids — and the dashboard showing the same state.
 
+**Ownership transfer is proven the same way.** A second scenario gives the name to a
+second organization (its own node, its own container, the same mock DNS fixture) and
+asserts, on the wire rather than in status rows: the first organization's domain goes
+`UNVERIFIED` and its audit/event trail says why; the old route is excluded from the
+desired configuration; the old node — kept unreachable for part of the run — applies
+the bundle that removes the fragment, and an HTTP request with the old Host no longer
+reaches the old upstream (the managed catch-all answers 444); no success is reported
+while the node cannot apply; the new owner serves the name from its own node; and
+neither organization can read or modify the other's rows.
+
 ## 12. API surface, permissions, audit
 
 All endpoints run under `X-Org-Id` resolution and the session guard
@@ -493,13 +588,19 @@ All endpoints run under `X-Org-Id` resolution and the session guard
 
 Audit actions (append-only; `resource.action` naming, domain-model.md §2.6):
 `domain.created` · `domain.verified` · `domain.reverified` · `domain.unverified`
-(NS change, cross-org flip, or grace expiry — sweep/worker) · `domain.deleted` ·
-`route.created`/`updated`/`deleted` (user) · `route.applied`/`apply_failed`/
-`rolled_back`/`rollback_failed` (agent) · `nginx.bootstrap_completed`/`failed` ·
-`nginx.drift_detected`. Events: `DOMAIN_VERIFIED`, `DOMAIN_UNVERIFIED`,
-`ROUTE_CREATED`, `ROUTE_ENABLED`, `ROUTE_APPLIED`, `ROUTE_APPLY_FAILED` and
-`NGINX_DRIFT_DETECTED` publish id/status-only frames on `org:{org_id}:domains`
-(event_bus.py frame shape) — no tokens, no config text. The verification token is
+(NS change, cross-org flip, or grace expiry — sweep/worker) · `domain.claim_released`
+(the cross-org flip itself, recorded in the organization that lost the name, with
+`routes_pulled`/`nodes_affected` counts and nothing about the winner) ·
+`domain.deleted` · `route.created`/`updated`/`deleted` (user) · `route.enabled`/
+`disabled` · `route.apply_requested` (control plane, with the bundle summary) ·
+`route.applied`/`apply_failed`/`rolled_back`/`rollback_failed` (agent) ·
+`nginx.bootstrap_completed`/`failed` · `nginx.drift_detected` ·
+`nginx.drift_recovered` (only from an applied outcome). Events: `DOMAIN_VERIFIED`,
+`DOMAIN_UNVERIFIED`, `ROUTE_CREATED`, `ROUTE_ENABLED`, `ROUTE_APPLIED`,
+`ROUTE_APPLY_FAILED`, `NGINX_DRIFT_DETECTED` and `NGINX_DRIFT_RECOVERED` publish
+id/status-only frames on `org:{org_id}:domains` (event_bus.py frame shape) — no
+tokens, no config text, and every frame carries the organization it belongs to, so
+the organization that lost a name is told why without learning who took it. The verification token is
 never written into an audit row, an event or a log: it is returned once to a
 `domain.manage` holder while it is still actionable, and never again.
 
@@ -530,9 +631,12 @@ the inside vantage; together the two states give the honest picture.
    `dig` subprocess (stdlib-only, brittle to parse). Decide at implementation.
 2. **Auto-publishing the verification TXT** via the DNSProvider integration in v1 vs
    manual-only first; interface shared with certificate-management.md §4.2.
-3. **Cross-org flip grace** — when org B verifies a name org A holds `verified`, A's
-   row flips immediately and its routes stop serving; secure but jarring. Bounded
-   grace with prominent notification? The flip must stay auditable and fast either way.
+3. **Cross-org flip grace — DECIDED (implemented): immediate flip, no grace.** B's
+   successful verification flips A's row to `UNVERIFIED` at once, marks A's routes
+   unresolved, and queues an apply on every node A was serving the name from; A gets
+   an audit row and an org-scoped event that names the reason but not the winner.
+   A bounded grace would mean knowingly answering for a name its owner no longer
+   controls, which is the failure this rule exists to prevent.
 4. **Delegated subdomains** — a route hostname NS-delegated elsewhere can change
    hands without the apex NS changing; apex checks don't catch it. Per-hostname NS
    pinning is heavy — defer or build before DNS-heavy tenants exist.

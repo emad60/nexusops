@@ -711,6 +711,9 @@ partition work instead of duplicating it:
 | `nx.sweep_servers` | 15 s | mark silent servers OFFLINE / recover returning ones |
 | `nx.run_due_monitors` | `MONITOR_DISPATCH_INTERVAL_SECONDS` (10 s) | claim up to 50 due monitors, one short transaction per check |
 | `nx.sync_docker_hosts` | 30 s | reconcile every registered Docker host: status, container inventory; **incremental** log collection on real (unix/tcp) hosts |
+| `nx.sweep_domains` | `DOMAIN_SWEEP_INTERVAL_SECONDS` (300 s) | re-prove control of due domains; a lost or transferred name pulls its routes from every node serving them |
+| `nx.sweep_routes` | `ROUTE_SWEEP_INTERVAL_SECONDS` (60 s) | per-node reconciliation: fingerprint refresh when converged, **one** `nginx.apply` when the desired bundle and the live one differ, bounded retry when a node cannot apply |
+| `nx.expire_operations` | 60 s | expire operations past their execution deadline |
 | `nx.sweep_deployments` | 120 s | re-enqueue lost QUEUED, fail dead RUNNING |
 | `nx.retry_notifications` | 60 s | retry due `notification_deliveries` |
 | `nx.expire_sessions` | 600 s | revoke sessions past expiry, purge dead refresh tokens |

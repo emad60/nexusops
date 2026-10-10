@@ -21,6 +21,22 @@ notification, and deploy → step logs → rollback.
 - **Uptime monitors → incidents → notifications** — HTTP checks dispatched on a dynamic
   cadence by Celery beat; failures raise incidents that fan out email notifications
   (Mailpit in development).
+- **Domains & routes (HTTP only)** — point a container's published port at a URL:
+  you add a domain, publish the TXT record the API mints, and NexusOps re-checks
+  control of the name (`_nexusops.<name>`) at its authoritative nameservers before
+  any route can go live. A route renders a real nginx server block on the node's
+  own nginx — staged, `nginx -t`-validated, atomically swapped and reloaded, with
+  automatic rollback to the previous configuration when a reload fails — and its
+  outcome is reported back per route. Losing the name (a changed delegation, a
+  missing proof record, or another organization proving control) pulls the routes
+  from every node that was serving it; a node that is offline keeps its state
+  visibly unresolved and is retried by a bounded reconciler rather than reported as
+  fixed. **There is no TLS yet**: Phase 4 renders plain HTTP only — no certificate
+  issuance, no `listen 443`, no HTTPS redirect — and the schema cannot express one.
+  The control plane is never in the customer traffic path: it renders configuration
+  and ships it as an operation, so customer requests go browser → node nginx →
+  container (uptime checks, by contrast, do probe from the control plane, and the
+  UI says so). See [docs/domain-routing.md](docs/domain-routing.md).
 - **Deployments** — multi-step deployments with per-step logs streamed live
   (`deployment-logs` channel), cancellation, and rollback
   (`backend/app/services/deployment_engine.py`).
@@ -40,7 +56,8 @@ notification, and deploy → step logs → rollback.
   (`require_permission(...)` dependencies) and a full audit trail of mutations,
   each row attributed to the organization it happened in.
 - **Node operations control plane** — whitelisted node actions (`container
-  start|stop|restart|remove`, `logs.tail`) are enqueued through
+  start|stop|restart|remove`, `logs.tail`, and the three `nginx.bootstrap|apply|status`
+  types routing rides on) are enqueued through
   `POST /api/v1/operations` under an existing permission codename, then claimed and
   reported by an enrolled node through a compare-and-set queue bound to one
   `(node, organization)` — no `node.execute`, no push tunnel. Delivery is pull-based:
@@ -143,7 +160,7 @@ the host (`cd frontend && npm run dev`; it proxies `/api`, WebSockets included, 
 | --- | --- | --- |
 | `make test` | backend unit + frontend vitest | nothing external |
 | `make test-backend-unit` | pytest `-m "not integration"` | nothing external |
-| `make test-backend` | full backend suite (300+ tests) | stack up (postgres :5433, redis :6390) |
+| `make test-backend` | full backend suite (850+ tests) | stack up (postgres :5433, redis :6390) |
 | `make test-frontend` | vitest suite | nothing external |
 | `make e2e` | the whole Playwright suite on a throwaway isolated stack (`frontend/e2e/*.spec.ts`) | docker only — it builds, seeds, runs and tears the stack down itself |
 
@@ -191,13 +208,18 @@ nexusops/
 tenancy model as built — org resolution, the session guard, PostgreSQL RLS and the
   role split, organization-bound WebSockets, worker scoping, and the cross-tenant
   test suite.
+- [docs/domain-routing.md](docs/domain-routing.md) — **implemented for HTTP
+  (Phase 4)**: the domains/routes model as built, DNS ownership verification and its
+  sweeps, the nginx renderer and the apply pipeline, ownership revocation across
+  nodes, and the drift reconciler. Everything certificate- or TLS-shaped in it is
+  **Phase 5 target design** and labelled as such.
 - [docs/platform-vision.md](docs/platform-vision.md) — platform-evolution direction,
   target domain model, authorization, phased roadmap (the tenant foundation in it is
   now shipped; the later-phase entities are still design). Companion specs:
   [domain-model.md](docs/domain-model.md), [multi-tenancy.md](docs/multi-tenancy.md),
   [authorization.md](docs/authorization.md), [product-roadmap.md](docs/product-roadmap.md),
   [node-agent-architecture.md](docs/node-agent-architecture.md),
-  [domain-routing.md](docs/domain-routing.md),
+  [domain-routing.md](docs/domain-routing.md) (its HTTP half is now shipped),
   [certificate-management.md](docs/certificate-management.md),
   [deployment-architecture.md](docs/deployment-architecture.md),
   [secrets-architecture.md](docs/secrets-architecture.md),

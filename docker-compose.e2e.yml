@@ -49,6 +49,18 @@ services:
     environment:
       ENVIRONMENT: test
       SIMULATION_MODE: "true"
+      # --- Routing reconciliation cadence -----------------------------------
+      # The ownership-transfer journey has to observe what the control plane does
+      # *unattended*: a revoked name must be pulled from the previous owner's node
+      # by the route sweep itself, and a node that is unreachable while the name
+      # changes hands must stay unresolved until it can apply. On the production
+      # default (60 s) that scenario would spend minutes waiting for a tick, so the
+      # e2e stack ticks four times faster. The interval is the only thing shortened
+      # — the reconcile bounds (one apply in flight, a fingerprint refresh window of
+      # 10 min, the 1→30 min failure backoff) are unchanged, which is why the
+      # journey can still assert that nothing is queued while the node is
+      # unreachable.
+      ROUTE_SWEEP_INTERVAL_SECONDS: "15"
     dns:
       - 172.31.253.53
 
@@ -56,6 +68,7 @@ services:
     environment:
       ENVIRONMENT: test
       SIMULATION_MODE: "true"
+      ROUTE_SWEEP_INTERVAL_SECONDS: "15"
     dns:
       - 172.31.253.53
 
@@ -63,6 +76,10 @@ services:
     environment:
       ENVIRONMENT: test
       SIMULATION_MODE: "true"
+      # Beat owns every cadence, so this is the setting that actually schedules
+      # `nx.sweep_routes` on the e2e stack; the worker's copy only matters for the
+      # task's own (unused here) interval-derived defaults.
+      ROUTE_SWEEP_INTERVAL_SECONDS: "15"
 
 networks:
   default:

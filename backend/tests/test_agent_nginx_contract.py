@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -543,3 +544,134 @@ def test_status_reports_bounded_state(agent: Any, tmp_path: Path, monkeypatch) -
     assert report["fragments"] == 0
     # No key leaks configuration *text*.
     assert all(isinstance(value, (str, int, bool, type(None))) for value in report.values())
+
+
+# --- applying a tree with no routes (the removal case) -------------------------
+#
+# The shape every revocation produces: the last route on a node is excluded from
+# the desired configuration, so the bundle carries the managed file and *nothing
+# else*. The phase 4 ownership-transfer E2E found this broken — `_staged_test_conf`
+# raised FileNotFoundError on the stage directory's missing `routes.d`, the apply
+# reported ``STAGE_FAILED`` and rolled back, and the routes it had been asked to
+# remove stayed live on the node. An empty tree is a valid desired state and
+# removing a route is the one apply that must never be blocked.
+
+_MANAGED_TEXT = (
+    "# NexusOps managed configuration \u2014 generated from route records.\n"
+    "# templates v1\n"
+    "map $http_host $nx_route { default 0; }\n"
+)
+
+
+def _rooted_agent(agent: Any, tmp_path: Path, monkeypatch) -> Path:
+    """Point the agent's managed tree at a throwaway directory."""
+    root = tmp_path / "nexusops-nginx"
+    monkeypatch.setattr(agent, "NGINX_MANAGED_ROOT", str(root))
+    monkeypatch.setattr(agent, "NGINX_MANAGED_CONF", str(root / "nexusops.conf"))
+    monkeypatch.setattr(agent, "NGINX_ROUTES_DIR", str(root / "routes.d"))
+    monkeypatch.setattr(agent, "NGINX_STAGED_DIR", str(root / "staged"))
+    monkeypatch.setattr(agent, "NGINX_BACKUP_DIR", str(root / "backup"))
+    monkeypatch.setattr(agent, "NGINX_STATE_DIR", str(root / "state"))
+    return root
+
+
+def _removal_bundle(agent: Any) -> dict:
+    """What the control plane renders when a node must stop serving its routes."""
+    files = [(agent.NGINX_MANAGED_CONF, _MANAGED_TEXT)]
+    return {
+        "bundle_id": agent._tree_fingerprint(files, 1),
+        "provider": "nginx",
+        "template_version": 1,
+        "manifest": [],
+        "files": [{"path": path, "content": content} for path, content in files],
+    }
+
+
+def test_empty_tree_fingerprint_matches_the_control_plane(agent: Any) -> None:
+    """A removal-only bundle's id must mean the same thing on both sides.
+
+    Convergence is decided by comparing the node's reported live fingerprint with
+    the id the control plane computed, so a single-file tree has to hash
+    identically — otherwise the removal applies and the node still reads as
+    drifted forever.
+    """
+    server_side = fingerprint_files(
+        [BundleFile(path=MANAGED_CONF_PATH, content=_MANAGED_TEXT)], template_version=1
+    )
+    assert agent._tree_fingerprint([(MANAGED_CONF_PATH, _MANAGED_TEXT)], 1) == server_side
+
+    bundle = {
+        "bundle_id": server_side,
+        "provider": "nginx",
+        "template_version": 1,
+        "manifest": [],
+        "files": [{"path": MANAGED_CONF_PATH, "content": _MANAGED_TEXT}],
+    }
+    assert agent._validate_bundle(bundle)["bundle_id"] == server_side
+
+
+def test_removal_bundle_stages_and_validates_with_no_fragments(
+    agent: Any, tmp_path: Path, monkeypatch
+) -> None:
+    _rooted_agent(agent, tmp_path, monkeypatch)
+    bundle = _removal_bundle(agent)
+    validated = agent._validate_bundle(json.loads(json.dumps(bundle)))
+    assert validated["manifest"] == []
+    assert len(validated["files"]) == 1
+
+    stage = Path(agent._stage_bundle(validated))
+    # The directory exists because the tree was staged, not because a fragment
+    # happened to land in it.
+    assert (stage / "routes.d").is_dir()
+    assert os.listdir(stage / "routes.d") == []
+
+    body = Path(agent._staged_test_conf(str(stage))).read_text(encoding="utf-8")
+    assert "map $http_host $nx_route" in body
+    # The managed file is included at http level, inside a real block.
+    assert body.index("events {}") < body.index("map $http_host $nx_route") < body.rindex("}")
+    # No fragment means no server block: the validated tree really is empty of
+    # routes, rather than validated with the old ones still included.
+    assert "server_name" not in body
+
+
+def test_removal_bundle_removes_the_last_fragment_and_converges(
+    agent: Any, tmp_path: Path, monkeypatch
+) -> None:
+    """The whole point: the fragment is gone from disk *and* the node agrees."""
+    _rooted_agent(agent, tmp_path, monkeypatch)
+    route_name = f"r-{'ab' * 16}.conf"
+    os.makedirs(agent.NGINX_ROUTES_DIR)
+    Path(agent.NGINX_MANAGED_CONF).write_text(_MANAGED_TEXT, encoding="utf-8")
+    Path(agent.NGINX_ROUTES_DIR, route_name).write_text(
+        "server { listen 80; server_name old.example; return 200; }\n", encoding="utf-8"
+    )
+    _serving, fragments = agent._live_bundle_id()
+    assert fragments == 1
+
+    bundle = _removal_bundle(agent)
+    stage = Path(agent._stage_bundle(agent._validate_bundle(bundle)))
+    agent._staged_test_conf(str(stage))
+    agent._swap_tree(str(stage))
+
+    live, fragments = agent._live_bundle_id()
+    assert fragments == 0
+    assert os.listdir(agent.NGINX_ROUTES_DIR) == []
+    # The node now reports exactly the bundle the control plane asked for, which
+    # is what turns a detected difference into a repaired one.
+    assert live == bundle["bundle_id"]
+    # The previous known-good tree survives a later rollback.
+    assert Path(agent.NGINX_BACKUP_DIR, "routes.d.prev", route_name).exists()
+    assert Path(agent.NGINX_BACKUP_DIR, "nexusops.conf.prev").exists()
+
+
+def test_staged_test_conf_reads_a_missing_routes_dir_as_empty(
+    agent: Any, tmp_path: Path, monkeypatch
+) -> None:
+    """Defence in depth: the reader does not depend on the writer's mkdir."""
+    root = _rooted_agent(agent, tmp_path, monkeypatch)
+    stage = root / "staged" / "deadbeef"
+    stage.mkdir(parents=True)
+    (stage / "nexusops.conf").write_text(_MANAGED_TEXT, encoding="utf-8")
+    body = Path(agent._staged_test_conf(str(stage))).read_text(encoding="utf-8")
+    assert "map $http_host $nx_route" in body
+    assert body.endswith("}\n")

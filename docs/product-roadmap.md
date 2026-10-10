@@ -1,9 +1,10 @@
 # Product Roadmap — NexusOps Multi-Tenant Platform
 
-**Status:** Phases 0–3 **delivered** (0 on 2026-09-22, 1 on 2026-09-24, 2 on
-2026-10-08, 2.1 on 2026-10-09, 3 on 2026-10-09). Phases 4–9 are **proposals for
-review** — none is approved or implemented.
-**Date:** 2026-09-20 (status updated 2026-10-09)
+**Status:** Phases 0–4 **delivered** (0 on 2026-09-22, 1 on 2026-09-24, 2 on
+2026-10-08, 2.1 on 2026-10-09, 3 on 2026-10-09, 4 on 2026-10-10 — HTTP routing
+only; certificates and TLS are Phase 5). Phases 5–9 are **proposals for review** —
+none is approved or implemented.
+**Date:** 2026-09-20 (status updated 2026-10-10)
 **Companions:** [platform-vision.md](platform-vision.md) · [domain-model.md](domain-model.md) · [multi-tenancy.md](multi-tenancy.md) · [authorization.md](authorization.md) · [platform-security-model.md](platform-security-model.md)
 
 ## 0. Stance
@@ -90,23 +91,27 @@ Four-way classification, grounded in the subsystem analysis (the harness under
 
 ## 2. Phase plan
 
-| # | Phase | Ships | Depends on |
-|---|---|---|---|
-| 0 | Truth pass & hardening | docs fixed against code; fail-closed secret resolution; agent backoff | — |
-| 1 | Tenancy foundation | orgs/memberships/roles, org_id backfill, X-Org-Id + session guard, node rename, IDOR suite green, **operations control plane + fail-closed capability gate (CAS state machine; per-node capability advertisement + delivery land in phase 3)** | 0 |
-| 2 | Projects & environments | env promotion to project scope, SecretVersion, layered secret scope | 1 |
-| 3 | Nodes & agent v2 | capabilities+facts, enrollment v2, **per-node capability advertisement + operations delivery** (the control plane and the fail-closed gate are already in), HTTPS-only agent | 1 |
-| 4 | Domains & routes | Domain/Route entities, DNS verification, NginxProvider, apply pipeline, polymorphic monitors | 3 |
-| 5 | Certificates | ACME DNS-01, DNSProvider (Cloudflare first), renewal scan, encrypted delivery, TLS-expiry monitors | 4 |
-| 6 | Real deployments | 6a image-based via agent ops; 6b git→build on node | 3 (6a), 3+4 (6b) — **and the deployment-secret authorization gate (§9.0), which must close before 6a ships** |
-| 7 | Teams, grants & custom roles | teams, resource-level grants, custom roles | 2 |
-| 8 | Backups | policies/runs/destinations, verify + restore drill | 3, 7 |
-| 9 | Billing & metering | usage-counter enforcement, plan gates | 1, 2 |
+| # | Phase | Status | Ships | Depends on |
+|---|---|---|---|---|
+| 0 | Truth pass & hardening | ✅ delivered 2026-09-22 | docs fixed against code; fail-closed secret resolution; agent backoff | — |
+| 1 | Tenancy foundation | ✅ delivered 2026-09-24 | orgs/memberships/roles, org_id backfill, X-Org-Id + session guard, node rename, IDOR suite green, **operations control plane + fail-closed capability gate (CAS state machine; per-node capability advertisement + delivery land in phase 3)** | 0 |
+| 2 | Projects & environments | ✅ delivered 2026-10-08 | env promotion to project scope, SecretVersion, layered secret scope | 1 |
+| 2.1 | Hardening | ✅ delivered 2026-10-09 | `secret_versions` immutability at the database, legacy environment typing, deploy-chain gate recorded | 2 |
+| 3 | Nodes & agent v2 | ✅ delivered 2026-10-09 | capabilities+facts, enrollment v2, **per-node capability advertisement + operations delivery** (the control plane and the fail-closed gate are already in), HTTPS-only agent | 1 |
+| 4 | Domains & routes | ✅ delivered 2026-10-10 — **HTTP only** | Domain/Route entities, DNS verification, NginxProvider, apply pipeline, polymorphic monitors. Certificates and TLS are **not** in it | 3 |
+| 5 | Certificates | proposal | ACME DNS-01, DNSProvider (Cloudflare first), TLS listener + `scheme=https` on routes, renewal scan, encrypted delivery, TLS-expiry monitors | 4 |
+| 6 | Real deployments | proposal | 6a image-based via agent ops; 6b git→build on node | 3 (6a), 3+4 (6b) — **and the deployment-secret authorization gate (§9.0), which must close before 6a ships** |
+| 7 | Teams, grants & custom roles | proposal | teams, resource-level grants, custom roles | 2 |
+| 8 | Backups | proposal | policies/runs/destinations, verify + restore drill | 3, 7 |
+| 9 | Billing & metering | proposal | usage-counter enforcement, plan gates | 1, 2 |
 
-**Status of the plan:** phases 0–2.1 are **delivered**. Phases 3–9 are
+**Status of the plan:** phases 0–4 are **delivered**. Phases 5–9 are
 **proposals** — not approved and not implemented; their "Ships" cells describe
 intended work, not current behaviour. The only code that exists is what the
-delivered sections below record.
+delivered sections below record. Phase 4 delivered the HTTP half of
+[domain-routing.md](domain-routing.md): there is **no certificate issuance, no TLS
+listener and no HTTPS redirect**, and every certificate shape in the design docs is
+Phase 5 target design.
 
 ## 3. Phase 0 — Truth pass & hardening
 
@@ -336,12 +341,15 @@ Delivered:
 - **Exit:** a machine enrolls through the one-liner path; ops are audited from
   `pending` to `succeeded`; revocation is immediate.
 
-## 7. Phase 4 — Domains & routes
+## 7. Phase 4 — Domains & routes ✅ **delivered (2026-10-10)**
 
 **Why:** the wedge feature — container:port → URL. Spec:
-[domain-routing.md](domain-routing.md) (now marked implemented for HTTP).
+[domain-routing.md](domain-routing.md) (marked implemented for HTTP).
 
-**Shipped (2026-10-10), HTTP only — TLS is Phase 5.**
+**Shipped (2026-10-10), HTTP only — TLS is Phase 5.** Routes are rendered, applied
+and served over plain HTTP; the schema cannot express a TLS listener or an HTTPS
+redirect, and nothing in the renderer can emit one (`CHECK (scheme = 'http')`, no
+`certificate_id`, no `ssl_*` directive in any template).
 
 - **DB:** `domains` + `routes` (migration `f4a5b6c7d8e9`), tenant RLS and the
   anti-takeover partial unique index on the verified name; monitors became
@@ -362,14 +370,33 @@ Delivered:
   re-verify, delete-blocked-while-enabled) and a Routes page with the upstream
   picker (node → container → published port), enable/disable and delete.
 - **Security:** verification before any route goes live, re-verification and NS
-  snapshots, cross-org flip handling, upstream must live on the route's node,
-  header/rate-limit/redirect inputs from closed allowlists, and the listener
-  pre-flight (domain-routing.md §5). Injection threat modeled in
-  platform-security-model.md.
+  snapshots, upstream must live on the route's node, header/rate-limit/redirect
+  inputs from closed allowlists, and the listener pre-flight (domain-routing.md §5).
+  Injection threat modeled in platform-security-model.md.
+- **Ownership revocation (hardening pass, same phase).** The cross-org flip is not
+  just a row change: the worker discovers the losing organization's nodes inside the
+  same system-scoped release step — the only scope that can see another tenant's
+  routes — then re-renders and applies **inside each node's own organization**, so
+  discovery is cross-tenant and the write is not. The losing organization gets an
+  audit row and an org-scoped event that says why without naming the winner. A node
+  that is offline or failing stays visibly unresolved and is retried by the
+  reconciler; the route is never reported as removed before a node confirms it.
+- **Drift reconciliation (same pass).** `sweep-routes` no longer merely re-asks: it
+  compares the desired bundle with the node's last known live one, and queues
+  exactly one `nginx.apply` when they differ, with a bounded exponential retry for a
+  node that keeps failing and a fingerprint refresh interval for one that is
+  converged. `NGINX_DRIFT_RECOVERED` is published only from an applied outcome.
 - **Testing:** mock-DNS unit + integration suites (verification lifecycle, grace
-  window, cross-org flip), 62-test HTTP integration suite for domains/routes/
-  apply/rollback/drift/tenancy, render snapshots, agent contract tests, and a
-  Phase 3→4 migration test over a populated database.
+  window, cross-org flip), a 66-test HTTP integration suite for domains/routes/
+  apply/rollback/drift/tenancy — including the ownership-transfer scenario with the
+  previous owner's node (online, and separately offline-then-recovered) and the
+  reconciler's bounds — render snapshots, agent contract tests (including the
+  removal-only bundle that carries no fragment at all), and a Phase 3→4 migration
+  test over a populated database. The revocation and reconciliation fixes
+  were first reproduced against the pre-fix code: with the old code the released
+  organization's domain read `UNVERIFIED` while its API still reported the route
+  `IN_SYNC`, **no** apply was queued for its node, and three sweep ticks left a
+  drifted node untouched.
 - **E2E:** `frontend/e2e/phase4.spec.ts` runs the whole wedge against the throwaway
   stack — a node container that really runs nginx, the real agent enrolled inside
   it, a real authoritative mock nameserver (`e2e/dnsmock`) serving the minted TXT
@@ -380,12 +407,28 @@ Delivered:
   system `nginx.conf` at all (the managed-tree guard rejected the one path outside
   the tree), and the include it added had no target, so `nginx -t` failed; both are
   fixed and pinned by contract tests.
+- **E2E, ownership transfer:** a second scenario in the same spec gives a name to a
+  second organization (its own node, its own container, the same mock DNS fixture)
+  and proves on the wire that the first organization's route stops being served: the
+  old domain goes `UNVERIFIED` and the old owner's audit/event trail says why without
+  naming the winner, the old route is excluded from the desired configuration, the
+  old node — held unreachable for part of the run — applies the bundle without the
+  fragment, an HTTP request with the old Host gets the managed 444 instead of the
+  old upstream, no success is claimed while the node cannot apply, the new owner
+  serves the name from its own node, and neither organization can read or modify the
+  other's rows. It also found the second real defect of this pass, on the agent side:
+  a bundle containing **no route fragments** — what every revocation of the last route
+  on a node renders to — could not be staged, so the apply failed and rolled back and
+  the routes stayed live on the node. The stage writer now creates `routes.d`
+  unconditionally, the validation reader treats a missing one as an empty tree, and
+  contract tests pin both plus the fingerprint the node reports after a removal.
 - **Exit:** met — a route's desired configuration reaches a node as a whitelisted
   op, is applied atomically with rollback, and its outcome is reflected on the
-  route; re-verification on apex change pulls the routes; and the cross-container
-  journey above proves the loop end to end.
+  route; re-verification on apex change pulls the routes; a lost name is removed
+  from every node that served it; and the cross-container journeys above prove the
+  loop end to end.
 
-## 8. Phase 5 — Certificates
+## 8. Phase 5 — Certificates — **proposal, not implemented**
 
 **Why:** "HTTPS on by default" is the promise; DNS-01 works for NAT-ed home
 servers and wildcards. Spec: [certificate-management.md](certificate-management.md).
@@ -405,7 +448,7 @@ servers and wildcards. Spec: [certificate-management.md](certificate-management.
   nodes-only test.
 - **Exit:** auto-renewed cert on a real domain; TLS-expiry monitor attached.
 
-## 9. Phase 6 — Real deployments
+## 9. Phase 6 — Real deployments — **proposal, not implemented**
 
 **Why:** the sim runner's promise, made real — the runner protocol
 (`plan_steps`/`execute_step`/`StepLine`) survives; the simulation becomes one
@@ -473,7 +516,7 @@ deploys (§9) are no longer independently schedulable — the gate couples them.
 - **Exit:** image deploy on a real node; health gate blocks routing on
   failure; rollback proven.
 
-## 10. Phase 7 — Teams, grants & custom roles
+## 10. Phase 7 — Teams, grants & custom roles — **proposal, not implemented**
 
 **Why:** a five-person team needs resource-level access ("Ali deploys staging,
 not production"); org roles alone cannot express it. Spec: authorization.md §4.
@@ -494,7 +537,7 @@ not production"); org roles alone cannot express it. Spec: authorization.md §4.
 - **Exit:** the Ali scenario green as e2e: Developer org-role + staging-env
   grant → deploys staging, blocked on production.
 
-## 11. Phase 8 — Backups
+## 11. Phase 8 — Backups — **proposal, not implemented**
 
 **Why:** the "schedule and forget" promise; the design exists
 (domain-model.md §2.7). Spec per this section (build phase).
@@ -515,7 +558,7 @@ not production"); org roles alone cannot express it. Spec: authorization.md §4.
 - **Testing:** verify step; retention; restore-drill e2e.
 - **Exit:** scheduled verified backup + green restore drill on a real node.
 
-## 12. Phase 9 — Billing & metering
+## 12. Phase 9 — Billing & metering — **proposal, not implemented**
 
 **Why:** billing attaches to the Organization (design-only until here); the
 counters accumulate from Phase 1 so enforcement is a gate, not a backfill.

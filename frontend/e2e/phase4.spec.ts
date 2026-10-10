@@ -2,6 +2,8 @@ import { execFileSync } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import type { APIRequestContext } from "@playwright/test";
+
 import { EDGE } from "./env";
 import { expect, test } from "./fixtures";
 
@@ -59,7 +61,12 @@ function dockerAvailable(): boolean {
 }
 
 function docker(args: string[]): string {
-  return execFileSync("docker", args, { encoding: "utf8" }).trim();
+  // stderr is captured rather than inherited: a cleared-up container makes
+  // `rm -f`/`unpause` fail, and that noise belongs to the caller, not the report.
+  return execFileSync("docker", args, {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  }).trim();
 }
 
 /** Docker's own port mapping, e.g. `127.0.0.1:45999` for `-p 127.0.0.1::8080`. */
@@ -127,6 +134,207 @@ async function dnsZone(): Promise<string | null> {
   }
 }
 
+/**
+ * Start one real nginx node for *tenant*: a marker-serving app container on a
+ * loopback-published port, a node row, a one-time enrollment token, and the real
+ * agent running inside a container that mounts the host's nginx and Docker socket.
+ *
+ * Nodes are started one at a time by the transfer journey: the node's nginx owns
+ * host port 80 (that is the whole point of the pre-flight), and two of them cannot
+ * hold it at once. Each caller removes its own container before the next starts.
+ */
+async function startNode(
+  api: APIRequestContext,
+  spec: {
+    tenant: Tenant;
+    name: string;
+    container: string;
+    app: string;
+    marker: string;
+    /** Mark the node OFFLINE this many seconds after its last heartbeat. */
+    offlineAfterSeconds?: number;
+  },
+): Promise<NodeHarness> {
+  docker(["build", "-q", "-t", NODE_IMAGE, NODE_CONTEXT]);
+
+  execFileSync(
+    "docker",
+    [
+      "run",
+      "-d",
+      "--name",
+      spec.app,
+      "-p",
+      "127.0.0.1::80",
+      "nginx:1.27-alpine",
+      "sh",
+      "-c",
+      `echo ${spec.marker} > /usr/share/nginx/html/index.html && exec nginx -g 'daemon off;'`,
+    ],
+    { stdio: ["ignore", "pipe", "pipe"] },
+  );
+  const upstreamPort = publishedPort(spec.app, 80);
+
+  const created = await api.post("/api/v1/nodes", {
+    headers: spec.tenant.headers,
+    data: {
+      name: spec.name,
+      hostname: `${spec.name}.internal`,
+      environment: "production",
+      ...(spec.offlineAfterSeconds ? { offline_after_seconds: spec.offlineAfterSeconds } : {}),
+    },
+  });
+  expect(created.status(), await created.text()).toBe(201);
+  const nodeId = ((await created.json()) as { id: string }).id;
+
+  const minted = await api.post("/api/v1/nodes/enrollment-tokens", {
+    headers: spec.tenant.headers,
+    data: { name: `${spec.name}-token`, node_id: nodeId, expires_in_seconds: 600 },
+  });
+  expect(minted.status(), await minted.text()).toBe(201);
+  const token = ((await minted.json()) as { token: string }).token;
+
+  execFileSync(
+    "docker",
+    [
+      "run",
+      "-d",
+      "--name",
+      spec.container,
+      "--network",
+      "host",
+      "-v",
+      "/var/run/docker.sock:/var/run/docker.sock",
+      "-v",
+      `${AGENT}:/opt/nexusops/nexusops_agent.py:ro`,
+      "-e",
+      `NEXUSOPS_SERVER=${EDGE}`,
+      "-e",
+      `NEXUSOPS_TOKEN=${token}`,
+      "-e",
+      "NEXUSOPS_TOKEN_FILE=/tmp/nexusops-agent-token",
+      "-e",
+      "NEXUSOPS_INTERVAL=3",
+      "-e",
+      "NEXUSOPS_NGINX_ROOT=/etc/nexusops/nginx",
+      NODE_IMAGE,
+      "sh",
+      "-c",
+      "nginx && exec python3 /opt/nexusops/nexusops_agent.py",
+    ],
+    { stdio: ["ignore", "pipe", "pipe"] },
+  );
+
+  await expect
+    .poll(
+      async () => {
+        const res = await api.get(`/api/v1/nodes/${nodeId}`, { headers: spec.tenant.headers });
+        if (!res.ok()) return `http-${res.status()}`;
+        const body = (await res.json()) as NodeDetail;
+        const nginx = body.capabilities?.nginx ?? {};
+        return `${body.status}:${nginx.present === true}:${nginx.routing_eligible === true}`;
+      },
+      { timeout: 120_000, intervals: [1_000, 2_000] },
+    )
+    .toBe("ONLINE:true:true");
+
+  // The customer's own nginx.conf now carries the managed include, so an apply has
+  // somewhere to land. (This is the bootstrap the first defect was found in.)
+  await expect
+    .poll(
+      () => {
+        try {
+          docker(["exec", spec.container, "test", "-f", "/etc/nexusops/nginx/nexusops.conf"]);
+          return "present";
+        } catch {
+          return "missing";
+        }
+      },
+      { timeout: 90_000, intervals: [1_000, 2_000] },
+    )
+    .toBe("present");
+
+  // The upstream picker offers this node's app on the port we just published.
+  let target: RouteTargetBody | undefined;
+  await expect
+    .poll(
+      async () => {
+        const res = await api.get(`/api/v1/nodes/${nodeId}/route-targets`, {
+          headers: spec.tenant.headers,
+        });
+        if (!res.ok()) return `http-${res.status()}`;
+        const targets = (await res.json()) as RouteTargetBody[];
+        target = targets.find((item) =>
+          item.upstream_ports.some((port) => port.host_port === upstreamPort),
+        );
+        return target ? "found" : `not-found(${targets.length})`;
+      },
+      { timeout: 90_000, intervals: [2_000, 3_000] },
+    )
+    .toBe("found");
+
+  return {
+    id: nodeId,
+    container: spec.container,
+    app: spec.app,
+    upstreamPort,
+    targetId: (target as RouteTargetBody).id,
+  };
+}
+
+/** Publish a name's TXT proof in the mock and verify it through the API. */
+async function proveName(
+  api: APIRequestContext,
+  tenant: Tenant,
+  domainName: string,
+): Promise<{ domainId: string; recordName: string }> {
+  const created = await api.post("/api/v1/domains", {
+    headers: tenant.headers,
+    data: { name: domainName },
+  });
+  expect(created.status(), await created.text()).toBe(201);
+  const body = (await created.json()) as DomainBody;
+  const instructions = body.verification;
+  expect(instructions, "a fresh domain must hand out its TXT instructions").toBeTruthy();
+  const recordName = (instructions as NonNullable<DomainBody["verification"]>).record_name;
+  await dnsPublish({
+    name: recordName,
+    type: "TXT",
+    value: (instructions as NonNullable<DomainBody["verification"]>).record_value,
+  });
+  const verify = await api.post(`/api/v1/domains/${body.id}/verify`, { headers: tenant.headers });
+  expect(verify.status(), await verify.text()).toBe(200);
+  await expect
+    .poll(
+      async () => {
+        const res = await api.get(`/api/v1/domains/${body.id}`, { headers: tenant.headers });
+        if (!res.ok()) return `http-${res.status()}`;
+        return ((await res.json()) as DomainBody).status;
+      },
+      { timeout: 120_000, intervals: [2_000, 3_000] },
+    )
+    .toBe("VERIFIED");
+  return { domainId: body.id, recordName };
+}
+
+/** Operations on *nodeId* of type `nginx.apply` that have not finished yet. */
+async function liveApplies(
+  api: APIRequestContext,
+  tenant: Tenant,
+  nodeId: string,
+): Promise<OperationBody[]> {
+  const listed = (await (
+    await api.get("/api/v1/operations", {
+      headers: tenant.headers,
+      params: { node_id: nodeId },
+    })
+  ).json()) as { items: OperationBody[] };
+  return listed.items.filter(
+    (op) =>
+      op.type === "nginx.apply" && ["PENDING", "CLAIMED", "RUNNING"].includes(op.status),
+  );
+}
+
 interface NodeDetail {
   status: string;
   capabilities: Record<
@@ -172,7 +380,39 @@ interface ProxyStatusBody {
   route_total: number;
   route_enabled: number;
   route_in_sync: number;
+  route_stale: number;
   capability: { routing_eligible: boolean; listener_80: string };
+}
+
+interface OperationBody {
+  id: string;
+  type: string;
+  status: string;
+}
+
+interface EventBody {
+  type: string;
+  resource_id: string | null;
+  data: Record<string, unknown>;
+}
+
+interface MembershipBody {
+  organization: { id: string; name: string };
+}
+
+/** One organization as the journey uses it: an id, and headers scoped to it. */
+interface Tenant {
+  id: string;
+  headers: Record<string, string>;
+}
+
+/** A real nginx node, its agent, and the container its routes point at. */
+interface NodeHarness {
+  id: string;
+  container: string;
+  app: string;
+  upstreamPort: number;
+  targetId: string;
 }
 
 test.describe("domains and routes — a real nginx node, a real URL", () => {
@@ -512,4 +752,376 @@ test.describe("domains and routes — a real nginx node, a real URL", () => {
       }
     }
   });
+
+  /**
+   * Ownership transfer — the same name, a second organization, a second node.
+   *
+   * The name is proven by organization A and served from A's node; A's node is then
+   * made genuinely unreachable (its agent is stopped, so the control plane marks it
+   * OFFLINE) while organization B proves control of the same name through the same
+   * authoritative mock. What this journey has to show — on the wire, not in status
+   * rows — is:
+   *
+   *   A's domain goes UNVERIFIED and A is told why;
+   *   the route is excluded from the desired configuration and reads unresolved;
+   *   **nothing is claimed while the node cannot apply**: no apply is queued, and
+   *   the difference is never announced as repaired;
+   *   the node comes back, the reconciler queues exactly one apply, the node applies
+   *   it, the fragment is gone from disk and the old Host gets the managed 444
+   *   instead of the old upstream;
+   *   the new owner serves the name from its own node;
+   *   and neither organization can read or modify the other's resources.
+   */
+  test("a name that changes hands stops being served by the old node", async ({
+    api,
+    apiToken,
+  }) => {
+    // Two real nodes in sequence, an offline window and a recovery: minutes, not
+    // seconds. Nothing here is loosened to fit — the offline wait is bounded by the
+    // node's own 30 s offline threshold.
+    test.setTimeout(600_000);
+
+    const stamp = Date.now();
+    const domainName = DNS_ZONE; // the mock is authoritative for the zone apex
+    const nodeAName = `e2e-xfer-a-${stamp}`;
+    const nodeBName = `e2e-xfer-b-${stamp}`;
+    const nodeAContainer = `nexusops-e2e-xfer-a-${stamp}`;
+    const nodeBContainer = `nexusops-e2e-xfer-b-${stamp}`;
+    const appA = `nexusops-e2e-xfer-app-a-${stamp}`;
+    const appB = `nexusops-e2e-xfer-app-b-${stamp}`;
+    const markerA = `NEXUSOPS_E2E_TRANSFER_A_${stamp}`;
+    const markerB = `NEXUSOPS_E2E_TRANSFER_B_${stamp}`;
+
+    const zone = await dnsZone();
+    test.skip(zone === null, `mock DNS control API is not reachable at ${DNS_CONTROL}`);
+    test.skip(zone !== null && zone !== DNS_ZONE, `mock DNS serves ${zone}, expected ${DNS_ZONE}`);
+
+    // Organization A is the bootstrap organization the API context already acts in.
+    // A is the bootstrap tenant, but the header is sent from the first request on:
+    // once the account below belongs to a second organization the platform refuses
+    // to guess which one a request is for, and an unqualified call starts failing
+    // with ORGANIZATION_HEADER_REQUIRED in the middle of the journey.
+    const orgA: Tenant = { id: apiToken.orgId, headers: { "X-Org-Id": apiToken.orgId } };
+    let orgB: Tenant | null = null;
+    let nodeA: NodeHarness | null = null;
+    let nodeB: NodeHarness | null = null;
+    let routeA: string | null = null;
+    let routeB: string | null = null;
+    let domainA: string | null = null;
+    let domainB: string | null = null;
+    let recordName = `_nexusops.${domainName}`;
+
+    try {
+      // 1. Organization A: a real node, a verified name, and a live HTTP route.
+      nodeA = await startNode(api, {
+        tenant: orgA,
+        name: nodeAName,
+        container: nodeAContainer,
+        app: appA,
+        marker: markerA,
+        // A 30 s offline threshold, so stopping the agent flips the node OFFLINE
+        // within the journey's patience instead of the 90 s platform default.
+        offlineAfterSeconds: 30,
+      });
+      const provenA = await proveName(api, orgA, domainName);
+      domainA = provenA.domainId;
+      recordName = provenA.recordName;
+
+      const routeARes = await api.post("/api/v1/routes", {
+        headers: orgA.headers,
+        data: {
+          domain_id: domainA,
+          hostname: domainName,
+          path: "/",
+          node_id: nodeA.id,
+          container_id: nodeA.targetId,
+          port: nodeA.upstreamPort,
+          enabled: true,
+        },
+      });
+      expect(routeARes.status(), await routeARes.text()).toBe(201);
+      routeA = ((await routeARes.json()) as RouteBody).id;
+      await expect
+        .poll(
+          async () => {
+            const res = await api.get(`/api/v1/routes/${routeA}`, { headers: orgA.headers });
+            if (!res.ok()) return `http-${res.status()}`;
+            return ((await res.json()) as RouteBody).config_state;
+          },
+          { timeout: 120_000, intervals: [2_000, 3_000] },
+        )
+        .toBe("IN_SYNC");
+      // The name really is served by A's node before anything changes hands.
+      await expect
+        .poll(() => httpGet("http://127.0.0.1/", domainName).body, {
+          timeout: 30_000,
+          intervals: [1_000, 2_000],
+        })
+        .toContain(markerA);
+
+      // 2. Organization B — a second tenant the same operator may act in.
+      const created = await api.post("/api/v1/organizations", {
+        data: { name: `Transfer target ${stamp}`, description: "ownership transfer e2e" },
+      });
+      expect(created.status(), await created.text()).toBe(201);
+      const membership = (await created.json()) as MembershipBody;
+      orgB = { id: membership.organization.id, headers: { "X-Org-Id": membership.organization.id } };
+      expect(orgB.id).not.toBe(orgA.id);
+
+      // 3. A's node goes unreachable *before* the name changes hands: the agent is
+      //    frozen, so nothing refreshes its heartbeat and the control plane marks it
+      //    OFFLINE (30 s threshold, checked every 15 s).
+      docker(["pause", nodeAContainer]);
+      await expect
+        .poll(
+          async () => {
+            const res = await api.get(`/api/v1/nodes/${nodeA?.id}`, { headers: orgA.headers });
+            if (!res.ok()) return `http-${res.status()}`;
+            return ((await res.json()) as NodeDetail).status;
+          },
+          { timeout: 150_000, intervals: [3_000, 5_000] },
+        )
+        .toBe("OFFLINE");
+
+      // 4. B proves control of the same name through the authoritative fixture.
+      const provenB = await proveName(api, orgB, domainName);
+      domainB = provenB.domainId;
+
+      // 5. A lost the name — and is told, with a reason and nothing about B.
+      await expect
+        .poll(
+          async () => {
+            const res = await api.get(`/api/v1/domains/${domainA}`, { headers: orgA.headers });
+            if (!res.ok()) return `http-${res.status()}`;
+            return ((await res.json()) as DomainBody).status;
+          },
+          { timeout: 60_000, intervals: [2_000, 3_000] },
+        )
+        .toBe("UNVERIFIED");
+      const eventsResponse = await api.get("/api/v1/events", {
+        headers: orgA.headers,
+        params: { types: "DOMAIN_UNVERIFIED" },
+      });
+      // Read the status before the shape: a refused or empty feed would otherwise
+      // surface as "undefined is not an object" and hide which one it was.
+      expect(eventsResponse.status(), await eventsResponse.text()).toBe(200);
+      const events = (await eventsResponse.json()) as { items: EventBody[] };
+      const loss = events.items.find(
+        (event) => (event.data as { reason?: string }).reason === "claimed_by_another_organization",
+      );
+      expect(loss, "the previous owner must be told why it lost the name").toBeTruthy();
+      expect(JSON.stringify(events.items)).not.toContain(domainB);
+
+      // 6. The route is unresolved, and **not** reported as served: the node is
+      //    offline, so no apply was even queued for it — the old configuration is
+      //    still on the node and the control plane says so.
+      const stateWhileOffline = (await (
+        await api.get(`/api/v1/routes/${routeA}`, { headers: orgA.headers })
+      ).json()) as RouteBody;
+      expect(stateWhileOffline.enabled).toBe(true);
+      expect(stateWhileOffline.config_state).toBe("STALE");
+      expect(stateWhileOffline.last_apply_error.length).toBeGreaterThan(0);
+      const statusWhileOffline = (await (
+        await api.get(`/api/v1/nodes/${nodeA.id}/proxy/status`, { headers: orgA.headers })
+      ).json()) as ProxyStatusBody;
+      expect(statusWhileOffline.eligible).toBe(false);
+      expect(statusWhileOffline.drift).toBe(true);
+      expect(statusWhileOffline.expected_bundle_id).not.toBe(statusWhileOffline.live_bundle_id);
+      expect(statusWhileOffline.route_in_sync).toBe(0);
+      expect(statusWhileOffline.route_stale).toBe(1);
+      expect(await liveApplies(api, orgA, nodeA.id)).toHaveLength(0);
+
+      // 7. The reconciler does not lie or pile up: several sweep ticks (15 s each on
+      //    this stack) queue nothing, and the difference is never announced as
+      //    repaired. Wait past two ticks before asking.
+      await new Promise((resolve) => setTimeout(resolve, 35_000));
+      expect(await liveApplies(api, orgA, nodeA.id)).toHaveLength(0);
+      const recoveredResponse = await api.get("/api/v1/events", {
+        headers: orgA.headers,
+        params: { types: "NGINX_DRIFT_RECOVERED" },
+      });
+      expect(recoveredResponse.status(), await recoveredResponse.text()).toBe(200);
+      const recoveredWhileOffline = (await recoveredResponse.json()) as { items: EventBody[] };
+      expect(recoveredWhileOffline.items).toHaveLength(0);
+      expect(
+        (await (
+          await api.get(`/api/v1/routes/${routeA}`, { headers: orgA.headers })
+        ).json()) as RouteBody,
+      ).toMatchObject({ config_state: "STALE" });
+
+      // 8. The node comes back. The next sweep tick queues exactly one apply, the
+      //    agent applies it, and only then is the name gone — verified against the
+      //    fragment on disk and against a real HTTP request.
+      docker(["unpause", nodeAContainer]);
+      await expect
+        .poll(
+          async () => {
+            const res = await api.get(`/api/v1/nodes/${nodeA?.id}`, { headers: orgA.headers });
+            if (!res.ok()) return `http-${res.status()}`;
+            return ((await res.json()) as NodeDetail).status;
+          },
+          { timeout: 120_000, intervals: [2_000, 3_000] },
+        )
+        .toBe("ONLINE");
+      await expect
+        .poll(
+          async () => {
+            const res = await api.get(`/api/v1/nodes/${nodeA?.id}/proxy/status`, {
+              headers: orgA.headers,
+            });
+            if (!res.ok()) return `http-${res.status()}`;
+            const body = (await res.json()) as ProxyStatusBody;
+            return body.expected_bundle_id === body.live_bundle_id ? "converged" : "drifted";
+          },
+          { timeout: 180_000, intervals: [2_000, 3_000] },
+        )
+        .toBe("converged");
+      const recoveredResponseAfter = await api.get("/api/v1/events", {
+        headers: orgA.headers,
+        params: { types: "NGINX_DRIFT_RECOVERED" },
+      });
+      expect(recoveredResponseAfter.status(), await recoveredResponseAfter.text()).toBe(200);
+      const recoveredEvents = (await recoveredResponseAfter.json()) as { items: EventBody[] };
+      expect(recoveredEvents.items.length).toBeGreaterThan(0);
+
+      // Nothing that answered for the name is left on the node...
+      const routesDir = docker(["exec", nodeAContainer, "ls", "/etc/nexusops/nginx/routes.d"]);
+      expect(
+        routesDir.split("\n").filter((line) => /^r-[0-9a-f]{32}\.conf$/.test(line.trim())),
+      ).toHaveLength(0);
+      // ...and the request that used to reach A's app now gets the managed 444.
+      const oldHost = httpGet("http://127.0.0.1/", domainName);
+      expect(oldHost.body).not.toContain(markerA);
+      expect(oldHost.status === 0 || oldHost.status === 444).toBe(true);
+
+      // 9. The new owner serves the name from its own node — a different upstream,
+      //    so the marker proves whose nginx answered. Port 80 is free again because
+      //    A's node is removed first.
+      docker(["rm", "-f", nodeAContainer]);
+      nodeB = await startNode(api, {
+        tenant: orgB,
+        name: nodeBName,
+        container: nodeBContainer,
+        app: appB,
+        marker: markerB,
+      });
+      const routeBRes = await api.post("/api/v1/routes", {
+        headers: orgB.headers,
+        data: {
+          domain_id: domainB,
+          hostname: domainName,
+          path: "/",
+          node_id: nodeB.id,
+          container_id: nodeB.targetId,
+          port: nodeB.upstreamPort,
+          enabled: true,
+        },
+      });
+      expect(routeBRes.status(), await routeBRes.text()).toBe(201);
+      routeB = ((await routeBRes.json()) as RouteBody).id;
+      await expect
+        .poll(
+          async () => {
+            const res = await api.get(`/api/v1/routes/${routeB}`, {
+              headers: orgB.headers,
+            });
+            if (!res.ok()) return `http-${res.status()}`;
+            return ((await res.json()) as RouteBody).config_state;
+          },
+          { timeout: 120_000, intervals: [2_000, 3_000] },
+        )
+        .toBe("IN_SYNC");
+      await expect
+        .poll(() => httpGet("http://127.0.0.1/", domainName).body, {
+          timeout: 30_000,
+          intervals: [1_000, 2_000],
+        })
+        .toContain(markerB);
+
+      // 10. Neither organization can reach the other's resources.
+      expect(
+        (await api.get(`/api/v1/routes/${routeA}`, { headers: orgB.headers })).status(),
+      ).toBe(404);
+      expect(
+        (await api.post(`/api/v1/routes/${routeA}/disable`, { headers: orgB.headers })).status(),
+      ).toBe(404);
+      expect((await api.get(`/api/v1/nodes/${nodeA.id}`, { headers: orgB.headers })).status()).toBe(
+        404,
+      );
+      expect(
+        (await api.get(`/api/v1/domains/${domainA}`, { headers: orgB.headers })).status(),
+      ).toBe(404);
+      expect((await api.get(`/api/v1/routes/${routeB}`, { headers: orgA.headers })).status()).toBe(
+        404,
+      );
+      expect((await api.get(`/api/v1/nodes/${nodeB.id}`, { headers: orgA.headers })).status()).toBe(
+        404,
+      );
+      const orgARoutes = (
+        (await (await api.get("/api/v1/routes", { headers: orgA.headers })).json()) as {
+          items: { id: string }[];
+        }
+      ).items.map((row) => row.id);
+      const orgBRoutes = (
+        (await (await api.get("/api/v1/routes", { headers: orgB.headers })).json()) as {
+          items: { id: string }[];
+        }
+      ).items.map((row) => row.id);
+      expect(orgARoutes).toContain(routeA);
+      expect(orgARoutes).not.toContain(routeB);
+      expect(orgBRoutes).toContain(routeB);
+      expect(orgBRoutes).not.toContain(routeA);
+    } finally {
+      const teardown: Array<[Tenant | null, string]> = [
+        [orgB, routeB],
+        [orgA, routeA],
+      ];
+      for (const [tenant, route] of teardown) {
+        if (tenant && route) {
+          await api.delete(`/api/v1/routes/${route}`, { headers: tenant.headers }).catch(() => undefined);
+        }
+      }
+      const domains: Array<[Tenant | null, string | null]> = [
+        [orgB, domainB],
+        [orgA, domainA],
+      ];
+      for (const [tenant, domain] of domains) {
+        if (tenant && domain) {
+          await api
+            .delete(`/api/v1/domains/${domain}`, { headers: tenant.headers })
+            .catch(() => undefined);
+        }
+      }
+      await dnsClear(recordName).catch(() => undefined);
+      for (const container of [nodeAContainer, nodeBContainer]) {
+        try {
+          docker(["unpause", container]);
+        } catch {
+          /* not paused, or already gone */
+        }
+        try {
+          docker(["rm", "-f", container]);
+        } catch {
+          /* already gone */
+        }
+      }
+      for (const app of [appA, appB]) {
+        try {
+          docker(["rm", "-f", app]);
+        } catch {
+          /* already gone */
+        }
+      }
+      for (const [tenant, node] of [
+        [orgB, nodeB],
+        [orgA, nodeA],
+      ] as Array<[Tenant | null, NodeHarness | null]>) {
+        if (tenant && node) {
+          await api.delete(`/api/v1/nodes/${node.id}`, { headers: tenant.headers }).catch(() => undefined);
+        }
+      }
+    }
+  });
 });
+
+

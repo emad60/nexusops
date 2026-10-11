@@ -1464,9 +1464,9 @@
     "semantic_hash": "82efb97a359f5c7290bf2513d14686be"
   },
   "README.md": {
-    "mtime": 1791754655.1977668,
-    "seen": 1791755738.2246509,
-    "ast_hash": "1032bae29dda333882f6be2328f4a3c3",
+    "mtime": 1791761653.1513796,
+    "seen": 1791761773.4552383,
+    "ast_hash": "b651f8176e04cad6cc79d45cb21897ef",
     "semantic_hash": ""
   },
   "docker-compose.dev.yml": {
@@ -1500,9 +1500,9 @@
     "semantic_hash": ""
   },
   "docs/architecture.md": {
-    "mtime": 1791754668.509766,
-    "seen": 1791755738.224659,
-    "ast_hash": "754abba05e19f05923c059b1c7196e45",
+    "mtime": 1791761657.1373794,
+    "seen": 1791761773.4552457,
+    "ast_hash": "394f346469285d8169203a0cdeac35c9",
     "semantic_hash": ""
   },
   "docs/deployment.md": {
@@ -1560,15 +1560,15 @@
     "semantic_hash": ""
   },
   "docs/authorization.md": {
-    "mtime": 1791756404.64567,
-    "seen": 1791760464.56047,
-    "ast_hash": "fcfd98b22c0995af4d99e30def165e10",
+    "mtime": 1791761665.239379,
+    "seen": 1791761773.4552472,
+    "ast_hash": "1346ac0eba4d105b8277f31a0a7f6ab1",
     "semantic_hash": ""
   },
   "docs/certificate-management.md": {
-    "mtime": 1791756389.4536707,
-    "seen": 1791760464.5604708,
-    "ast_hash": "60fdb4e218573be043231d1a20b38f22",
+    "mtime": 1791761697.942377,
+    "seen": 1791761773.455248,
+    "ast_hash": "776c9fae1bdcbc16540ee5aba772917d",
     "semantic_hash": ""
   },
   "docs/deployment-architecture.md": {
@@ -1578,15 +1578,15 @@
     "semantic_hash": ""
   },
   "docs/domain-model.md": {
-    "mtime": 1791658966.443596,
-    "seen": 1791661929.3423285,
-    "ast_hash": "e4894b097a8afbce71de4cc6b41ec36c",
+    "mtime": 1791761679.0473783,
+    "seen": 1791761773.4552522,
+    "ast_hash": "ca730e354b5beb7f182becdb8cfc0e6b",
     "semantic_hash": ""
   },
   "docs/domain-routing.md": {
-    "mtime": 1791755632.4617126,
-    "seen": 1791755738.2246664,
-    "ast_hash": "779b60fba789b31557259602096ab40c",
+    "mtime": 1791761702.160377,
+    "seen": 1791761773.4552534,
+    "ast_hash": "df3fd93c0c6d2acf64030b2d9d6654bd",
     "semantic_hash": ""
   },
   "docs/multi-tenancy.md": {
@@ -1602,9 +1602,9 @@
     "semantic_hash": ""
   },
   "docs/platform-security-model.md": {
-    "mtime": 1791755614.0357137,
-    "seen": 1791755738.2246735,
-    "ast_hash": "1bf55ebab5e5bc64dccf455ccaac31ba",
+    "mtime": 1791761642.2423801,
+    "seen": 1791761773.455259,
+    "ast_hash": "b677e4cf511fed78c8370460b7245dac",
     "semantic_hash": ""
   },
   "docs/platform-vision.md": {
@@ -1614,15 +1614,15 @@
     "semantic_hash": ""
   },
   "docs/product-roadmap.md": {
-    "mtime": 1791742097.3285902,
-    "seen": 1791744723.924626,
-    "ast_hash": "5a9ce81f72f3678f0a9961a0a6faf1a1",
+    "mtime": 1791761633.4423807,
+    "seen": 1791761773.455261,
+    "ast_hash": "d0b16d37de1bfdbcb77fa1d0d6e25e6e",
     "semantic_hash": ""
   },
   "docs/secrets-architecture.md": {
-    "mtime": 1791754646.3927672,
-    "seen": 1791755738.2246764,
-    "ast_hash": "166338c8baf35c178261f9f7144cf97f",
+    "mtime": 1791761670.6923788,
+    "seen": 1791761773.4552617,
+    "ast_hash": "7705a5a3660750f3c217a01d85e43cc4",
     "semantic_hash": ""
   },
   ".claude/workflows/nexusops-challenge.mjs": {
@@ -2160,9 +2160,9 @@
     "semantic_hash": ""
   },
   "docs/phase5-design.md": {
-    "mtime": 1791756455.3736672,
-    "seen": 1791760464.560481,
-    "ast_hash": "5ddca1c74074e43d9e5e7f0e70453f34",
+    "mtime": 1791761736.782375,
+    "seen": 1791761773.4552581,
+    "ast_hash": "41fda3880f05b3b35c6d3ee446d83f90",
     "semantic_hash": ""
   },
   "backend/alembic/versions/20261012_1200-c8d9e0f1a2b3_phase5_certificate_metadata.py": {

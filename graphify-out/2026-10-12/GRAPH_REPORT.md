@@ -1,44 +1,44 @@
 # Graph Report - nexusops  (2026-10-12)
 
 ## Corpus Check
-- 355 files · ~391,238 words
+- 364 files · ~407,491 words
 - Verdict: corpus is large enough that graph structure adds value.
 - Unclassified: 18 file(s) not represented in the graph (top: (none) 10, .example 1, .service 1)
 
 ## Summary
-- 5935 nodes · 17416 edges · 238 communities (213 shown, 25 thin omitted)
-- Extraction: 92% EXTRACTED · 8% INFERRED · 0% AMBIGUOUS · INFERRED: 1417 edges (avg confidence: 0.94)
+- 6203 nodes · 18225 edges · 239 communities (219 shown, 20 thin omitted)
+- Extraction: 92% EXTRACTED · 8% INFERRED · 0% AMBIGUOUS · INFERRED: 1481 edges (avg confidence: 0.94)
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `9554e2cd`
+- Built from commit: `37b7211e`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
 ## Community Hubs (Navigation)
 - apiGet
-- AuthContext
+- test_certificates.py
 - ApiKeysPage.tsx
 - _proxy_ready_node
-- container_service.py
-- types.ts
+- DockerProviderError
+- toast.tsx
 - resolve_client_ip
 - OperationType
 - App.tsx
 - test_agent_v2.py
 - assert_error_code
 - ServerDetailPage.tsx
-- events.py
+- test_event_registry.py
 - client.ts
-- projects.py
-- models/__init__.py
+- project_service.py
+- certificate_service.py
 - deployment_engine.py
 - SimulatedDockerProvider
 - enrollment_service.py
-- v1/secrets.py
+- rollback_secret
 - test_deployments_simulated.py
-- containers.py
-- dashboard_summary
+- list_containers
+- metrics.py
 - test_security.py
 - Domain Routing — NexusOps
 - monitor_service.py
@@ -46,30 +46,30 @@
 - test_agent_backoff.py
 - SimulatedDeploymentRunner
 - nexusops_agent.py
-- apply_scope_to_session
-- auth_service.py
-- docker_host_service.py
-- test_rate_limit.py
+- integration/conftest.py
+- seed.py
+- create_host
+- rate_limit.py
 - docker_hosts.py
-- test_ws_hub.py
+- hub.py
 - schemas/proxy.py
 - v1/search.py
-- sqlalchemy
+- models/__init__.py
 - v1/channels.py
 - DockerProvider
 - test_monitor_transport.py
-- Deployment Architecture — NexusOps (target state)
+- StepFailure
 - AuthContext.tsx
 - v1/health.py
 - test_permissions.py
 - routes.py
 - test_phase3_nodes.py
 - test_ssrf.py
-- secret_service.py
-- role_service.py
-- DbDep
+- NotFound
+- roles.py
+- record
 - proxy_service.py
-- test_migration_phase21.py
+- pytest
 - v1/auth.py
 - test_agent_nginx_contract.py
 - create_user
@@ -78,56 +78,56 @@
 - helpers.py
 - compilerOptions
 - v1/deployments.py
-- register_exception_handlers
+- test_error_logging.py
 - dns_verifier.py
 - test_phase2_environments.py
 - route_service.py
 - test_schema_redaction.py
-- deps.py
-- Certificate Management — NexusOps
-- package.json
-- core/tenancy.py
+- enums.py
 - decrypt_str
+- package.json
+- TenancyScopeError
+- test_secrets.py
 - test_nginx_renderer.py
 - domain_service.py
 - api service (FastAPI / uvicorn :8000)
 - monitors.py
-- pagination.py
+- deps.py
 - domains.py
-- EventLevel
+- incident_service.py
 - test_phase2_secrets.py
 - RolesPage.tsx
 - test_schemas_server.py
 - canonicalize_name
 - tests/conftest.py
-- list_servers
+- _resolve_tags
 - create_user
 - devDependencies
-- NotFound
-- enums.py
+- Conflict
+- test_certificate_lifecycle.py
 - Settings
-- domain_routing.py
+- _release_competing_claim
 - validate_config
-- PageParams
-- org_scope
+- alerts.py
+- get_sessionmaker
 - test_phase21_secret_version_integrity.py
-- AsyncSession
+- Server
 - NexusOps (self-hosted infrastructure management and monitoring platform)
 - REST API surface (/api/v1)
 - journey.spec.ts
-- enqueue.py
+- Layout.tsx
 - redact_mapping
-- README.md - NexusOps overview
+- certificates.py
 - organization.py
 - _mutate_in_system_scope
 - test_migration_phase4.py
 - redis service (Redis 7, no persistence, loopback :6390)
 - NexusOps agent (stdlib-only Python, agent/nexusops_agent.py)
-- LoginPage.tsx
-- docker_real.py
+- _rows
+- RealDockerProvider
 - Opt-in seeding and one-time admin password (NEXUSOPS_ALLOW_SEED, ENVIRONMENT=test)
 - ScopedSession
-- publish
+- update_organization
 - Phase 5 — HTTPS, Certificates and Private-Key Delivery — Design
 - dnsmock.py
 - scripts
@@ -135,11 +135,11 @@
 - test_tenancy_allowlist.py
 - _alembic_config
 - dependencies
-- @tanstack/react-query
+- DeploymentDetailPage.tsx
 - generate_secrets.sh
 - ControlHandler
 - test_tenant_isolation.py
-- pytest
+- _exec
 - middleware.py
 - OperationError
 - list_operations
@@ -147,7 +147,7 @@
 - install.sh
 - docker-entrypoint.sh
 - integration/__init__.py
-- AuditLogPage.test.tsx
+- EnvironmentDetailPage.tsx
 - CLAUDE.md - project graphify rules
 - Graphify query workflow (query / path / explain / update)
 - frontend/index.html - SPA shell
@@ -160,9 +160,9 @@
 - nexusops-understand.mjs
 - Invisible account lockout (5 fails -> 15 min, enumeration resistance)
 - nginx_capability
-- DockerHostsPage.test.tsx
+- types.ts
 - nexusops-draft.mjs
-- notification_sender.py
+- NotificationError
 - nexusops-challenge.mjs
 - Secrets Architecture
 - test_schemas_agent.py
@@ -170,105 +170,106 @@
 - build_capabilities
 - alert_service.py
 - decide
-- resolve_secrets_for_environment
+- AlertsPage.tsx
 - AgentClient
-- client_ip
+- certificate_lifecycle.py
 - nginx.py
-- resolve_auth
-- Container
+- AuthContext
+- DashboardPage.tsx
 - test_a_late_result_for_an_expired_operation_cannot_fail_a_live_route
 - test_agent_contract.py
-- 20261009_1000-c3d4e5f6a7b8_enforce_secret_version_integrity.py
-- docs/engineering-report.md - build and verification report
-- 2. Entities
+- StepLine
+- docker_real.py
+- container.py
 - create_api_key
-- scope_matches
+- config.py
 - Platform Security Model — NexusOps
-- ContainerListPage.test.tsx
+- docker_sim.py
 - list_sessions
 - _node_proxy_state
-- websocket_endpoint
+- router.py
 - _nginx_apply
 - _nginx_bootstrap
-- .bundle_id
+- channel.py
 - create_api_key
-- UpstreamContainerOut
-- maintenance.py
+- 20261012_1200-c8d9e0f1a2b3_phase5_certificate_metadata.py
+- run_async
 - test_migration_drift.py
 - instant_pacing
 - phase3.spec.ts
-- _heartbeat
-- Path
-- 20261010_1200-f4a5b6c7d8e9_phase4_domains_and_routes.py
+- server.py
+- test_migration_phase3.py
+- get_settings
 - 10. Implementation slices, acceptance criteria, tests, limitations
-- NexusOps — Phase 1 (Multi-Tenancy) Report
-- list_audit_logs
-- RouteHeader
-- 20261008_1200-b2c3d4e5f6a7_add_projects_and_environments.py
-- Product Roadmap — NexusOps Multi-Tenant Platform
-- Platform Vision — NexusOps
-- ServerOut
+- test_ws_hub.py
+- get_host
+- list_docker_hosts
+- main.py
+- README.md - NexusOps overview
+- CertificateStatus
+- _validate_resolution
 - NotificationChannel
-- run_async
+- test_tasks_util.py
 - ProxyProvider
-- ._shallow_validate
-- .dispatch
+- create_docker_host
+- ContainerInfo
 - test_agent_ingestion.py
 - .__init__
 - _live_bundle_id
 - Multi-Tenancy Architecture
-- .__tablename__
-- create_server
+- DockerHostCreate
+- test_schemas_search.py
 - test_notifications.py
 - _FakeAsyncClient
-- test_migration_phase22.py
+- _provider_inventory
 - 9. Renewal, expiration, ownership loss, removal, revocation
-- client_ip.py
+- ssrf.py
 - _verified_domain
-- redact_log_event
-- Domain Model — NexusOps as a Multi-Tenant Platform
-- permissions.py
-- .facts
+- 1. Scope and current state
+- update_channel
+- test_app_gating.py
+- register_exception_handlers
 - .apply_params
-- test_capability_report_shape_is_accepted
-- VerificationDecision
-- register_agent_hello
-- servers.py
-- _run
-- asyncio
-- test_created_at_defaults.py
-- 20261009_1300-a1b2c3d4e5f6_add_phase3_nodes_and_agent_v2.py
-- test_remove_honours_force_and_never_shells
-- require_permission
-- _is_sensitive_key
-- get_meta
-- .ok
-- v1/agent.py
-- test_configure_logging_installs_redaction_on_every_logging_path
+- 5. ACME issuance and DNS-01 handling
+- InvalidTransition
+- 20261009_1100-d4e5f6a7b8c9_correct_legacy_environment_types.py
+- DeploymentRunner
+- 20260923_1000-c4e2a1f7b9d3_rename_server_codenames_to_node.py
+- test_run_async_publishes_frames_scheduled_by_the_commit_hook
+- _dns_stub
+- redis_down
+- lax
+- 4. DNS ownership verification
+- update_docker_host
+- v1/meta.py
+- _pace
+- 7. Secure delivery of certificate material to authorized nodes
+- 9. Phase 6 — Real deployments — **proposal, not implemented**
+- redact_log_event
 
 ## God Nodes (most connected - your core abstractions)
-1. `AuthContext` - 156 edges
-2. `APIModel` - 145 edges
+1. `AuthContext` - 162 edges
+2. `APIModel` - 148 edges
 3. `Server` - 93 edges
-4. `apiGet()` - 91 edges
-5. `record()` - 90 edges
-6. `NotFound` - 84 edges
-7. `get_settings()` - 82 edges
-8. `publish()` - 71 edges
-9. `Conflict` - 70 edges
-10. `apiPost()` - 70 edges
+4. `record()` - 93 edges
+5. `apiGet()` - 91 edges
+6. `NotFound` - 87 edges
+7. `get_settings()` - 84 edges
+8. `Conflict` - 73 edges
+9. `publish()` - 73 edges
+10. `assert_error_code()` - 70 edges
 
 ## Surprising Connections (you probably didn't know these)
 - `2. Org resolution on every request` --references--> `resolve_auth()`  [INFERRED]
   docs/multi-tenancy.md → backend/app/api/deps.py
 - `3. Cross-cutting decisions` --references--> `require_permission()`  [INFERRED]
   docs/domain-model.md → backend/app/api/deps.py
-- `7. The IDOR suite` --references--> `_search_users()`  [INFERRED]
-  docs/multi-tenancy.md → backend/app/api/v1/search.py
-- `3.2 Route` --references--> `rate_limit()`  [INFERRED]
-  docs/domain-routing.md → backend/app/core/rate_limit.py
-- `6.2 The allowlist (the injection defense)` --references--> `rate_limit()`  [INFERRED]
-  docs/domain-routing.md → backend/app/core/rate_limit.py
+- `10. Phase 7 — Teams, grants & custom roles — **proposal, not implemented**` --references--> `require_permission()`  [INFERRED]
+  docs/product-roadmap.md → backend/app/api/deps.py
+- `7.2 The mechanism: reference-only op + material in the claim response` --references--> `require_server()`  [INFERRED]
+  docs/phase5-design.md → backend/app/api/v1/agent.py
+- `7.3 Authorization binding` --references--> `require_server()`  [INFERRED]
+  docs/phase5-design.md → backend/app/api/v1/agent.py
 
 ## Import Cycles
 - None detected.
@@ -278,323 +279,323 @@
 - **NexusOps compose stack services** — docker_compose_yml_nexusops_stack, docker_compose_yml_postgres_service, docker_compose_yml_redis_service, docker_compose_yml_mailpit_service, docker_compose_yml_api_service, docker_compose_yml_worker_service, docker_compose_yml_scheduler_service, docker_compose_yml_frontend_service, docker_compose_yml_nginx_service [EXTRACTED 1.00]
 - **WebSocket real-time fan-out spine** — docs_architecture_md_websocket_hub, docs_api_md_websocket_channels, docker_compose_yml_redis_service, docs_architecture_md_event_bus, readme_react_spa [INFERRED 0.85]
 
-## Communities (238 total, 25 thin omitted)
+## Communities (239 total, 20 thin omitted)
 
 ### Community 0 - "apiGet"
 Cohesion: 0.06
-Nodes (90): apiDelete(), apiGet(), apiPatch(), apiPost(), ApplicationOut, ENVIRONMENT_TYPE_LABELS, EnvironmentType, IncidentEventOut (+82 more)
+Nodes (73): apiDelete(), apiGet(), apiPost(), IncidentEventOut, IncidentDetailPage, useAuth(), errorMessage(), RotateSecretValueForm() (+65 more)
 
-### Community 1 - "AuthContext"
-Cohesion: 0.11
-Nodes (53): AuthContext, Resolved identity plus the organization this request acts in.…, DeploymentEnvironment, A **project-scoped** deployment environment (Phase 2 promotion). The…, Any, AsyncSession, Request, UUID (+45 more)
+### Community 1 - "test_certificates.py"
+Cohesion: 0.08
+Nodes (55): _app_role_dsn(), _audits(), _certificate_rows(), _create_domain(), _created_certificate(), _dns_stub(), _events(), _fake_observe() (+47 more)
 
 ### Community 2 - "ApiKeysPage.tsx"
 Cohesion: 0.09
 Nodes (19): ApiKeyOut, ApiKeysPage, ApiKeyCreatedOut, handleCopyKey(), copyText(), describeError(), EMPTY_FORM, GROUP_STYLE (+11 more)
 
 ### Community 3 - "_proxy_ready_node"
+Cohesion: 0.12
+Nodes (33): _create_route(), _drain(), _proxy_ready_node(), A node that stays offline accumulates one op, not one per attempt., The auto-attached monitor stays on the check → incident → notification path., The old owner's node is told to drop the name, and says when it has., The reconciler does not turn a healthy node into a status-poll loop., Claim and answer every pending operation, exactly like the agent would.… (+25 more)
+
+### Community 4 - "DockerProviderError"
 Cohesion: 0.13
-Nodes (30): _create_route(), _drain(), _proxy_ready_node(), A node that stays offline accumulates one op, not one per attempt., The auto-attached monitor stays on the check → incident → notification path., The old owner's node is told to drop the name, and says when it has., The reconciler does not turn a healthy node into a status-poll loop., Claim and answer every pending operation, exactly like the agent would.… (+22 more)
+Nodes (12): clip(), DockerProviderError, Exception, Provider abstraction for docker hosts (real daemon or simulated). Providers are…, A provider operation failed. ``str()`` is safe to show/log., Build a compact, secret-free description of a provider failure. Only the…, Truncate *text* to *limit* characters, stripping control chars., sanitize_error() (+4 more)
 
-### Community 4 - "container_service.py"
-Cohesion: 0.09
-Nodes (44): ContainerHealth, clip(), DockerProviderError, Exception, Provider abstraction for docker hosts (real daemon or simulated). Providers are…, A provider operation failed. ``str()`` is safe to show/log., Build a compact, secret-free description of a provider failure. Only the…, Truncate *text* to *limit* characters, stripping control chars. (+36 more)
-
-### Community 5 - "types.ts"
-Cohesion: 0.02
-Nodes (87): AlertOut, CapabilityReport, ChannelOut, CheckOut, DeliveryOut, DeploymentLogLine, DeploymentStatus, DomainDetailOut (+79 more)
+### Community 5 - "toast.tsx"
+Cohesion: 0.03
+Nodes (58): CheckOut, IncidentOut, MonitorOut, SessionInfo, SimulatedChip(), mocks, Toast, TOAST_ARIA_LABEL (+50 more)
 
 ### Community 6 - "resolve_client_ip"
-Cohesion: 0.28
-Nodes (15): Request, Real client address for *request* per the trust model above., resolve_client_ip(), make_request(), Request, Unit tests for the chained-proxy client-IP resolver (app/core/client_ip.py)., test_all_trusted_entries_fall_back_to_peer(), test_empty_header_value_falls_back_to_peer() (+7 more)
+Cohesion: 0.17
+Nodes (22): _is_trusted(), _parse_networks(), Request, Client-IP resolution behind chained reverse proxies. The API never takes TCP…, Parse a comma-separated CIDR list; malformed entries are skipped., Real client address for *request* per the trust model above., resolve_client_ip(), make_request() (+14 more)
 
 ### Community 7 - "OperationType"
-Cohesion: 0.10
-Nodes (23): OperationType, The whitelist. Nothing outside this enum ships as an exec surface. Each type…, Any, Validate *params* against the type's model and return the stored form.…, validate_params(), Raise a named conflict when routing may not be managed on this node., require_eligible(), MonkeyPatch (+15 more)
+Cohesion: 0.11
+Nodes (22): OperationType, The whitelist. Nothing outside this enum ships as an exec surface. Each type…, Any, Validate *params* against the type's model and return the stored form.…, validate_params(), Raise a named conflict when routing may not be managed on this node., require_eligible(), MonkeyPatch (+14 more)
 
 ### Community 8 - "App.tsx"
 Cohesion: 0.04
-Nodes (103): DeploymentOut, Page, ProjectOut, AlertsPage, App(), AuditLogPage, ContainerListPage, DeploymentListPage (+95 more)
+Nodes (100): EnvironmentOut, Page, ProjectOut, SecretRow, App(), AuditLogPage, ContainerListPage, DeploymentListPage (+92 more)
 
 ### Community 9 - "test_agent_v2.py"
-Cohesion: 0.09
-Nodes (33): agent_fixture(), _load_agent(), Any, fixture, parametrize, Agent protocol v2: honest metrics, capability detection, and the executor. The…, Phase 4 shipped three nginx ops — no file primitive, no command primitive., Trusting a private CA must not weaken verification. (+25 more)
+Cohesion: 0.06
+Nodes (51): agent_fixture(), _load_agent(), Any, fixture, parametrize, Path, Agent protocol v2: honest metrics, capability detection, and the executor. The…, Phase 4 shipped three nginx ops — no file primitive, no command primitive. (+43 more)
 
 ### Community 10 - "assert_error_code"
 Cohesion: 0.07
-Nodes (59): Run the enclosed block with tenant filtering off (maintenance only). ``reason``…, system_scope(), assert_error_code(), Assert envelope shape + code; returns the inner error object., Regression: lockout must not leak which emails exist. After login_max_attempts…, test_locked_account_response_is_indistinguishable(), _dispatch(), _dispatch_body() (+51 more)
+Nodes (59): OperationStatus, Lifecycle of one node operation (node-agent-architecture.md §5.1).…, expire_operations(), Expire node operations past their deadline — pending and claimed alike. A…, assert_error_code(), Assert envelope shape + code; returns the inner error object., _dispatch(), _dispatch_body() (+51 more)
 
 ### Community 11 - "ServerDetailPage.tsx"
-Cohesion: 0.06
-Nodes (42): ContainerOut, MetricPoint, ServerDetail, ServerSummary, ChartSeries, LineChart(), LineChartProps, PAD (+34 more)
+Cohesion: 0.08
+Nodes (33): EnrollmentTokenCreated, EnrollmentTokenItem, MetricPoint, OperationItem, OperationType, ServerDetailPage, ServerListPage, ChartSeries (+25 more)
 
-### Community 12 - "events.py"
-Cohesion: 0.11
-Nodes (22): _decode_cursor(), _encode_cursor(), list_event_types(), list_events(), datetime, DbSession, Depends, get (+14 more)
+### Community 12 - "test_event_registry.py"
+Cohesion: 0.21
+Nodes (8): event_type_catalogue(), is_known_event_type(), Canonical registry of system-event types. Single source of truth shared by…, Return True when *event_type* is part of the canonical registry., Serialise the registry for the ``/events/types`` endpoint., Registry coherence: schema-advertised event types must equal the canonical…, test_catalogue_serialises_every_entry(), test_known_event_lookup()
 
 ### Community 13 - "client.ts"
 Cohesion: 0.05
-Nodes (54): API_BASE, ApiError, apiRequest(), buildUrl(), extractError(), getAccessToken(), getActiveOrgId(), onActiveOrgChange() (+46 more)
+Nodes (52): API_BASE, ApiError, apiRequest(), buildUrl(), extractError(), getAccessToken(), getActiveOrgId(), onActiveOrgChange() (+44 more)
 
-### Community 14 - "projects.py"
-Cohesion: 0.08
-Nodes (59): _app_out(), create_application(), create_environment(), create_project(), delete_application(), delete_environment(), delete_project(), get_application() (+51 more)
+### Community 14 - "project_service.py"
+Cohesion: 0.05
+Nodes (110): _app_out(), create_application(), create_environment(), create_project(), delete_application(), delete_environment(), delete_project(), get_application() (+102 more)
 
-### Community 15 - "models/__init__.py"
+### Community 15 - "certificate_service.py"
 Cohesion: 0.10
-Nodes (52): Base, Base for all ORM models with stable constraint naming for Alembic., TimestampMixin, Application, Project, UserStatus, ApiKey, Permission (+44 more)
+Nodes (37): Certificate, One requested certificate: an identity, its lifecycle view, no material., CertificateKeyAlgorithm, The key type generated for a generation. Fixed in v1; never client-chosen., _actor(), all_generations(), _canonical_identifiers(), CertificateMetadata (+29 more)
 
 ### Community 16 - "deployment_engine.py"
 Cohesion: 0.10
-Nodes (60): Queue a new deployment for an application/environment pair., trigger_deployment(), deployment_log_channel(), Deployment, DeploymentStep, DeploymentStatus, DeploymentTrigger, StepStatus (+52 more)
+Nodes (58): deployment_log_channel(), Deployment, DeploymentStep, DeploymentStatus, StepStatus, _after_commit_enqueue(), _after_rollback_drop(), _audit_resolution_failed() (+50 more)
 
 ### Community 17 - "SimulatedDockerProvider"
-Cohesion: 0.08
-Nodes (33): ContainerStatus, Any, datetime, Simulated docker provider for demo and test environments. The provider is…, Plausible numbers derived from the row plus time-based sine noise., Replay registered LogEntry rows ordered by ts (tail N). ``follow`` is ignored…, Implements :class:`DockerProvider` semantics against DB rows., Attach already-fetched log rows so ``logs()`` can replay them. (+25 more)
+Cohesion: 0.13
+Nodes (26): ContainerStatus, Implements :class:`DockerProvider` semantics against DB rows., Make a container row visible to this provider instance., Attach already-fetched log rows so ``logs()`` can replay them., SimulatedDockerProvider, _log_entry(), datetime, Unit tests for the simulated docker provider (in-memory rows, no docker). (+18 more)
 
 ### Community 18 - "enrollment_service.py"
-Cohesion: 0.12
-Nodes (29): generate_enrollment_token(), An enrollment credential (``nxk_``): single-use, short-lived, org-scoped.…, Return the active org id or raise; used by services that need it explicitly., require_org(), EnrollmentToken, One single-use credential that enrolls (or claims) exactly one node., Whether the row could still be redeemed (not a race-safe check)., _claim_and_consume() (+21 more)
+Cohesion: 0.10
+Nodes (33): generate_enrollment_token(), An enrollment credential (``nxk_``): single-use, short-lived, org-scoped.…, Return the active org id or raise; used by services that need it explicitly., require_org(), EnrollmentToken, One single-use credential that enrolls (or claims) exactly one node., Whether the row could still be redeemed (not a race-safe check)., EnrollmentTokenState (+25 more)
 
-### Community 19 - "v1/secrets.py"
-Cohesion: 0.12
-Nodes (32): create_secret(), delete_secret(), get_secret(), list_secret_versions(), list_secrets(), DbSession, delete, get (+24 more)
+### Community 19 - "rollback_secret"
+Cohesion: 0.14
+Nodes (26): create_secret(), delete_secret(), get_secret(), list_secret_versions(), list_secrets(), DbSession, delete, get (+18 more)
 
 ### Community 20 - "test_deployments_simulated.py"
 Cohesion: 0.15
-Nodes (29): execute_deployment(), Run one deployment to a terminal state. Never raises; safe to re-run., get_application(), get_environment(), _as_worker(), _delivery_chain(), _owner_ctx(), _queue() (+21 more)
+Nodes (28): execute_deployment(), Run one deployment to a terminal state. Never raises; safe to re-run., get_environment(), _as_worker(), _delivery_chain(), _owner_ctx(), _queue(), _queued_with_recorder() (+20 more)
 
-### Community 21 - "containers.py"
-Cohesion: 0.06
-Nodes (63): _action_route(), _endpoint(), _container_out(), _decode_frame(), _ev(), get_container(), _like_pattern(), list_container_logs() (+55 more)
+### Community 21 - "list_containers"
+Cohesion: 0.10
+Nodes (35): _action_route(), _endpoint(), _ev(), get_container(), _like_pattern(), list_container_logs(), list_containers(), _load_container() (+27 more)
 
-### Community 22 - "dashboard_summary"
-Cohesion: 0.07
-Nodes (38): get_dashboard_summary(), get_latest_server_metrics(), get_server_metrics(), CurrentUser, DbDep, Depends, get, UUID (+30 more)
+### Community 22 - "metrics.py"
+Cohesion: 0.08
+Nodes (37): get_dashboard_summary(), get_latest_server_metrics(), get_server_metrics(), CurrentUser, DbDep, Depends, get, UUID (+29 more)
 
 ### Community 23 - "test_security.py"
-Cohesion: 0.07
-Nodes (53): argon2, argon2_exceptions, Resolve the caller's identity only (no organization)., _resolve_identity(), Unauthorized, create_access_token(), decode_access_token(), generate_agent_token() (+45 more)
+Cohesion: 0.08
+Nodes (43): argon2, argon2_exceptions, Unauthorized, create_access_token(), decode_access_token(), generate_agent_token(), generate_api_key(), password_needs_rehash() (+35 more)
 
 ### Community 24 - "Domain Routing — NexusOps"
-Cohesion: 0.11
-Nodes (19): 10. Wildcards and catch-all, 11. User journey, 12. API surface, permissions, audit, 13. Monitoring tie-in, 1. Scope and current state, 2. Where nginx runs, 4.1 The token, 4.2 The check (control-plane side) (+11 more)
+Cohesion: 0.10
+Nodes (21): 10. Wildcards and catch-all, 11. User journey, 12. API surface, permissions, audit, 13. Monitoring tie-in, 2. Where nginx runs, 3.1 Domain, 3.2 Route, 3. Entities (per domain-model.md §2.4) (+13 more)
 
 ### Community 25 - "monitor_service.py"
-Cohesion: 0.08
-Nodes (57): AppError, BadRequest, Exception, Base class for expected, client-facing errors., assert_safe_url_async(), is_simulation_url(), SSRF guard applied to every operator-supplied outbound URL. Monitors and…, Async wrapper around :func:`assert_safe_url`; DNS runs off the loop. (+49 more)
+Cohesion: 0.13
+Nodes (38): BadRequest, MonitorCheck, Drop the query string so signed tokens never appear in error text., Public alias: redact any query string from a URL before display/persist., strip_query(), _active_incident(), _audit(), claim_due_monitors() (+30 more)
 
 ### Community 26 - "Node & Agent Architecture"
-Cohesion: 0.09
-Nodes (22): install_hint(), The one-liner an operator pastes, without the raw token in argv. The token…, 1. Scope and stance, 3.2 Enrollment v2, 3.3 Token storage & rotation with dual-token grace, 3.4 Revocation semantics — fixing the 401 hot-loop, 3.5 Reconnect / offline states, 3. Agent lifecycle (+14 more)
+Cohesion: 0.08
+Nodes (26): install_hint(), The one-liner an operator pastes, without the raw token in argv. The token…, 1. Scope and stance, 3.2 Enrollment v2, 3.3 Token storage & rotation with dual-token grace, 3.4 Revocation semantics — fixing the 401 hot-loop, 3.5 Reconnect / offline states, 3. Agent lifecycle (+18 more)
 
 ### Community 27 - "test_agent_backoff.py"
-Cohesion: 0.14
-Nodes (22): agent_fixture(), _install_sleep(), fake_sleep(), _load_agent(), _patch_host(), Any, fixture, MonkeyPatch (+14 more)
+Cohesion: 0.15
+Nodes (21): agent_fixture(), _install_sleep(), fake_sleep(), _load_agent(), _patch_host(), Any, fixture, MonkeyPatch (+13 more)
 
 ### Community 28 - "SimulatedDeploymentRunner"
-Cohesion: 0.11
-Nodes (41): LogLevel, _commit_short(), _pace(), Exception, Deployment runner port plus a faithful simulated implementation.…, Stream output lines for *step_name*; raise StepFailure to fail it., Staged docker-style simulation used by v1 deployments., Deterministic per-line delay between 0.05s and 0.35s. (+33 more)
+Cohesion: 0.25
+Nodes (23): Staged docker-style simulation used by v1 deployments., Canonical step identifiers stored on :class:`DeploymentStep` rows., SimulatedDeploymentRunner, StepName, _collect(), _ctx(), Unit tests for SimulatedDeploymentRunner (async generators, no broker)., RESOLVE_CONFIG is planned by the engine, not produced by a runner. (+15 more)
 
 ### Community 29 - "nexusops_agent.py"
 Cohesion: 0.08
 Nodes (37): build_facts(), build_heartbeat(), _build_hello_payload(), cpu_percent_since(), disk_stats(), _enroll(), _interruptible_sleep(), load1() (+29 more)
 
-### Community 30 - "apply_scope_to_session"
-Cohesion: 0.07
-Nodes (46): dispose_engine(), get_sessionmaker(), async_sessionmaker, AsyncSession, apply_scope_to_session(), Push the current scope onto *db*'s connection immediately. Needed only when a…, _admin_dsn(), _clean_slate() (+38 more)
+### Community 30 - "integration/conftest.py"
+Cohesion: 0.12
+Nodes (25): _admin_dsn(), _clean_slate(), client(), _ensure_database(), _migrated_database(), org_db(), owner(), AsyncClient (+17 more)
 
-### Community 31 - "auth_service.py"
-Cohesion: 0.10
-Nodes (48): active_memberships(), The user's memberships in non-suspended organizations, oldest first. Reads only…, System scope bound to *db*, for rows that have no organization. Used by exactly…, system_write_scope(), AuditResult, _audit(), _auth_event_scope(), _bootstrap_organization() (+40 more)
+### Community 31 - "seed.py"
+Cohesion: 0.05
+Nodes (91): active_memberships(), The user's memberships in non-suspended organizations, oldest first. Reads only…, encrypt_str(), generate_refresh_token(), hash_password(), hash_token(), Return ``(raw_token, sha256_hex_hash)``., apply_scope_to_session() (+83 more)
 
-### Community 32 - "docker_host_service.py"
-Cohesion: 0.13
-Nodes (35): paginate(), AsyncSession, Execute *stmt* with limit/offset and return ``(rows, total)``., DockerHostStatus, DockerHost, _assert_endpoint_allowed(), _assert_name_free(), create_host() (+27 more)
+### Community 32 - "create_host"
+Cohesion: 0.22
+Nodes (15): _assert_endpoint_allowed(), _assert_name_free(), create_host(), endpoint_scheme(), ping_host(), AsyncSession, Request, UUID (+7 more)
 
-### Community 33 - "test_rate_limit.py"
-Cohesion: 0.18
-Nodes (16): RateLimited, _memory_count_and_ttl(), rate_limit(), Fixed-window counter backed by process memory. Returns (count, ttl)., Return a dependency enforcing *limit* requests per window per IP. With…, _clean_memory_windows(), _FakeRequest, fixture (+8 more)
+### Community 33 - "rate_limit.py"
+Cohesion: 0.17
+Nodes (20): RateLimited, _enforce(), _memory_count_and_ttl(), node_rate_limit(), _dependency(), Request, rate_limit(), _dependency() (+12 more)
 
 ### Community 34 - "docker_hosts.py"
-Cohesion: 0.07
-Nodes (55): create_docker_host(), delete_docker_host(), get_docker_host(), list_docker_hosts(), list_host_images(), list_host_networks(), list_host_volumes(), ping_docker_host() (+47 more)
+Cohesion: 0.27
+Nodes (12): Docker host API: CRUD, ping and provider-backed inventory reads. Permission…, DockerHostPingOut, DockerImageOut, DockerNetworkOut, DockerVolumeOut, image_out(), network_out(), Any (+4 more)
 
-### Community 35 - "test_ws_hub.py"
-Cohesion: 0.06
-Nodes (57): _authenticate_api_key(), _authenticate_jwt(), _bind_organization(), _close_socket(), Connection, _frame_org(), Hub, _load_permissions() (+49 more)
+### Community 35 - "hub.py"
+Cohesion: 0.08
+Nodes (40): membership_for_org(), Membership, The user's active membership in *org_id*, if any. This single indexed read is…, AppError, Exception, Base class for expected, client-facing errors., _authenticate_api_key(), _authenticate_jwt() (+32 more)
 
 ### Community 36 - "schemas/proxy.py"
-Cohesion: 0.11
-Nodes (25): bundle_summary(), BundleFile, fingerprint_files(), is_allowed_bundle_path(), NginxBootstrapParams, NginxBundle, NginxStatusParams, Any (+17 more)
+Cohesion: 0.07
+Nodes (31): bundle_summary(), BundleFile, fingerprint_files(), is_allowed_bundle_path(), NginxApplyParams, NginxBundle, Any, field_validator (+23 more)
 
 ### Community 37 - "v1/search.py"
-Cohesion: 0.12
-Nodes (32): _hit(), AsyncSession, CurrentUser, DbSessionDep, get, max_length, min_length, Query (+24 more)
+Cohesion: 0.18
+Nodes (23): _hit(), AsyncSession, CurrentUser, DbSessionDep, get, max_length, min_length, Query (+15 more)
 
-### Community 38 - "sqlalchemy"
-Cohesion: 0.10
-Nodes (34): big_serial_pk(), json_column(), org_id_column(), OrgScoped, datetime, UUID, Declarative base, shared mixins and column helpers., Identity PK for very high-volume tables (metrics, logs). (+26 more)
+### Community 38 - "models/__init__.py"
+Cohesion: 0.07
+Nodes (71): _org_scoped_classes(), org_scoped_table_names(), Mapped classes marked :class:`~app.models.base.OrgScoped`. Reads the mapper…, Names of the tables the guard and RLS are expected to cover., Base, big_serial_pk(), json_column(), org_id_column() (+63 more)
 
 ### Community 39 - "v1/channels.py"
-Cohesion: 0.10
-Nodes (40): create_channel(), delete_channel(), get_channel(), list_channels(), list_deliveries(), DbDep, delete, Depends (+32 more)
+Cohesion: 0.15
+Nodes (28): create_channel(), delete_channel(), get_channel(), list_channels(), list_deliveries(), DbDep, delete, Depends (+20 more)
 
 ### Community 40 - "DockerProvider"
-Cohesion: 0.09
-Nodes (12): DockerProvider, Any, datetime, Protocol, List containers visible to the provider., Inspect a single container by id (short ids allowed)., List images: keys ``id``, ``repo_tags``, ``size_bytes``, ``architecture``., List volumes: keys ``name``, ``driver``, ``mountpoint``. (+4 more)
+Cohesion: 0.10
+Nodes (10): DockerProvider, Any, datetime, Protocol, List images: keys ``id``, ``repo_tags``, ``size_bytes``, ``architecture``., List volumes: keys ``name``, ``driver``, ``mountpoint``., List networks: keys ``name``, ``driver``, ``scope``., Yield parsed log lines. With ``follow=True`` the stream never ends. (+2 more)
 
 ### Community 41 - "test_monitor_transport.py"
-Cohesion: 0.09
-Nodes (47): CheckResult, coerce_headers(), _decode(), HTTPMonitorTransport, Any, BaseException, Pluggable monitor check transports (real HTTP + deterministic simulator). A…, Deterministic fake checker for ``sim://`` monitors and demo environments.… (+39 more)
+Cohesion: 0.07
+Nodes (57): assert_safe_url_async(), Async wrapper around :func:`assert_safe_url`; DNS runs off the loop., CheckResult, Monitor, One probe. Targets are polymorphic since Phase 4 (domain-model.md §2.6).…, CheckOutcome, coerce_headers(), _decode() (+49 more)
 
-### Community 42 - "Deployment Architecture — NexusOps (target state)"
-Cohesion: 0.10
-Nodes (21): DeploymentRunner, Protocol, Adapter interface implemented by real (future) and simulated runners., Return the ordered step names for this run., 10. Events and WS during runs, 12. Rollback semantics (existing behavior kept), 13. The simulated runner stays — labeled, 14. Open questions (+13 more)
+### Community 42 - "StepFailure"
+Cohesion: 0.11
+Nodes (19): Exception, Raised by a runner when a step fails irrecoverably., StepFailure, 10. Events and WS during runs, 12. Rollback semantics (existing behavior kept), 13. The simulated runner stays — labeled, 14. Open questions, 1. Current state — what is real and what is simulated (+11 more)
 
 ### Community 43 - "AuthContext.tsx"
-Cohesion: 0.02
-Nodes (83): Membership, SearchResult, User, AuthContext, AuthProvider(), AuthState, isOrgSelectionError(), MeResponse (+75 more)
+Cohesion: 0.05
+Nodes (32): Membership, User, AuthContext, AuthProvider(), AuthState, isOrgSelectionError(), MeResponse, ORG_SELECTION_FAILURES (+24 more)
 
 ### Community 44 - "v1/health.py"
 Cohesion: 0.20
 Nodes (13): liveness(), get, Response, Health probes: liveness (always cheap) and readiness (checks dependencies).…, Process-level liveness: no dependency checks, always 200 if served., Readiness: database and Redis must answer; 503 with details otherwise., readiness(), HealthOut (+5 more)
 
 ### Community 45 - "test_permissions.py"
-Cohesion: 0.17
-Nodes (9): _auth_context(), Unit tests for the permission registry, scope matching and RBAC gate., A fake context in the given organization. ``membership_status=None`` models a…, test_api_key_scope_intersects_role_permissions(), test_membership_is_required_for_authority(), test_plain_user_without_permissions_is_denied(), test_superadmin_bypasses_everything(), test_superadmin_owned_api_key_is_limited_to_its_scope() (+1 more)
+Cohesion: 0.05
+Nodes (38): permission_exists(), PermissionSpec, Permission registry and role matrix. Permissions are *data*: the registry below…, Check an API-key scope list against a required permission. Supports exact match…, scope_matches(), _auth_context(), _FakeCtx, parametrize (+30 more)
 
 ### Community 46 - "routes.py"
-Cohesion: 0.13
-Nodes (33): create_route(), delete_route(), disable_route(), _domain_status(), enable_route(), get_route(), list_routes(), AsyncSession (+25 more)
+Cohesion: 0.14
+Nodes (32): create_route(), delete_route(), disable_route(), _domain_status(), enable_route(), get_route(), list_routes(), AsyncSession (+24 more)
 
 ### Community 47 - "test_phase3_nodes.py"
-Cohesion: 0.15
-Nodes (33): _create_token(), _dispatch(), _enroll(), _enrolled_node(), _load_agent_module(), _mutate_in_system_scope(), Phase 3 — Nodes & Agent v2 end-to-end behaviour. Grouped by the question each…, Import the shipped agent source (sync, so async tests never touch Path). (+25 more)
+Cohesion: 0.14
+Nodes (35): Run the enclosed block with tenant filtering off (maintenance only). ``reason``…, system_scope(), _create_token(), _dispatch(), _enroll(), _enrolled_node(), _load_agent_module(), _mutate_in_system_scope() (+27 more)
 
 ### Community 48 - "test_ssrf.py"
-Cohesion: 0.08
-Nodes (56): UnprocessableEntity, assert_safe_tcp_endpoint(), assert_safe_url(), _is_forbidden_address(), ValueError, _raise_block(), Validate *url* for outbound requests; return the parsed URL or raise 422.…, Validate a ``tcp://`` docker host endpoint for outbound connection. Docker… (+48 more)
+Cohesion: 0.17
+Nodes (25): assert_safe_tcp_endpoint(), assert_safe_url(), Validate *url* for outbound requests; return the parsed URL or raise 422.…, Validate a ``tcp://`` docker host endpoint for outbound connection. Docker…, install_dns(), Exception, MonkeyPatch, Unit tests for the SSRF guard — fully offline via injected DNS answers. (+17 more)
 
-### Community 49 - "secret_service.py"
+### Community 49 - "NotFound"
 Cohesion: 0.09
-Nodes (51): digest_of(), encrypt_str(), Short server-verifiable digest used for change detection display. HMAC-SHA256…, An encrypted configuration value, scoped to org, project or environment.…, One immutable value of a :class:`Secret` — append-only history. A row is…, Secret, SecretVersion, _actor_type() (+43 more)
+Nodes (51): NotFound, An encrypted configuration value, scoped to org, project or environment.…, Secret, _actor_type(), _collect_refs(), create_secret(), delete_secret(), _detail() (+43 more)
 
-### Community 50 - "role_service.py"
-Cohesion: 0.07
-Nodes (53): create_role(), delete_role(), list_permissions(), list_roles(), CurrentUser, DbSessionDep, delete, get (+45 more)
+### Community 50 - "roles.py"
+Cohesion: 0.06
+Nodes (52): create_role(), delete_role(), list_permissions(), list_roles(), CurrentUser, DbSessionDep, delete, get (+44 more)
 
-### Community 51 - "DbDep"
-Cohesion: 0.10
-Nodes (34): apply_node_proxy_config(), create_server(), delete_server(), node_proxy_status(), node_route_targets(), DbDep, delete, patch (+26 more)
+### Community 51 - "record"
+Cohesion: 0.06
+Nodes (64): apply_node_proxy_config(), create_enrollment_token(), create_server(), delete_server(), _enrollment_created(), _enrollment_out(), get_server(), list_enrollment_tokens() (+56 more)
 
 ### Community 52 - "proxy_service.py"
-Cohesion: 0.06
-Nodes (88): ListenerOwnership, ProxyApplyOutcome, Terminal outcome of one ``nginx.apply`` operation on a node., Who holds one required listener port, per the node's pre-flight. The…, Server, Operation, One whitelisted action for one node, with a CAS lifecycle. ``attempts`` is…, NodeProxyCapabilityOut (+80 more)
+Cohesion: 0.05
+Nodes (96): ListenerOwnership, ProxyApplyOutcome, Last nginx apply outcome for a route, as reported by its node's agent.…, Terminal outcome of one ``nginx.apply`` operation on a node., Who holds one required listener port, per the node's pre-flight. The…, RouteConfigState, NodeProxyCapabilityOut, The node's reported nginx capability, bounded to the useful facts. (+88 more)
 
-### Community 53 - "test_migration_phase21.py"
-Cohesion: 0.22
-Nodes (9): Phase 2.1 corrective migration: legacy ``environment_type`` classification.…, Every case is classified as documented, ids and ownership intact., An explicit non-DEV classification survives the corrective migration. The…, The correction is part of ``head`` and adds no extra Alembic head., Insert one legacy environment per case, in two organizations., _seed_typed_environments(), test_corrective_migration_is_reachable_from_head(), test_corrects_legacy_environment_types() (+1 more)
+### Community 53 - "pytest"
+Cohesion: 0.14
+Nodes (13): created_at server defaults must evaluate per insert, not at table creation., Regression: system_events and audit_logs shipped with DEFAULT 'now()' (quoted…, test_audit_and_event_created_at_defaults_are_dynamic(), Phase 2.1 corrective migration: legacy ``environment_type`` classification.…, Every case is classified as documented, ids and ownership intact., An explicit non-DEV classification survives the corrective migration. The…, The correction is part of ``head`` and adds no extra Alembic head., Insert one legacy environment per case, in two organizations. (+5 more)
 
 ### Community 54 - "v1/auth.py"
-Cohesion: 0.10
-Nodes (40): change_password(), _clear_refresh_cookie(), _cookies_secure(), login(), logout(), me(), _optional_actor(), AsyncSession (+32 more)
+Cohesion: 0.09
+Nodes (49): change_password(), _clear_refresh_cookie(), _cookies_secure(), login(), logout(), me(), _optional_actor(), AsyncSession (+41 more)
 
 ### Community 55 - "test_agent_nginx_contract.py"
-Cohesion: 0.08
-Nodes (53): _agent_bundle(), agent_fixture(), _bootstrap_fixture(), _load_agent(), Any, fixture, parametrize, Path (+45 more)
+Cohesion: 0.07
+Nodes (56): _agent_bundle(), agent_fixture(), _bootstrap_fixture(), _load_agent(), Any, fixture, parametrize, Path (+48 more)
 
 ### Community 56 - "create_user"
-Cohesion: 0.18
-Nodes (18): create_user(), deactivate_user(), get_user(), list_users(), CurrentUser, DbSessionDep, delete, get (+10 more)
+Cohesion: 0.13
+Nodes (22): create_user(), deactivate_user(), get_user(), list_users(), CurrentUser, DbSessionDep, delete, get (+14 more)
 
 ### Community 57 - "alembic"
-Cohesion: 0.04
-Nodes (22): alembic, Alembic environment: metadata comes from app.models, URL from app settings., Emit SQL to stdout without a live DB connection., Run migrations against the configured database., run_migrations_offline(), run_migrations_online(), downgrade(), rename ``server.*`` permission codenames to ``node.*`` The Node/Server… (+14 more)
+Cohesion: 0.06
+Nodes (12): alembic, Fix pre-existing model/migration drift (surfaced by the new drift check). Two…, _clear_app_role_guc(), downgrade(), Phase 2.1 — enforce append-only ``secret_versions`` in the database. Phase 2…, Publish the app-role name to the migration GUC the revoke block reads., _set_app_role_in_guc(), upgrade() (+4 more)
 
 ### Community 58 - "notification_service.py"
-Cohesion: 0.12
-Nodes (42): DeliveryStatus, NotificationDelivery, _as_uuid(), _attempt_delivery(), _audit(), create_channel(), decode_delivery_cursor(), decrypt_channel_config() (+34 more)
+Cohesion: 0.13
+Nodes (33): DeliveryStatus, NotificationDelivery, _as_uuid(), _attempt_delivery(), decode_delivery_cursor(), decrypt_channel_config(), dispatch_event_frame(), _send() (+25 more)
 
 ### Community 59 - "helpers.py"
-Cohesion: 0.07
-Nodes (56): bearer(), cookie_attributes(), login_account(), login_headers(), Any, AsyncClient, Response, Pure helpers for journey tests: payloads, auth shortcuts, cookie parsing. (+48 more)
+Cohesion: 0.06
+Nodes (60): bearer(), cookie_attributes(), login_account(), login_headers(), Any, AsyncClient, Response, Pure helpers for journey tests: payloads, auth shortcuts, cookie parsing. (+52 more)
 
 ### Community 60 - "compilerOptions"
 Cohesion: 0.10
 Nodes (19): compilerOptions, allowImportingTsExtensions, isolatedModules, jsx, lib, module, moduleDetection, moduleResolution (+11 more)
 
 ### Community 61 - "v1/deployments.py"
-Cohesion: 0.11
-Nodes (36): _attribute_step_idx(), cancel_deployment(), _emails_for(), get_deployment(), list_application_deployments(), list_deployment_logs(), _list_deployments(), _parse_sort() (+28 more)
+Cohesion: 0.08
+Nodes (50): _attribute_step_idx(), cancel_deployment(), _emails_for(), get_deployment(), list_application_deployments(), list_deployment_logs(), _list_deployments(), _parse_sort() (+42 more)
 
-### Community 62 - "register_exception_handlers"
-Cohesion: 0.14
-Nodes (12): _error_payload(), FastAPI, Request, register_exception_handlers(), handle_app_error(), handle_http_exception(), handle_unexpected(), handle_validation_error() (+4 more)
+### Community 62 - "test_error_logging.py"
+Cohesion: 0.22
+Nodes (4): Regression: the catch-all 500 handler must not log raw exception text.…, _SpyLogger, test_unhandled_exception_handler_logs_class_not_message(), fastapi_testclient
 
 ### Community 63 - "dns_verifier.py"
-Cohesion: 0.13
-Nodes (18): apex_of(), The name a wildcard Domain is anchored at (``*.example.com`` →…, The exact TXT owner name a user must publish at their provider., verification_record_name(), _discover_nameservers(), _normalise_ns(), observe(), Observer (+10 more)
+Cohesion: 0.11
+Nodes (21): apex_of(), The name a wildcard Domain is anchored at (``*.example.com`` →…, The exact TXT owner name a user must publish at their provider., verification_record_name(), _discover_nameservers(), _normalise_ns(), observe(), Observer (+13 more)
 
 ### Community 64 - "test_phase2_environments.py"
 Cohesion: 0.18
 Nodes (22): _environment(), _project(), parametrize, Phase 2: project-scoped environments, config layering, and their isolation. The…, Uniqueness is ``(project_id, slug)`` — not instance-wide., The update path is validated too (the pre-Phase-2 gap)., Knowing an environment UUID is not access: the project link must hold., Another tenant cannot reach the project, its environments, or its detail. (+14 more)
 
 ### Community 65 - "route_service.py"
-Cohesion: 0.10
-Nodes (50): Last nginx apply outcome for a route, as reported by its node's agent.…, RouteConfigState, One hostname+path served from one container on one node. Relationship rules the…, Route, mark_removal_requested(), Record that *route* must leave its node's configuration. True when new. Called…, _actor(), _apply_or_defer() (+42 more)
+Cohesion: 0.11
+Nodes (47): UnprocessableEntity, One hostname+path served from one container on one node. Relationship rules the…, Route, _actor(), _apply_or_defer(), _conflicting_route(), create_route(), delete_route() (+39 more)
 
 ### Community 66 - "test_schema_redaction.py"
 Cohesion: 0.18
 Nodes (17): is_sensitive_header(), mask_sensitive_headers(), True when *name* looks like it carries a credential (Authorization etc.)., Return a copy of *headers* with sensitive values replaced by a mask., mask_target(), Human-readable masked target safe to expose over the API. For webhook families…, _monitor_out(), Outbound-schema redaction: monitor probe credentials and webhook targets.… (+9 more)
 
-### Community 67 - "deps.py"
-Cohesion: 0.04
-Nodes (96): _database_url(), Migrations run as the table **owner**, never as the application role. The owner…, _load_organization(), Organization, FastAPI dependencies: database session, authenticated tenant context, RBAC…, API key routes — self-service management of the caller's own machine…, Audit log API. Strictly read-only: the table is append-only by design., Instance metadata: version, mode, and the caller's effective capabilities. The… (+88 more)
+### Community 67 - "enums.py"
+Cohesion: 0.03
+Nodes (165): asyncio, _decode_frame(), _max_log_id(), _poll_new_lines(), Container API: listing/detail, lifecycle actions, removal, logs, streaming.…, Parse a Redis pub/sub frame ``{ts, stream, message}`` into a LogLine., Highest persisted log id for a container (poll fallback watermark)., Fetch log rows persisted after ``last_seen['id']`` (poll fallback). (+157 more)
 
-### Community 68 - "Certificate Management — NexusOps"
-Cohesion: 0.13
-Nodes (15): 10. Status/expiry tracking and monitor tie-in, 12. Audit and events, 13. Non-goals, 3. API surface and permissions, 4.1 DNS-01 first (the default and the wedge), 4.2 DNSProvider interface, 4.3 ACME account and directory, 4.4 HTTP-01 via node nginx (later fallback) (+7 more)
+### Community 68 - "decrypt_str"
+Cohesion: 0.07
+Nodes (29): decrypt_str(), _fernet(), parametrize, test_decrypt_with_wrong_ciphertext_raises_value_error(), test_encrypt_decrypt_roundtrip(), 10. Status/expiry tracking and monitor tie-in, 11. Failure handling, 12. Audit and events (+21 more)
 
 ### Community 69 - "package.json"
 Cohesion: 0.13
 Nodes (15): name, private, type, version, eslint, @eslint/js, eslint-plugin-react-hooks, jsdom (+7 more)
 
-### Community 70 - "core/tenancy.py"
-Cohesion: 0.11
-Nodes (29): _apply_scope_guc(), _desired_guc(), _guard(), _has_org_predicate(), install_tenancy_guards(), _mappers_of(), _org_scoped_classes(), org_scoped_table_names() (+21 more)
-
-### Community 71 - "decrypt_str"
+### Community 70 - "TenancyScopeError"
 Cohesion: 0.10
-Nodes (26): decrypt_str(), _fernet(), _create(), _environment_config(), Secrets: metadata-only reads, rotation versioning, deploy-time resolution., Project → application → environment carrying *config*; returns its id., A reference naming no secret must abort, not resolve to an empty value.…, A row this ENCRYPTION_KEY cannot decrypt must abort, not yield ``""``. (+18 more)
+Nodes (26): _apply_scope_guc(), _desired_guc(), _guard(), _has_org_predicate(), install_tenancy_guards(), _mappers_of(), Any, Raised when a unit of work touches tenant data with no valid org scope. This is… (+18 more)
+
+### Community 71 - "test_secrets.py"
+Cohesion: 0.22
+Nodes (13): _create(), _environment_config(), Secrets: metadata-only reads, rotation versioning, deploy-time resolution., Project → application → environment carrying *config*; returns its id., A reference naming no secret must abort, not resolve to an empty value.…, A row this ENCRYPTION_KEY cannot decrypt must abort, not yield ``""``., test_create_and_list_return_metadata_only(), test_delete_removes_metadata_row() (+5 more)
 
 ### Community 72 - "test_nginx_renderer.py"
-Cohesion: 0.12
-Nodes (38): NginxProvider, ValueError, The only production provider in Phase 4., Where a route's fragment lands, so the service can name it in events., Rendering refused the input. Always a bug or a corrupt row, never a leak., RenderError, NginxApplyParams, One validated bundle to apply atomically. (+30 more)
+Cohesion: 0.13
+Nodes (36): NginxProvider, ValueError, The only production provider in Phase 4., Where a route's fragment lands, so the service can name it in events., Rendering refused the input. Always a bug or a corrupt row, never a leak., RenderError, provider(), fixture (+28 more)
 
 ### Community 73 - "domain_service.py"
-Cohesion: 0.10
-Nodes (42): DomainStatus, Ownership-verification lifecycle of a Domain (domain-routing.md §4). ``STALE``…, Domain, One DNS name an organization is proving it controls. ``name`` is canonical (see…, _actor(), apply_decision(), _bad_name(), claim_verified_name() (+34 more)
+Cohesion: 0.07
+Nodes (50): paginate(), AsyncSession, Execute *stmt* with limit/offset and return ``(rows, total)``., Domain, One DNS name an organization is proving it controls. ``name`` is canonical (see…, list_hosts(), Offset-paginated host listing with optional status/name filters., _actor() (+42 more)
 
 ### Community 74 - "api service (FastAPI / uvicorn :8000)"
 Cohesion: 0.22
 Nodes (15): Dev overlay (hot reload, Vite on :5173), Docker socket override (DOCKER_GID group_add), api service (FastAPI / uvicorn :8000), frontend service (built SPA served by nginx), nginx service (edge :8080, only host-exposed port), scheduler service (celery beat), worker service (celery worker, concurrency 4), Modular monolith topology (one API image, Celery worker/beat) (+7 more)
 
 ### Community 75 - "monitors.py"
-Cohesion: 0.09
+Cohesion: 0.10
 Nodes (48): check_now(), create_monitor(), delete_monitor(), get_monitor(), list_checks(), list_monitor_incidents(), list_monitors(), pause_monitor() (+40 more)
 
-### Community 76 - "pagination.py"
-Cohesion: 0.14
-Nodes (25): Cursor, cursor_params(), CursorPage, CursorParams, decode_cursor(), encode_cursor(), BaseModel, datetime (+17 more)
+### Community 76 - "deps.py"
+Cohesion: 0.05
+Nodes (71): permission_dep(), Any, FastAPI dependencies: database session, authenticated tenant context, RBAC…, Dependency factory enforcing a permission; returns 403 when denied., require_permission(), _check(), API key routes — self-service management of the caller's own machine…, list_audit_logs() (+63 more)
 
 ### Community 77 - "domains.py"
-Cohesion: 0.12
-Nodes (38): create_domain(), delete_domain(), _enqueue_verification(), get_domain(), list_domain_routes(), list_domains(), _project_names(), alias (+30 more)
+Cohesion: 0.11
+Nodes (39): create_domain(), delete_domain(), _enqueue_verification(), get_domain(), list_domain_routes(), list_domains(), _project_names(), alias (+31 more)
 
-### Community 78 - "EventLevel"
-Cohesion: 0.09
-Nodes (57): ActionCtx, acknowledge_incident(), AckResponse, add_incident_note(), get_incident(), list_incidents(), BaseModel, DbDep (+49 more)
+### Community 78 - "incident_service.py"
+Cohesion: 0.10
+Nodes (56): ActionCtx, acknowledge_incident(), AckResponse, add_incident_note(), get_incident(), list_incidents(), BaseModel, DbDep (+48 more)
 
 ### Community 79 - "test_phase2_secrets.py"
 Cohesion: 0.19
@@ -610,59 +611,59 @@ Nodes (22): Payload for registering a server., Partial update. ``tags`` replaces
 
 ### Community 82 - "canonicalize_name"
 Cohesion: 0.12
-Nodes (33): canonicalize_name(), canonicalize_path(), _check_labels(), _check_not_ip(), hostname_is_covered(), _idna(), InvalidName, is_valid_path() (+25 more)
+Nodes (32): canonicalize_name(), canonicalize_path(), _check_labels(), _check_not_ip(), hostname_is_covered(), _idna(), InvalidName, is_valid_path() (+24 more)
 
 ### Community 83 - "tests/conftest.py"
-Cohesion: 0.22
-Nodes (7): configure_test_env(), Test bootstrap: pin every cached setting BEFORE the first ``app`` import. The…, KEY=VALUE pairs from the repo .env (first definition wins); never logged., Export the exact settings the app caches; host values cannot leak through., _read_dot_env(), base64, os
+Cohesion: 0.20
+Nodes (8): configure_test_env(), Test bootstrap: pin every cached setting BEFORE the first ``app`` import. The…, KEY=VALUE pairs from the repo .env (first definition wins); never logged., Export the exact settings the app caches; host values cannot leak through., _read_dot_env(), os, pathlib, sys
 
-### Community 84 - "list_servers"
-Cohesion: 0.14
-Nodes (16): get_server(), list_servers(), list_tags(), Depends, get, ReadCtx, All tags with their server usage counts., Full server view with recent timeline events and container counts. (+8 more)
+### Community 84 - "_resolve_tags"
+Cohesion: 0.29
+Nodes (7): list_tags_with_usage(), Fetch existing tags by name and case-preservingly create missing ones., All tags ordered by name with their server usage counts., Create a tag or update its colour; names are matched exactly., _resolve_tags(), upsert_tag(), Tag
 
 ### Community 85 - "create_user"
-Cohesion: 0.11
-Nodes (36): _apply_deactivation(), _assert_not_last_active_member(), _assert_not_last_active_superadmin(), create_user(), deactivate_user(), get_by_email(), get_member(), get_user() (+28 more)
+Cohesion: 0.10
+Nodes (38): _apply_deactivation(), _assert_not_last_active_member(), _assert_not_last_active_superadmin(), create_user(), deactivate_user(), get_by_email(), get_member(), get_user() (+30 more)
 
 ### Community 86 - "devDependencies"
 Cohesion: 0.13
 Nodes (15): devDependencies, eslint, @eslint/js, eslint-plugin-react-hooks, jsdom, @playwright/test, @testing-library/jest-dom, @testing-library/react (+7 more)
 
-### Community 87 - "NotFound"
-Cohesion: 0.09
-Nodes (48): Conflict, NotFound, OperationStatus, Lifecycle of one node operation (node-agent-architecture.md §5.1).…, OperationCreate, Request one whitelisted action on one node., _active_org(), _bounded() (+40 more)
+### Community 87 - "Conflict"
+Cohesion: 0.08
+Nodes (51): Conflict, Operation, Whether the agent reported this operation as successful. A terminal check, not…, One whitelisted action for one node, with a CAS lifecycle. ``attempts`` is…, OperationCreate, Request one whitelisted action on one node., _active_org(), _bounded() (+43 more)
 
-### Community 88 - "enums.py"
-Cohesion: 0.09
-Nodes (34): ActorType, AlertSeverity, LogSource, MetricGranularity, MonitorTargetType, OrganizationStatus, Closed registries of domain enumerations. Member names equal their values…, String enum; member names equal values so name/value storage never disagrees. (+26 more)
+### Community 88 - "test_certificate_lifecycle.py"
+Cohesion: 0.10
+Nodes (35): CertificateGeneration, one_live_generation_predicate(), One ACME order + one key pair. Renewal inserts a new row, never mutates one.…, The SQL predicate of ``uq_cert_generations_one_live``. Built from…, CertificateGenerationState, Pre-issuance lifecycle of one ACME order + key pair. **The vocabulary is…, The states in which a generation is still being worked on. At most one of these…, CertificateGenerationOut (+27 more)
 
 ### Community 89 - "Settings"
 Cohesion: 0.14
 Nodes (6): field_validator, model_validator, Username from :attr:`database_url`, or ``None`` if it is unparseable., Validated application settings (loaded from environment / .env)., Settings, BaseSettings
 
-### Community 90 - "domain_routing.py"
-Cohesion: 0.17
-Nodes (20): The honest state of a route that left the desired tree but is not gone. One…, removal_requested_detail(), _affected_node_ids(), _apply_for_node(), _audit_action(), datetime, UUID, Domain verification and routing sweeps. Two properties shape this module: * **A… (+12 more)
+### Community 90 - "_release_competing_claim"
+Cohesion: 0.50
+Nodes (4): The honest state of a route that left the desired tree but is not gone. One…, removal_requested_detail(), Move another organization's ``VERIFIED`` claim on *name* to ``UNVERIFIED``. Its…, _release_competing_claim()
 
 ### Community 91 - "validate_config"
 Cohesion: 0.07
-Nodes (29): _normalise_environment_type(), field_validator, field_validator, collect_secret_refs(), walk(), ConfigValidationError, merge_config(), Any (+21 more)
+Nodes (30): _normalise_environment_type(), field_validator, field_validator, collect_secret_refs(), walk(), ConfigValidationError, merge_config(), Any (+22 more)
 
-### Community 92 - "PageParams"
-Cohesion: 0.15
-Nodes (27): list_alerts(), mark_all_read(), mark_read(), CurrentUser, DbDep, Depends, get, post (+19 more)
+### Community 92 - "alerts.py"
+Cohesion: 0.19
+Nodes (17): list_alerts(), mark_all_read(), mark_read(), CurrentUser, DbDep, Depends, get, post (+9 more)
 
-### Community 93 - "org_scope"
-Cohesion: 0.08
-Nodes (52): current_org(), current_scope(), org_scope(), UUID, Raised when a unit of work touches tenant data with no valid org scope. This is…, The organization this unit of work is acting for, if any., ``'org'``, ``'system'`` or ``'unset'``., Run the enclosed block as a single organization. Nesting the *same* org is a… (+44 more)
+### Community 93 - "get_sessionmaker"
+Cohesion: 0.06
+Nodes (58): get_sessionmaker(), async_sessionmaker, AsyncSession, current_scope(), org_scope(), ``'org'``, ``'system'`` or ``'unset'``., Run the enclosed block as a single organization. Nesting the *same* org is a…, _entity_exists() (+50 more)
 
 ### Community 94 - "test_phase21_secret_version_integrity.py"
 Cohesion: 0.18
 Nodes (18): _app_role_dsn(), _owner_dsn(), _probe(), Phase 2.1 — ``secret_versions`` is append-only in the **database**, not just in…, Immutability is a database guarantee, not merely a missing code path. The owner…, The legitimate append paths keep working under the guard., The documented deletion policy: purging a Secret cascades its history., RLS is preserved: another tenant cannot see a version row, even by id. (+10 more)
 
-### Community 95 - "AsyncSession"
-Cohesion: 0.13
-Nodes (26): _detail(), AsyncSession, _actor_kwargs(), container_counts(), delete_server(), get_server(), list_servers(), _order_clause() (+18 more)
+### Community 95 - "Server"
+Cohesion: 0.06
+Nodes (58): agent_enroll(), agent_heartbeat(), agent_hello(), claim_operation(), _presented_token(), DbDep, post, Request (+50 more)
 
 ### Community 96 - "NexusOps (self-hosted infrastructure management and monitoring platform)"
 Cohesion: 0.20
@@ -673,28 +674,32 @@ Cohesion: 0.29
 Nodes (7): Cursor (keyset) and offset pagination envelopes, Permission model (data-driven registry, require_permission, wildcard scopes), REST API surface (/api/v1), RBAC registry (PERMISSIONS + ROLE_MATRIX + scope_matches), Adding a new resource: 7-step checklist (model -> migration -> schemas -> service -> router -> tests -> frontend), Alembic migration workflow (autogenerate, models __init__ export, entrypoint apply), Command palette (Ctrl/Cmd+K)
 
 ### Community 98 - "journey.spec.ts"
-Cohesion: 0.15
-Nodes (15): EDGE, MAILPIT, ADMIN, Bootstrap, bootstrapVia(), test, ADMIN, formLogin() (+7 more)
+Cohesion: 0.14
+Nodes (16): EDGE, MAILPIT, ADMIN, Bootstrap, bootstrapVia(), test, ADMIN, formLogin() (+8 more)
 
-### Community 99 - "enqueue.py"
-Cohesion: 0.39
-Nodes (8): after_commit(), _on_commit(), _on_rollback(), Any, AsyncSession, Deferred Celery handoff: enqueue only after the creating transaction commits. A…, Run ``factory`` once the current transaction commits. ``label`` names the work…, _run()
+### Community 99 - "Layout.tsx"
+Cohesion: 0.07
+Nodes (22): SearchResult, mocks, Probe(), USER, Command, CommandPalette(), CommandPaletteProps, STATIC_COMMANDS (+14 more)
 
 ### Community 100 - "redact_mapping"
+Cohesion: 0.09
+Nodes (33): _is_sensitive_key(), Return a copy of *data* with sensitive values replaced, at any depth. Two…, Substring match on a normalised key so header-style names are caught too.…, redact_mapping(), parametrize, Unit tests for app.core.logging redaction (pure functions only)., No sensitive key name involved: the PEM armor is the only signal., Lists of dicts holding further lists — the shape an agent report takes. (+25 more)
+
+### Community 101 - "certificates.py"
 Cohesion: 0.10
-Nodes (31): Return a copy of *data* with sensitive values replaced, at any depth. Two…, redact_mapping(), parametrize, Unit tests for app.core.logging redaction (pure functions only)., No sensitive key name involved: the PEM armor is the only signal., Lists of dicts holding further lists — the shape an agent report takes., The key-name rule still applies at depth, not just at the top level., Only the key is replaced: the reason an operator reads the row is kept. (+23 more)
+Nodes (34): create_certificate(), delete_certificate(), get_certificate(), list_certificates(), alias, AsyncSession, DbDep, delete (+26 more)
 
 ### Community 102 - "organization.py"
-Cohesion: 0.12
-Nodes (23): create_organization(), list_my_organizations(), CurrentUser, DbSessionDep, get, IdentityUser, patch, post (+15 more)
+Cohesion: 0.11
+Nodes (24): create_organization(), list_my_organizations(), CurrentUser, DbSessionDep, get, IdentityUser, patch, post (+16 more)
 
 ### Community 103 - "_mutate_in_system_scope"
 Cohesion: 0.11
-Nodes (26): task, Re-prove control of every domain whose next check is due. Covers three cases…, Keep every routed node's live configuration matching the desired bundle. One…, sweep_domains(), sweep_routes(), _flip_name_to(), _live_operations(), _mutate_in_system_scope() (+18 more)
+Nodes (30): Keep every routed node's live configuration matching the desired bundle. One…, sweep_routes(), _container_id(), _create_node(), _heartbeat(), heartbeat_payload(), _live_operations(), _mutate_in_system_scope() (+22 more)
 
 ### Community 104 - "test_migration_phase4.py"
-Cohesion: 0.15
-Nodes (26): _exec(), _owner_dsn(), Statement, Run statements in one transaction as the owner (committed on success)., _rows(), _columns(), _integrity_error(), _migrate_from_phase3() (+18 more)
+Cohesion: 0.13
+Nodes (23): Move ``database`` *back* to ``revision``. The same code path a deployment uses…, _run_downgrade(), _columns(), _integrity_error(), _migrate_from_phase3(), Statement, Phase 4 migration (`f4a5b6c7d8e9`) against a real Phase 3 database. Phase 4 is…, The polymorphic shape is enforced in both directions. (+15 more)
 
 ### Community 105 - "redis service (Redis 7, no persistence, loopback :6390)"
 Cohesion: 0.22
@@ -704,13 +709,13 @@ Nodes (11): redis service (Redis 7, no persistence, loopback :6390), WebSocket A
 Cohesion: 0.18
 Nodes (12): Agent security model (one-way telemetry, no command channel), Agent enrollment token (X-Agent-Token, nxa_..., SHA-256 at rest), Agent heartbeat exponential backoff (cap 5 min, exit 1 on revoked token), agent/install.sh (enrollment installer), Agent metrics collection (/proc statvfs Docker socket), NexusOps agent (stdlib-only Python, agent/nexusops_agent.py), Agent systemd hardening (ProtectSystem=strict, NoNewPrivileges), Agent ingest API (POST /agent/hello, POST /agent/heartbeat) (+4 more)
 
-### Community 107 - "LoginPage.tsx"
-Cohesion: 0.33
-Nodes (4): LoginPage, FieldErrors, MetaInfo, redirectTarget()
+### Community 107 - "_rows"
+Cohesion: 0.13
+Nodes (34): _rows(), _columns(), _foreign_keys(), _indexes(), _insert_certificate(), _insert_generation(), _integrity_error(), _migrate_from_phase4() (+26 more)
 
-### Community 108 - "docker_real.py"
-Cohesion: 0.08
-Nodes (30): ContainerInfo, ContainerStats, LogLine, Normalized view of a container as reported by any provider., Point-in-time resource usage snapshot., One parsed log record from a container log stream., _as_float(), _compute_stats() (+22 more)
+### Community 108 - "RealDockerProvider"
+Cohesion: 0.17
+Nodes (5): T, Execute an SDK call with one short retry, normalizing failures., Two short samples give real cpu/net deltas without streaming., Talks to a real docker daemon over ``unix://`` or ``tcp://``., RealDockerProvider
 
 ### Community 109 - "Opt-in seeding and one-time admin password (NEXUSOPS_ALLOW_SEED, ENVIRONMENT=test)"
 Cohesion: 0.25
@@ -720,17 +725,17 @@ Nodes (9): API keys (X-API-Key, nxo_..., scope intersection), First boot sequenc
 Cohesion: 0.19
 Nodes (3): A session that enters its tenancy scope around each operation. A fixture cannot…, ScopedSession, 3. The session guard (the mechanical layer)
 
-### Community 111 - "publish"
-Cohesion: 0.11
-Nodes (36): _after_commit_publish(), _after_rollback_drop(), publish(), _publish_after_commit(), _publish_redis(), Any, AsyncSession, UUID (+28 more)
+### Community 111 - "update_organization"
+Cohesion: 0.20
+Nodes (17): add_member(), get_organization(), membership_for_user(), AsyncSession, Membership, Organization, Request, User (+9 more)
 
 ### Community 112 - "Phase 5 — HTTPS, Certificates and Private-Key Delivery — Design"
-Cohesion: 0.10
-Nodes (20): 1.2 Phase 5 in one sentence, 1.3 Trust boundaries Phase 5 adds, 1.4 Non-goals for Phase 5, 1.5 Trust concentration: centralized key custody, accepted **conditionally** (decided), 1. Architecture and trust boundaries, 4.1 Codenames, 4.2 Per-type permission and capability gating, 4.3 Tenant isolation (+12 more)
+Cohesion: 0.11
+Nodes (19): 1.2 Phase 5 in one sentence, 1.3 Trust boundaries Phase 5 adds, 1.4 Non-goals for Phase 5, 1.5 Trust concentration: centralized key custody, accepted **conditionally** (decided), 1. Architecture and trust boundaries, 2.1 The six stages, kept distinct, 2.2 Certificate generation state machine, 2.3 Delivery/activation state machine (per certificate × node) (+11 more)
 
 ### Community 113 - "dnsmock.py"
-Cohesion: 0.11
-Nodes (25): resolver(), answer(), encode_name(), encode_txt(), forward(), main(), parse_question(), TXT rdata: one or more length-prefixed strings, each ≤ 255 bytes. (+17 more)
+Cohesion: 0.12
+Nodes (24): resolver(), answer(), encode_name(), encode_txt(), forward(), main(), parse_question(), TXT rdata: one or more length-prefixed strings, each ≤ 255 bytes. (+16 more)
 
 ### Community 114 - "scripts"
 Cohesion: 0.29
@@ -738,23 +743,23 @@ Nodes (7): scripts, build, dev, lint, preview, test, test:watch
 
 ### Community 115 - "APIModel"
 Cohesion: 0.03
-Nodes (96): User management routes (user.read / user.manage), scoped to the active tenant.…, AgentContainerPortIn, AgentEnrollIn, AgentEnrollOut, AgentHelloOut, AgentTokenRotation, Agent-facing schemas. Payloads are data only — never executed. Wire protocol v2…, Tells the agent how often to report and what protocol it negotiated. (+88 more)
+Nodes (100): Agent ingest endpoints: enrollment, hello, heartbeat, and operation traffic.…, AgentContainerPortIn, AgentEnrollIn, AgentEnrollOut, AgentHeartbeatOut, AgentHelloOut, AgentTokenRotation, CapabilityReport (+92 more)
 
 ### Community 116 - "test_tenancy_allowlist.py"
 Cohesion: 0.20
 Nodes (14): AST, _actual_callers(), _calls_system_scope(), _module_path(), Path, The system-scope allowlist is the only fence around the tenancy carve-out.…, Every module that could open a system scope: ``app/`` plus the scripts., No module may lift tenant isolation without being named in the list. (+6 more)
 
 ### Community 117 - "_alembic_config"
-Cohesion: 0.15
-Nodes (15): _alembic_config(), _at_revision(), _migration_dsn(), Run one Alembic direction against ``database`` through the app's settings path.…, Move ``database`` *back* to ``revision``. The same code path a deployment uses…, Phase 2 adds one migration; heads must not fork., _run_downgrade(), test_exactly_one_alembic_head() (+7 more)
+Cohesion: 0.18
+Nodes (13): _alembic_config(), _at_revision(), _migration_dsn(), Run one Alembic direction against ``database`` through the app's settings path.…, Phase 2 adds one migration; heads must not fork., test_exactly_one_alembic_head(), Phase 4 adds one migration; the chain still has exactly one head., Phase 4.2 sits directly on the Phase 4 head, in a chain with one head. This… (+5 more)
 
 ### Community 118 - "dependencies"
 Cohesion: 0.33
 Nodes (6): dependencies, lucide-react, react, react-dom, react-router-dom, @tanstack/react-query
 
-### Community 119 - "@tanstack/react-query"
-Cohesion: 0.08
-Nodes (21): DeploymentStepOut, DeploymentDetailPage, MetaInfo, SimulatedChip(), mocks, ACTIVE_STATUSES, DeploymentDetailRow, DeploymentLogRow (+13 more)
+### Community 119 - "DeploymentDetailPage.tsx"
+Cohesion: 0.09
+Nodes (17): DeploymentStepOut, DeploymentDetailPage, ACTIVE_STATUSES, DeploymentDetailRow, DeploymentLogRow, formatLogTime(), LogLines(), StepCard() (+9 more)
 
 ### Community 120 - "generate_secrets.sh"
 Cohesion: 0.47
@@ -765,32 +770,32 @@ Cohesion: 0.22
 Nodes (7): BaseHTTPRequestHandler, clear_record(), ControlHandler, in_zone(), The journey's only way to publish a record — no shell, no shared volume., set_record(), snapshot()
 
 ### Community 122 - "test_tenant_isolation.py"
-Cohesion: 0.05
-Nodes (59): error_of(), Unwrap an API error envelope., A valid POST /servers body with per-test overrides., server_payload(), test_token_cannot_claim_a_foreign_tenants_node(), test_v1_heartbeat_keeps_the_204_contract(), Regression: a superadmin-owned key is still limited to its scope list. The…, test_scoped_api_key_cannot_exceed_its_grant() (+51 more)
+Cohesion: 0.04
+Nodes (63): dispose_engine(), error_of(), Unwrap an API error envelope., A valid POST /servers body with per-test overrides., server_payload(), test_token_cannot_claim_a_foreign_tenants_node(), test_v1_heartbeat_keeps_the_204_contract(), Regression: a superadmin-owned key is still limited to its scope list. The… (+55 more)
 
-### Community 123 - "pytest"
-Cohesion: 0.15
-Nodes (21): alembic_config, alembic_script, Phase 2 migration (`b2c3d4e5f6a7`) against realistic legacy data. The promotion…, Upgrade ``database`` to ``revision``., The pre-Phase-2 shapes: application-scoped environments, per-app dupes., A fresh database reaches the same shape the models describe., _run_migration(), _seed_legacy_data() (+13 more)
+### Community 123 - "_exec"
+Cohesion: 0.14
+Nodes (23): alembic_config, UUID, Phase 2.2 — the environment-type correction follows the documented precedence.…, Only the previous migration's ``PROD`` output is corrected. A row already…, Create one legacy (application-scoped) environment per case., Every branch of the slug-first rule, end to end through ``head``., _seed_legacy(), test_correction_preserves_operator_set_values() (+15 more)
 
 ### Community 124 - "middleware.py"
-Cohesion: 0.13
-Nodes (20): ASGIApp, AccessLogMiddleware, HTTP middleware: request ids, security headers, structured access logs., Baseline hardening headers on every API response., RequestIDMiddleware, SecurityHeadersMiddleware, create_app(), _app_for_environment() (+12 more)
+Cohesion: 0.14
+Nodes (15): ASGIApp, AccessLogMiddleware, Request, Response, HTTP middleware: request ids, security headers, structured access logs., Baseline hardening headers on every API response., RequestIDMiddleware, SecurityHeadersMiddleware (+7 more)
 
 ### Community 125 - "OperationError"
 Cohesion: 0.15
 Nodes (17): _demux_docker_stream(), _docker_error(), execute_operation(), OperationError, _process_pending_operations(), Exception, A stable, sanitized failure contract for the control plane., Re-validate the operation's parameters locally, against a closed shape. (+9 more)
 
 ### Community 126 - "list_operations"
-Cohesion: 0.18
-Nodes (18): cancel_operation(), create_operation(), get_operation(), list_operations(), DbDep, Depends, get, post (+10 more)
+Cohesion: 0.21
+Nodes (15): cancel_operation(), create_operation(), get_operation(), list_operations(), DbDep, Depends, get, post (+7 more)
 
 ### Community 127 - "test_phase4_routing.py"
 Cohesion: 0.11
-Nodes (23): _create_domain(), _dns_stub(), _fake_observe(), fixture, parametrize, Phase 4 through the real HTTP surface, workers and agent contract. The journey…, Stand in for authoritative DNS in every test in this module., The polymorphic model must not disturb the original target shape. (+15 more)
+Nodes (27): MonitorTargetType, What a monitor observes (domain-model.md §2.6, polymorphic targets). ``URL`` is…, task, Re-prove control of every domain whose next check is due. Covers three cases…, sweep_domains(), _count_rows_in_system_scope(), _create_domain(), parametrize (+19 more)
 
-### Community 137 - "AuditLogPage.test.tsx"
-Cohesion: 0.20
-Nodes (5): AuditEntry, AuditLogPage(), formatTimestamp(), shortId(), mockedGet
+### Community 137 - "EnvironmentDetailPage.tsx"
+Cohesion: 0.13
+Nodes (22): apiPatch(), ApplicationOut, DeploymentOut, ENVIRONMENT_TYPE_LABELS, EnvironmentDetailOut, EnvironmentType, EnvironmentDetailPage, ProjectDetailPage (+14 more)
 
 ### Community 146 - "test_auth_multi_org.py"
 Cohesion: 0.24
@@ -820,117 +825,117 @@ Nodes (6): Invisible account lockout (5 fails -> 15 min, enumeration resistance)
 Cohesion: 0.20
 Nodes (10): _listener_ownership(), _listening_ports(), nginx_capability(), _nginx_owned_ports(), _nginx_version(), ``nginx -v`` prints its version to stderr; bounded and non-shell., TCP ports in LISTEN state, read from ``/proc`` (no shell, no tooling). ``None``…, Ports declared by ``listen`` directives in the *loaded* configuration. ``nginx… (+2 more)
 
-### Community 153 - "DockerHostsPage.test.tsx"
-Cohesion: 0.18
-Nodes (8): DockerHostOut, ApiError, failingHost, host, hostsPage, mockCountApi(), server, serversPage
+### Community 153 - "types.ts"
+Cohesion: 0.03
+Nodes (55): AuditEntry, CapabilityReport, ContainerOut, DeploymentLogLine, DeploymentStatus, DockerHostOut, DomainDetailOut, DomainOut (+47 more)
 
 ### Community 154 - "nexusops-draft.mjs"
 Cohesion: 0.40
 Nodes (4): DOCS, meta, SPINE, VERIFY_RULES
 
-### Community 155 - "notification_sender.py"
-Cohesion: 0.17
-Nodes (15): NotificationError, Any, BaseException, Exception, Low-level notification transports: SMTP email and outgoing webhooks. These…, POST *payload* as JSON to *url*; 2xx is success, anything else raises. Response…, Raised when a delivery attempt fails. Message is safe to persist., Bounded, single-line, content-free error reason. (+7 more)
+### Community 155 - "NotificationError"
+Cohesion: 0.21
+Nodes (12): NotificationError, Any, BaseException, Exception, POST *payload* as JSON to *url*; 2xx is success, anything else raises. Response…, Raised when a delivery attempt fails. Message is safe to persist., Bounded, single-line, content-free error reason., Send a plain-text email via SMTP. Raises :class:`NotificationError`. The… (+4 more)
 
 ### Community 156 - "nexusops-challenge.mjs"
 Cohesion: 0.33
 Nodes (5): CHALLENGE_COMMON, meta, RESEARCH_COMMON, SCHEMA, TASKS
 
 ### Community 157 - "Secrets Architecture"
-Cohesion: 0.13
-Nodes (15): 10. Resolution flow at deploy time, 2.1 Resolution runs inside org scope, 2.2 Migration mapping (applied by `b2c3d4e5f6a7`), 2. Scope model (org / project / environment layering) — **shipped**, 3.1 What this fixed, 3. SecretVersion — append-only history (**shipped in Phase 2**), 4.1 Audit event at resolution time, 4. Resolution authorization (+7 more)
+Cohesion: 0.11
+Nodes (19): 10. Resolution flow at deploy time, 1.1 Storage and crypto, 1.2 Data model, 1.3 API surface (metadata-only reads), 1.6 Gap list (Phase 2 status), 1. Current state, 2.1 Resolution runs inside org scope, 2.2 Migration mapping (applied by `b2c3d4e5f6a7`) (+11 more)
 
 ### Community 158 - "test_schemas_agent.py"
 Cohesion: 0.10
-Nodes (38): AgentContainerIn, AgentHeartbeatIn, AgentHelloIn, Any, field_validator, Observed container state reported by an agent., Periodic metrics + observed containers from an enrolled agent. Network counters…, First contact from an agent after enrollment; fills static host facts. (+30 more)
+Nodes (37): AgentContainerIn, AgentHeartbeatIn, AgentHelloIn, Any, field_validator, Observed container state reported by an agent., Periodic metrics + observed containers from an enrolled agent. Network counters…, First contact from an agent after enrollment; fills static host facts. (+29 more)
 
 ### Community 159 - ".state"
-Cohesion: 0.12
-Nodes (16): computed_field, Derived lifecycle state: revoked wins over used wins over expired., 2. Certificate entity, 2.1 The six stages, kept distinct, 2.2 Certificate generation state machine, 2.3 Delivery/activation state machine (per certificate × node), 2.4 End-to-end sequence (control plane is the ACME client), 2.5 Failure at any stage (+8 more)
+Cohesion: 0.24
+Nodes (10): computed_field, Derived lifecycle state: revoked wins over used wins over expired., 2. Certificate entity, 3.2 `certificate_generations` — one ACME order + one key pair, 3.3 `certificate_deliveries` — per certificate × node, material-free, 3.4 `dns_providers` — customer DNS credentials (metadata-only reads), 3.5 Reused / changed existing entities, 3.6 Monitors (+2 more)
 
 ### Community 160 - "build_capabilities"
 Cohesion: 0.13
 Nodes (15): build_capabilities(), collect_container_stats(), collect_containers(), _container_ports(), _container_status(), docker_capability(), _docker_request(), _docker_socket() (+7 more)
 
 ### Community 161 - "alert_service.py"
-Cohesion: 0.22
-Nodes (13): create_alert(), get_alert(), mark_all_read(), mark_read(), AsyncSession, UUID, Alert inbox: insert-only creation plus read/unread bookkeeping., Map a system event type to the alert severity it deserves. (+5 more)
+Cohesion: 0.20
+Nodes (17): AlertSeverity, Alert, create_alert(), get_alert(), mark_all_read(), mark_read(), AsyncSession, UUID (+9 more)
 
 ### Community 162 - "decide"
 Cohesion: 0.23
 Nodes (18): decide(), matches_token(), Constant-time comparison of the observed TXT values against the token. TXT…, Turn one observation into the verification outcome — pure, no I/O.…, observation(), parametrize, The verification decision: every outcome, without a network. ``decide`` is…, test_a_sweep_invalidates_a_changed_delegation_even_with_the_token() (+10 more)
 
-### Community 163 - "resolve_secrets_for_environment"
-Cohesion: 0.19
-Nodes (13): Exception, A ``${secret:KEY}`` reference could not be resolved. Fail-closed. Carries…, One successfully resolved reference: metadata for audit, no value., Outcome of resolving an environment's config references., Resolve every ``${secret:KEY}`` reference an environment's config names.…, resolve_secrets_for_environment(), ResolvedSecrets, SecretReference (+5 more)
+### Community 163 - "AlertsPage.tsx"
+Cohesion: 0.11
+Nodes (20): AlertOut, ChannelOut, DeliveryOut, AlertsPage, ChannelDialog(), DeleteChannelDialog(), describeError(), parseEventList() (+12 more)
 
 ### Community 164 - "AgentClient"
 Cohesion: 0.15
 Nodes (8): AgentClient, _docker_raw(), A verifying TLS context. Verification is never disabled. A private/self-hosted…, Refuse to send credentials over plain HTTP to a non-loopback server. The…, One raw Docker API call; returns ``(status, body_bytes)``., _tls_context(), _UnixHTTPConnection, SSLContext
 
-### Community 165 - "client_ip"
-Cohesion: 0.31
-Nodes (9): client_ip(), _enforce(), node_rate_limit(), _dependency(), Request, _dependency(), Return a dependency keyed on the **authenticated node**, not the IP. A fleet…, Best-effort client IP; honours X-Forwarded-For from trusted proxies. Delegates… (+1 more)
+### Community 165 - "certificate_lifecycle.py"
+Cohesion: 0.15
+Nodes (20): attempt_delay_seconds(), is_retryable(), is_terminal(), next_attempt_at(), datetime, The pre-issuance certificate lifecycle — pure decisions, no I/O, no side…, Whether a generation has spent every attempt it was allowed., Whether a failed generation may be moved back to ``ORDERING``. A failure is… (+12 more)
 
 ### Community 166 - "nginx.py"
-Cohesion: 0.13
-Nodes (23): _header_lines(), _quote(), _rate_zone(), NginxProvider — a pure, deterministic renderer plus the two op wrappers.…, Validate the route's headers and split them by destination., Wrap an already-validated value in quotes for a template slot. Values reaching…, The ``limit_req_zone`` declaration for a rate-limited route., A fixed host redirect, or ``None`` for a normal proxying route. (+15 more)
+Cohesion: 0.11
+Nodes (26): _header_lines(), _quote(), _rate_zone(), NginxProvider — a pure, deterministic renderer plus the two op wrappers.…, Validate the route's headers and split them by destination., Wrap an already-validated value in quotes for a template slot. Values reaching…, The ``limit_req_zone`` declaration for a rate-limited route., A fixed host redirect, or ``None`` for a normal proxying route. (+18 more)
 
-### Community 167 - "resolve_auth"
-Cohesion: 0.08
-Nodes (32): _attach_organization(), get_current_user(), get_identity(), get_optional_user(), _load_permissions(), membership_for_org(), _org_id_from_header(), AsyncSession (+24 more)
-
-### Community 168 - "Container"
+### Community 167 - "AuthContext"
 Cohesion: 0.09
-Nodes (26): Container, Observed container state mirrored from an agent or docker provider., Make a container row visible to this provider instance., ingest_provider_lines(), publish_log_line(), Best-effort publish of one frame to the container's Redis channel., Persist provider lines for a container AND fan them out to Redis. Used by the…, _apply_agent_entry() (+18 more)
+Nodes (31): _attach_organization(), AuthContext, get_current_user(), get_identity(), get_optional_user(), _load_organization(), _load_permissions(), _org_id_from_header() (+23 more)
+
+### Community 168 - "DashboardPage.tsx"
+Cohesion: 0.11
+Nodes (15): DashboardSummary, DashboardPage, LoadingBlock(), asFeedItem(), badgeLevel(), DashboardPage(), FeedItem, formatTimestamp() (+7 more)
 
 ### Community 169 - "test_a_late_result_for_an_expired_operation_cannot_fail_a_live_route"
-Cohesion: 0.13
-Nodes (23): _agent_result_body(), _audits(), _claim(), _event_types(), The same delivery twice: one apply, one set of events, one audit row., A report that contradicts what already happened is ignored, not applied., A report that arrives after its operation expired changes nothing at all., The result body the agent sends for one operation it claimed. Shared by the… (+15 more)
+Cohesion: 0.15
+Nodes (21): _agent_result_body(), _audits(), _claim(), _event_types(), The same delivery twice: one apply, one set of events, one audit row., A report that contradicts what already happened is ignored, not applied., A report that arrives after its operation expired changes nothing at all., The result body the agent sends for one operation it claimed. Shared by the… (+13 more)
 
 ### Community 170 - "test_agent_contract.py"
 Cohesion: 0.20
 Nodes (15): agent_fixture(), _load_agent(), _patch_stats(), Any, fixture, MonkeyPatch, Contract tests: the shipped agent's payloads must satisfy the ingest schemas.…, One-shot docker stats reduce to cpu/mem/limit fields the schema accepts, with… (+7 more)
 
-### Community 171 - "20261009_1000-c3d4e5f6a7b8_enforce_secret_version_integrity.py"
-Cohesion: 0.48
-Nodes (6): _clear_app_role_guc(), downgrade(), Phase 2.1 — enforce append-only ``secret_versions`` in the database. Phase 2…, Publish the app-role name to the migration GUC the revoke block reads., _set_app_role_in_guc(), upgrade()
+### Community 171 - "StepLine"
+Cohesion: 0.22
+Nodes (8): _commit_short(), Deployment runner port plus a faithful simulated implementation.…, Stream output lines for *step_name*; raise StepFailure to fail it., Everything a runner needs to execute one deployment., One streamed output line for a step., RunContext, _slug(), StepLine
 
-### Community 172 - "docs/engineering-report.md - build and verification report"
-Cohesion: 0.24
-Nodes (12): docker-compose.dev.yml - dev overlay, docker-compose.docker-sock.yml - docker socket override, docker-compose.yml - full stack definition, docs/agent.md - agent guide, docs/api.md - API guide, Append-only audit log (Postgres BEFORE UPDATE OR DELETE trigger), docs/deployment.md - deployment and operations guide, docs/development.md - developer guide (+4 more)
+### Community 172 - "docker_real.py"
+Cohesion: 0.17
+Nodes (19): _as_float(), _compute_stats(), _cpu_percent(), _network_bytes(), parse_log_line(), parse_rfc3339(), Any, datetime (+11 more)
 
-### Community 173 - "2. Entities"
-Cohesion: 0.25
-Nodes (8): 2.1.1 ApiKey org binding detail, 2.2.1 Environment promotion detail — **shipped in Phase 2**, 2.2 Delivery (existing models, extended), 2.4 Routing & TLS (new subsystem), 2.5 Secrets (re-scoped — **shipped in Phase 2**), 2.6 Observability (existing, org-scoped via parents), 2.7 Backups, connections, billing (new subsystems, design-only in early phases), 2. Entities
+### Community 173 - "container.py"
+Cohesion: 0.15
+Nodes (18): _container_out(), Serialize one row; env values never leave the database (keys only)., ContainerDetailOut, ContainerOut, ContainerRemoveOut, host_ref(), HostRef, LogEntryOut (+10 more)
 
 ### Community 174 - "create_api_key"
 Cohesion: 0.16
 Nodes (17): create_api_key(), list_api_keys(), CurrentUser, DbSessionDep, delete, get, post, Request (+9 more)
 
-### Community 175 - "scope_matches"
-Cohesion: 0.29
-Nodes (6): Check an API-key scope list against a required permission. Supports exact match…, scope_matches(), parametrize, test_scope_matches_truth_table(), 5. API keys, 2.1 Identity & tenancy (new)
+### Community 175 - "config.py"
+Cohesion: 0.14
+Nodes (15): _database_url(), Alembic environment: metadata comes from app.models, URL from app settings., Migrations run as the table **owner**, never as the application role. The owner…, Emit SQL to stdout without a live DB connection., Run migrations against the configured database., run_migrations_offline(), run_migrations_online(), fail_on_bad_config() (+7 more)
 
 ### Community 176 - "Platform Security Model — NexusOps"
-Cohesion: 0.11
-Nodes (19): make(), 10.1 Node revocation playbook (compromised node / leaked agent token), 10.2 Key compromise playbook, 10. Incident response, 1.1 Real vs simulated today (do not mistake one for the other), 1. Scope, stance, and simulation honesty, 2. Assets, 3. Trust boundaries (+11 more)
+Cohesion: 0.12
+Nodes (17): make(), 10.1 Node revocation playbook (compromised node / leaked agent token), 10.2 Key compromise playbook, 10. Incident response, 1.1 Real vs simulated today (do not mistake one for the other), 1. Scope, stance, and simulation honesty, 2. Assets, 3. Trust boundaries (+9 more)
 
-### Community 177 - "ContainerListPage.test.tsx"
-Cohesion: 0.29
-Nodes (3): ApiError, server, serversPage
+### Community 177 - "docker_sim.py"
+Cohesion: 0.14
+Nodes (10): ContainerStats, Point-in-time resource usage snapshot., Any, datetime, Simulated docker provider for demo and test environments. The provider is…, Plausible numbers derived from the row plus time-based sine noise., Replay registered LogEntry rows ordered by ts (tail N). ``follow`` is ignored…, _seed_int() (+2 more)
 
 ### Community 178 - "list_sessions"
-Cohesion: 0.20
-Nodes (11): list_sessions(), CurrentUser, DbSessionDep, delete, get, Request, UUID, Active sessions of this organization's members. Defaults to the caller's own;… (+3 more)
+Cohesion: 0.18
+Nodes (12): list_sessions(), CurrentUser, DbSessionDep, delete, get, Request, UUID, Active sessions of this organization's members. Defaults to the caller's own;… (+4 more)
 
 ### Community 179 - "_node_proxy_state"
 Cohesion: 0.16
-Nodes (21): _converged_node_with_a_route(), _hello_elsewhere(), _mark_reconcile_required_elsewhere(), _node_proxy_state(), _node_session(), _pause_render(), MonkeyPatch, One worker unit of work: a fresh session, its org scope, and its node. (+13 more)
+Nodes (21): _converged_node_with_a_route(), _hello_elsewhere(), _mark_reconcile_required_elsewhere(), _node_proxy_state(), _node_session(), _pause_render(), gated(), One worker unit of work: a fresh session, its org scope, and its node. (+13 more)
 
-### Community 180 - "websocket_endpoint"
-Cohesion: 0.67
-Nodes (3): websocket, Hand the socket to the hub (auth handshake handled there)., websocket_endpoint()
+### Community 180 - "router.py"
+Cohesion: 0.40
+Nodes (4): websocket, WebSocket endpoint. Mounted by the app factory under ``/api/v1``., Hand the socket to the hub (auth handshake handled there)., websocket_endpoint()
 
 ### Community 181 - "_nginx_apply"
 Cohesion: 0.12
@@ -940,25 +945,25 @@ Nodes (24): _fsync_dir(), _nginx_apply(), Materialize the bundle under ``staged/
 Cohesion: 0.11
 Nodes (23): _insert_http_includes(), _nginx_binary(), _nginx_bootstrap(), _nginx_config_test(), _nginx_failure_summary(), _nginx_running(), _nginx_status(), _pid_alive() (+15 more)
 
-### Community 183 - ".bundle_id"
-Cohesion: 0.18
-Nodes (10): 3.1 Domain, 3.2 Route, 3. Entities (per domain-model.md §2.4), 5. ProxyProvider interface, 8.1 Binding rules, 8.2 Certificate selection rule (this doc owns it) — **Phase 5 target design**, 8.3 Re-render triggers, 8.5 How deployments hook routing (post-deploy route sync) (+2 more)
+### Community 183 - "channel.py"
+Cohesion: 0.20
+Nodes (12): ChannelType, ChannelBase, ChannelCreate, ChannelUpdate, DeliveryOut, EmailConfig, model_validator, Schemas for notification channels and delivery records. Channel configuration… (+4 more)
 
 ### Community 184 - "create_api_key"
-Cohesion: 0.25
-Nodes (11): create_api_key(), list_api_keys(), AsyncSession, Request, UUID, Live (non-revoked) keys owned by *owner_id*, newest first., Revoke a key owned by *owner_id*. Foreign keys look like NotFound (no leak)., Revoke every live key of a user (used on deactivation). Returns count. (+3 more)
+Cohesion: 0.22
+Nodes (11): create_api_key(), list_api_keys(), AsyncSession, Request, UUID, Live (non-revoked) keys owned by *owner_id*, newest first., Revoke every live key of a user (used on deactivation). Returns count., Validate + normalise scopes; returns the deduplicated list. Accepts exact… (+3 more)
 
-### Community 185 - "UpstreamContainerOut"
-Cohesion: 0.20
-Nodes (11): One genuinely usable published port reported by the node's agent., A container that can actually back a route on this node., UpstreamContainerOut, UpstreamPortOut, container_out(), The address nginx should proxy to for one published binding. A wildcard bind…, The published ports of *container* that a route may actually point at. Honest…, Containers on *node_id* that can back a route, for the route editor. (+3 more)
+### Community 185 - "20261012_1200-c8d9e0f1a2b3_phase5_certificate_metadata.py"
+Cohesion: 0.23
+Nodes (13): downgrade(), _drop_certificate_permissions(), _drop_tenant_policies(), _grant(), _in_list(), Phase 5.1 — certificate metadata and the pre-issuance lifecycle. Adds, in one…, Grant the app role on *table*; the migration role GUC carries the name. The…, The two-policy shape every tenant table uses: tenant + system scope. (+5 more)
 
-### Community 186 - "maintenance.py"
-Cohesion: 0.12
-Nodes (33): _run(), _candidates(), _run(), _run(), _run(), _collect_logs(), _run(), Housekeeping: metric rollups, log trims, notification retries, session expiry. (+25 more)
+### Community 186 - "run_async"
+Cohesion: 0.04
+Nodes (89): collect_recent_logs(), Pull recent logs from running containers of a real host. Simulated hosts are…, flush_pending_publishes(), Wait for frames scheduled by ``after_commit`` hooks to reach Redis. The commit…, Celery application: periodic cadences live here, dynamic work is claimed…, task, Execute one queued deployment. The engine owns all state transitions., Re-enqueue deployments the broker lost; fail ones whose worker died.… (+81 more)
 
 ### Community 187 - "test_migration_drift.py"
-Cohesion: 0.25
-Nodes (7): alembic_autogenerate, alembic_migration, Model / migration drift: the schema in the database must match the models.…, ``Base.metadata`` and the migrated database must describe the same schema., The DB whitelist and ``OperationType`` are the same closed set. The migration…, test_models_and_migrations_do_not_drift(), test_operations_type_check_matches_the_enum()
+Cohesion: 0.18
+Nodes (11): alembic_autogenerate, alembic_migration, CertificateChallengeType, How ownership of an identifier is proved to the CA. DNS-01 only in v1: it is…, Model / migration drift: the schema in the database must match the models.…, ``Base.metadata`` and the migrated database must describe the same schema., The DB whitelist and ``OperationType`` are the same closed set. The migration…, The Phase 5.1 closed vocabularies are the sets the code declares.… (+3 more)
 
 ### Community 188 - "instant_pacing"
 Cohesion: 0.40
@@ -968,65 +973,69 @@ Nodes (4): instant_pacing(), fixture, MonkeyPatch, Remove the per-line sleeps; p
 Cohesion: 0.15
 Nodes (10): frontend_e2e_fixtures_expect, AGENT, NodeDetail, OperationRow, REPO_ROOT, ref_node_child_process, ref_node_fs, ref_node_os (+2 more)
 
-### Community 190 - "_heartbeat"
-Cohesion: 0.24
-Nodes (12): _container_id(), _create_node(), _heartbeat(), heartbeat_payload(), test_a_container_on_another_node_is_refused(), test_a_container_without_published_ports_offers_nothing(), test_a_listener_conflict_is_named_precisely(), test_a_stopped_container_cannot_be_enabled() (+4 more)
+### Community 190 - "server.py"
+Cohesion: 0.14
+Nodes (13): _clean_tag_names(), DockerHostSummary, EnrollTokenOut, Server API schemas: create/update payloads, list/detail outputs, enrollment., Compact system event projection for server timelines., One-time agent enrollment token. The raw value is never stored., Reject non-empty values that are not valid IPv4/IPv6 addresses., Strip, drop empties and de-duplicate tag names case-insensitively. (+5 more)
 
-### Community 191 - "Path"
-Cohesion: 0.12
-Nodes (15): Path, An unloadable CA file must error, never silently fall back to no verify., A throwaway key + self-signed cert for ``localhost`` (real handshakes)., A one-shot HTTPS server; records a failed handshake instead of crashing., A real handshake against a self-signed server must fail verification., Trusting that same cert as a CA lets the identical handshake through., A link-local URL over plain HTTP must fail before any request or write., _self_signed_cert() (+7 more)
+### Community 191 - "test_migration_phase3.py"
+Cohesion: 0.20
+Nodes (11): alembic_script, Phase 3 migration (``a1b2c3d4e5f6``) against realistic legacy data. Phase 3 is…, A fresh database reaches the same shape the models describe., Phase 3 adds one migration; heads must not fork., The pre-Phase-3 shapes: a node with telemetry, and operation history., _seed_legacy(), test_exactly_one_alembic_head(), test_migration_from_zero_adds_the_phase3_shape() (+3 more)
 
-### Community 192 - "20261010_1200-f4a5b6c7d8e9_phase4_domains_and_routes.py"
-Cohesion: 0.31
-Nodes (9): downgrade(), _drop_tenant_policies(), _grant(), _in_list(), Phase 4 — domains, routes and the routing schema. Adds, in one migration with a…, Grant the app role on *table*; the migration role GUC carries the name. The…, The two-policy shape every tenant table uses: tenant + system scope., _tenant_policies() (+1 more)
+### Community 192 - "get_settings"
+Cohesion: 0.08
+Nodes (31): _quoted_list(), Add the operations framework table (node-agent-architecture.md §5). One tenant-…, upgrade(), downgrade(), _drop_constraint(), _quoted_list(), Phase 2 — projects & environments: env promotion, config, secret versions. This…, upgrade() (+23 more)
 
 ### Community 193 - "10. Implementation slices, acceptance criteria, tests, limitations"
 Cohesion: 0.25
 Nodes (8): 10.1 Slices (each independently reviewable, in order), 10.2 Test requirements (what "done" means per slice), 10.3.1 Approved decisions (previously open), 10.3.2 Known limitations (accepted, not blockers), 10.3.3 Open items and whether they block Phase 5.1, 10.3 Decisions and known limitations, 10.4 Reserved-operation-type lists — one source of truth (required consolidation), 10. Implementation slices, acceptance criteria, tests, limitations
 
-### Community 194 - "NexusOps — Phase 1 (Multi-Tenancy) Report"
-Cohesion: 0.29
-Nodes (7): OperationSpec, Everything the control plane needs to know about one operation type.…, 1. What Phase 1 delivered, 4. Operations framework (added in this pass), 5. Tests, 8. Position, NexusOps — Phase 1 (Multi-Tenancy) Report
+### Community 194 - "test_ws_hub.py"
+Cohesion: 0.10
+Nodes (34): _is_same_origin(), Browsers always send Origin on WS handshakes, even same-origin ones. When it…, _connection(), _drain(), _event_frame(), _fake_sessionmaker(), _FakeSession, hub() (+26 more)
 
-### Community 195 - "list_audit_logs"
-Cohesion: 0.29
-Nodes (7): list_audit_logs(), datetime, DbSession, Depends, get, PageParamsDep, Newest-first audit trail with optional filters. No write routes exist for this…
+### Community 195 - "get_host"
+Cohesion: 0.39
+Nodes (12): get_docker_host(), list_host_images(), list_host_networks(), list_host_volumes(), ping_docker_host(), DbSessionDep, get, _ReadPerm (+4 more)
 
-### Community 196 - "RouteHeader"
-Cohesion: 0.12
-Nodes (8): field_validator, model_validator, RateLimit, One header a route adds. ``target`` says where it lands., One route's request-rate ceiling (rendered as a ``limit_req_zone``)., RouteHeader, field_validator, test_rate_limit_constraints()
+### Community 196 - "list_docker_hosts"
+Cohesion: 0.17
+Nodes (11): list_docker_hosts(), alias, Depends, max_length, Query, Offset-paginated docker host listing; exposes status and last_error., DockerHostOut, field_serializer (+3 more)
 
-### Community 197 - "20261008_1200-b2c3d4e5f6a7_add_projects_and_environments.py"
-Cohesion: 0.53
-Nodes (5): downgrade(), _drop_constraint(), _quoted_list(), Phase 2 — projects & environments: env promotion, config, secret versions. This…, upgrade()
+### Community 197 - "main.py"
+Cohesion: 0.26
+Nodes (10): close_redis(), create_app(), _include_routers(), lifespan(), FastAPI, NexusOps API entrypoint. Wires middleware, error handling, REST routers and the…, Mount every domain router. Router variables follow the module contract., Start the WS hub + notification dispatcher; tear them down cleanly. (+2 more)
 
-### Community 198 - "Product Roadmap — NexusOps Multi-Tenant Platform"
-Cohesion: 0.11
-Nodes (18): What one reported result did to its operation row. The caller's side effects —…, ResultTransition, 0. Stance, 11. Phase 8 — Backups — **proposal, not implemented**, 12. Phase 9 — Billing & metering — **proposal, not implemented**, 13.1 Scope-creep gates — what must be true before each expansion, 13. First commercially meaningful version, 14. Biggest risks (short form) (+10 more)
+### Community 198 - "README.md - NexusOps overview"
+Cohesion: 0.09
+Nodes (43): What one reported result did to its operation row. The caller's side effects —…, ResultTransition, docker-compose.dev.yml - dev overlay, docker-compose.docker-sock.yml - docker socket override, docker-compose.yml - full stack definition, docs/agent.md - agent guide, docs/api.md - API guide, Append-only audit log (Postgres BEFORE UPDATE OR DELETE trigger) (+35 more)
 
-### Community 199 - "Platform Vision — NexusOps"
-Cohesion: 0.20
-Nodes (10): 1. Where NexusOps is today, 2.1 What we are NOT building, 2.2 The wedge (differentiation), 2. The direction, 3. Guiding principles, 4. Customer journey (target), 5.1 Architecture overview (target), 5. Control plane / data plane boundary (+2 more)
+### Community 199 - "CertificateStatus"
+Cohesion: 0.24
+Nodes (11): CertificateStatus, Certificate-level view of the *current* generation, derived, never stored raw.…, assert_pre_issuance(), certificate_status_for(), Return *value* as a pre-issuance state, or refuse it loudly. This is the guard…, The certificate-level status implied by a generation's state. Derived, never…, derive_status(), The certificate's status and its explanation, derived from *generation*.… (+3 more)
 
-### Community 200 - "ServerOut"
-Cohesion: 0.28
-Nodes (6): computed_field, Whether the node has reported capabilities at all (v2 hello)., Full server view with recent timeline events and container counts., Server as listed in collections. Never exposes the agent token hash., ServerDetail, ServerOut
+### Community 200 - "_validate_resolution"
+Cohesion: 0.24
+Nodes (9): _is_forbidden_address(), True when *addr* points into a network the server must never contact.…, Resolve *hostname* (AF_UNSPEC) and refuse any non-public answer., _validate_resolution(), test_private_and_special_addresses_are_forbidden(), test_public_addresses_are_allowed(), test_validate_resolution_passes_hostname_through(), IPv4Address (+1 more)
 
 ### Community 201 - "NotificationChannel"
 Cohesion: 0.23
 Nodes (11): NotificationChannel, A delivery target (email address / webhook endpoint). ``config_ciphertext``…, _create_monitor(), Monitor checks driving the full down -> incident -> recovery lifecycle., Regression: probe headers and URL query credentials never leave the API. Probe…, A monitor's checks, incidents and timeline all live in its organization, so the…, test_check_now_endpoint_runs_immediately(), test_down_then_recover_lifecycle() (+3 more)
 
-### Community 202 - "run_async"
-Cohesion: 0.08
-Nodes (36): flush_pending_publishes(), Wait for frames scheduled by ``after_commit`` hooks to reach Redis. The commit…, task, Re-enqueue deployments the broker lost; fail ones whose worker died.…, sweep_deployments(), task, Flag silent servers OFFLINE, recover returning ones. Safe to overlap., sweep_servers() (+28 more)
+### Community 202 - "test_tasks_util.py"
+Cohesion: 0.36
+Nodes (8): _answer(), _boom(), _nested(), Unit tests for the Celery-task async bridge (pure asyncio, no broker)., test_run_async_awaits_nested_coroutines(), test_run_async_is_repeatable_per_invocation(), test_run_async_propagates_exceptions(), test_run_async_returns_coroutine_result()
 
 ### Community 203 - "ProxyProvider"
 Cohesion: 0.33
 Nodes (5): ProxyProvider, Any, Protocol, What ``app.services.proxy_service`` is allowed to assume about a provider. The…, 11. Post-deploy hooks
 
-### Community 205 - ".dispatch"
-Cohesion: 0.60
-Nodes (3): Request, Response, RequestResponseEndpoint
+### Community 204 - "create_docker_host"
+Cohesion: 0.22
+Nodes (9): create_docker_host(), delete_docker_host(), delete, post, Request, Delete the host and cascade-delete its containers and images., Register a host. Endpoint allowlist: unix://, tcp://, sim:// or ''., _CreatePerm (+1 more)
+
+### Community 205 - "ContainerInfo"
+Cohesion: 0.28
+Nodes (4): ContainerInfo, List containers visible to the provider., Inspect a single container by id (short ids allowed)., Normalized view of a container as reported by any provider.
 
 ### Community 206 - "test_agent_ingestion.py"
 Cohesion: 0.30
@@ -1037,12 +1046,16 @@ Cohesion: 0.20
 Nodes (10): _allowed_bundle_path(), _live_bundle_id(), _live_files(), The bundle fingerprint — byte-identical to the control plane's algorithm.…, Read the live managed tree, or ``None`` when it does not exist yet., Fingerprint of the configuration tree currently on disk., Independently validate a bundle. Anything unexpected is refused., _template_version_of() (+2 more)
 
 ### Community 209 - "Multi-Tenancy Architecture"
-Cohesion: 0.17
-Nodes (11): Whether the runtime connection is the RLS-enforced application role. False…, 10. Migration (Phase 1), 1. Tenancy invariants, 2.1 Org creation — v1 decision, 2. Org resolution on every request, 4. Background jobs, 6. Agents, 7. The IDOR suite (+3 more)
+Cohesion: 0.15
+Nodes (12): Whether the runtime connection is the RLS-enforced application role. False…, 10. Migration (Phase 1), 1. Tenancy invariants, 2.1 Org creation — v1 decision, 2. Org resolution on every request, 4. Background jobs, 5. WebSockets, 6. Agents (+4 more)
 
-### Community 211 - "create_server"
+### Community 210 - "DockerHostCreate"
+Cohesion: 0.25
+Nodes (7): DockerHostCreate, DockerHostUpdate, model_validator, Validate/normalize an endpoint URL against the scheme allowlist., Payload for registering a docker host., Partial update payload; only supplied fields change., validate_endpoint_url()
+
+### Community 211 - "test_schemas_search.py"
 Cohesion: 0.33
-Nodes (6): create_server(), Fetch existing tags by name and case-preservingly create missing ones., Register a server; enforces unique names and auto-creates tags., Apply a partial update; ``tags`` replaces the whole set when provided., _resolve_tags(), update_server()
+Nodes (8): Results grouped per entity type, permission-filtered per caller. Every section…, SearchResultOut, Unit tests for global-search schemas., test_extra_fields_are_forbidden(), test_search_hit_requires_core_fields(), test_search_result_defaults_to_empty_sections(), test_search_result_exposes_exactly_the_documented_sections(), test_sections_hold_hits()
 
 ### Community 212 - "test_notifications.py"
 Cohesion: 0.39
@@ -1052,105 +1065,117 @@ Nodes (8): _channel(), _delivery(), UUID, Notification channel + delivery-log en
 Cohesion: 0.22
 Nodes (3): _FakeAsyncClient, _FakeRequestObj, Scripted httpx.AsyncClient: responses keyed by absolute request URL.
 
-### Community 214 - "test_migration_phase22.py"
-Cohesion: 0.28
-Nodes (8): UUID, Phase 2.2 — the environment-type correction follows the documented precedence.…, Only the previous migration's ``PROD`` output is corrected. A row already…, Create one legacy (application-scoped) environment per case., Every branch of the slug-first rule, end to end through ``head``., _seed_legacy(), test_correction_preserves_operator_set_values(), test_recognised_slug_alias_wins_over_a_conflicting_name()
+### Community 214 - "_provider_inventory"
+Cohesion: 0.31
+Nodes (9): list_images(), list_networks(), list_volumes(), _provider_inventory(), Any, Run an inventory call; degrade gracefully on provider failure. Unreachable…, Images on a host; empty list when the host is unreachable., Volumes on a host; empty list when the host is unreachable. (+1 more)
 
 ### Community 215 - "9. Renewal, expiration, ownership loss, removal, revocation"
 Cohesion: 0.33
 Nodes (6): 9.1 Renewal, 9.2 Expiration monitoring, 9.3 Ownership loss (a verified Domain changes owners), 9.4 Removal, 9.5 Revocation, 9. Renewal, expiration, ownership loss, removal, revocation
 
-### Community 216 - "client_ip.py"
-Cohesion: 0.25
-Nodes (8): _is_trusted(), _parse_networks(), Client-IP resolution behind chained reverse proxies. The API never takes TCP…, Parse a comma-separated CIDR list; malformed entries are skipped., test_parse_networks_skips_malformed_entries(), functools, ipaddress, _Network
+### Community 216 - "ssrf.py"
+Cohesion: 0.13
+Nodes (18): is_simulation_url(), ValueError, _raise_block(), SSRF guard applied to every operator-supplied outbound URL. Monitors and…, True when *url* targets the built-in simulated checker (``sim://``)., Internal signal: a specific SSRF rule matched (never shown to clients)., UrlRejected, _validate_syntax() (+10 more)
 
 ### Community 217 - "_verified_domain"
-Cohesion: 0.16
-Nodes (19): One bounded look at a name's authoritative TXT record., TxtObservation, _count_rows_in_system_scope(), The second organization wins; the first stops being the owner., _run_verify(), test_a_domain_losing_verification_pulls_its_route(), test_a_sweep_invalidates_a_changed_delegation_and_re_verification_restores_it(), test_a_verified_domain_goes_stale_then_unverified_when_proof_disappears() (+11 more)
+Cohesion: 0.15
+Nodes (22): DomainStatus, Ownership-verification lifecycle of a Domain (domain-routing.md §4). ``STALE``…, One bounded look at a name's authoritative TXT record., TxtObservation, The state a domain flip forces on its routes, or ``None`` to leave them., route_config_state_for(), _flip_name_to(), Have *second_org* prove control of *name*, returning the verify outcome. (+14 more)
 
-### Community 218 - "redact_log_event"
-Cohesion: 0.19
-Nodes (13): Any, structlog processor: scrub one record before anything renders it. The pipeline…, Replace every embedded PEM private-key block in *value* with the marker. Only…, Scrub PEM private-key blocks out of one free-text value. The scalar counterpart…, Recursively redact one value of any shape — the depth-agnostic walk. Dicts,…, redact_log_event(), _redact_private_key_blocks(), redact_text() (+5 more)
+### Community 218 - "1. Scope and current state"
+Cohesion: 0.24
+Nodes (10): Replace every embedded PEM private-key block in *value* with the marker. Only…, Scrub PEM private-key blocks out of one free-text value. The scalar counterpart…, Recursively redact one value of any shape — the depth-agnostic walk. Dicts,…, _redact_private_key_blocks(), redact_text(), redact_value(), 1. Scope and current state, 7.1 Flow: config apply with rollback (+2 more)
 
-### Community 219 - "Domain Model — NexusOps as a Multi-Tenant Platform"
-Cohesion: 0.40
-Nodes (5): 0. Design stance, 1.1 ER diagram, 1. The hierarchy, 3. Cross-cutting decisions, Domain Model — NexusOps as a Multi-Tenant Platform
+### Community 219 - "update_channel"
+Cohesion: 0.44
+Nodes (9): _audit(), create_channel(), delete_channel(), encrypt_config(), _normalize_events(), AsyncSession, Request, Encrypt the whole provider config blob for storage. (+1 more)
 
-### Community 220 - "permissions.py"
-Cohesion: 0.29
-Nodes (5): permission_exists(), PermissionSpec, Permission registry and role matrix. Permissions are *data*: the registry below…, test_permission_exists_helper(), fnmatch
+### Community 220 - "test_app_gating.py"
+Cohesion: 0.44
+Nodes (8): _app_for_environment(), MonkeyPatch, ENVIRONMENT gating contract: docs exposure and HSTS (see .env.example).…, create_app() with get_settings() patched to the given environment., test_non_production_does_not_emit_hsts(), test_non_production_keeps_docs_and_schema(), test_production_emits_hsts(), test_production_hides_docs_and_schema()
 
-### Community 221 - ".facts"
-Cohesion: 0.50
-Nodes (3): Alias for :attr:`extra`, so the API can expose open-ended agent facts. The…, 2.3 Infrastructure — Nodes, 2.1 Current shape (real)
+### Community 221 - "register_exception_handlers"
+Cohesion: 0.36
+Nodes (8): _error_payload(), FastAPI, Request, register_exception_handlers(), handle_app_error(), handle_http_exception(), handle_unexpected(), handle_validation_error()
 
-### Community 223 - "test_capability_report_shape_is_accepted"
-Cohesion: 0.50
-Nodes (4): CapabilityReport, One node-reported capability. ``present`` defaults to false, and a capability…, Whatever the pre-flight returns must satisfy the hello schema., test_capability_report_shape_is_accepted()
+### Community 223 - "5. ACME issuance and DNS-01 handling"
+Cohesion: 0.25
+Nodes (8): 5.1 Decision: maintained ACME client library (josepy/`acme`), not a hand-rolled RFC 8555 client, 5.2 Challenge: DNS-01 only in v1, 5.3 DNS provider abstraction and the DNS-01 flow, 5.4 ACME account, 5.5 Issuance task and idempotency, 5.6 HTTPS activation (the "HTTP keeps serving" rule), 5.7 HTTP-01 (later fallback, design only), 5. ACME issuance and DNS-01 handling
 
-### Community 224 - "VerificationDecision"
-Cohesion: 0.50
-Nodes (4): What the lifecycle should do with an observation., VerificationDecision, _detail_for(), A short, safe explanation. The expected token never appears in it.
-
-### Community 225 - "register_agent_hello"
-Cohesion: 0.50
-Nodes (4): _negotiate_protocol(), The wire version this node will use: the lower of the two sides., Mark the agent enrolled and persist its static host facts. Capabilities are…, register_agent_hello()
-
-### Community 226 - "servers.py"
-Cohesion: 0.18
-Nodes (18): create_enrollment_token(), _enrollment_created(), _enrollment_out(), list_enrollment_tokens(), Node endpoints: CRUD, tags, agent enrollment tokens. The domain entity is the…, Mint one single-use enrollment token in the caller's organization. The org…, Enrollment tokens in the active organization, newest first. The response type…, Revoke an unused enrollment token immediately. (+10 more)
-
-### Community 227 - "_run"
+### Community 224 - "InvalidTransition"
 Cohesion: 0.33
-Nodes (7): _containers_for(), task, Deterministic smooth value in [base-amplitude, base+amplitude]., Stable per-server container set; one container cycles EXITED occasionally., simulation_tick(), _run(), _wave()
+Nodes (5): InvalidTransition, ValueError, Two pre-issuance states with no legal move between them., A generation state this phase's schema cannot express. Raised for the post-…, UnrepresentableState
 
-### Community 228 - "asyncio"
+### Community 225 - "20261009_1100-d4e5f6a7b8c9_correct_legacy_environment_types.py"
+Cohesion: 0.33
+Nodes (3): downgrade(), Phase 2.1 — correct legacy ``environment_type`` classification. The Phase 2…, No-op: the correction is a best-effort classification, not reversible.…
+
+### Community 226 - "DeploymentRunner"
+Cohesion: 0.33
+Nodes (5): DeploymentRunner, Protocol, Adapter interface implemented by real (future) and simulated runners., Return the ordered step names for this run., 2. What survives unchanged
+
+### Community 227 - "20260923_1000-c4e2a1f7b9d3_rename_server_codenames_to_node.py"
+Cohesion: 0.60
+Nodes (4): downgrade(), rename ``server.*`` permission codenames to ``node.*`` The Node/Server…, _rename_permissions(), upgrade()
+
+### Community 228 - "test_run_async_publishes_frames_scheduled_by_the_commit_hook"
+Cohesion: 0.29
+Nodes (5): _FakeDb, Stands in for an ``AsyncSession`` whose only job here is ``sync_session``. A…, The shape of a worker task whose last statement is a commit., test_run_async_publishes_frames_scheduled_by_the_commit_hook(), commit_then_return()
+
+### Community 229 - "_dns_stub"
+Cohesion: 0.40
+Nodes (5): _dns_stub(), _fake_observe(), fixture, MonkeyPatch, Stand in for authoritative DNS in every test in this module.
+
+### Community 230 - "redis_down"
+Cohesion: 0.40
+Nodes (4): _clean_memory_windows(), fixture, MonkeyPatch, redis_down()
+
+### Community 231 - "lax"
+Cohesion: 0.40
+Nodes (5): lax(), fixture, Production posture: private targets are NOT allowed (resolution runs)., Simulation posture: resolution skipped, syntax still enforced., strict()
+
+### Community 232 - "4. DNS ownership verification"
+Cohesion: 0.40
+Nodes (5): 4.1 The token, 4.2 The check (control-plane side), 4.3 Anti-takeover rules, 4.4 Sequence: add-domain → verified, 4. DNS ownership verification
+
+### Community 233 - "update_docker_host"
+Cohesion: 0.50
+Nodes (4): patch, Partially update name / endpoint_url / tls_verify / server_id., update_docker_host(), _UpdatePerm
+
+### Community 234 - "v1/meta.py"
 Cohesion: 0.22
-Nodes (7): asyncio, _FakeDb, Frames committed inside a task must reach Redis before that task's loop closes.…, Stands in for an ``AsyncSession`` whose only job here is ``sync_session``. A…, The shape of a worker task whose last statement is a commit., test_run_async_publishes_frames_scheduled_by_the_commit_hook(), commit_then_return()
+Nodes (9): get_meta(), DbSessionDep, get, Instance metadata: version, mode, and the caller's effective capabilities. The…, Public metadata; identity fields appear only for valid credentials., MetaOut, Public metadata schema + the canonical system-event type registry., Instance metadata. Identity fields are populated only when the caller presents… (+1 more)
 
-### Community 229 - "test_created_at_defaults.py"
-Cohesion: 0.50
-Nodes (3): created_at server defaults must evaluate per insert, not at table creation., Regression: system_events and audit_logs shipped with DEFAULT 'now()' (quoted…, test_audit_and_event_created_at_defaults_are_dynamic()
+### Community 235 - "_pace"
+Cohesion: 0.67
+Nodes (3): _pace(), Deterministic per-line delay between 0.05s and 0.35s., test_pace_bounds()
 
-### Community 230 - "20261009_1300-a1b2c3d4e5f6_add_phase3_nodes_and_agent_v2.py"
-Cohesion: 0.40
-Nodes (4): _grant(), Phase 3 — Nodes & Agent v2 schema. Adds, in one migration with a single head: *…, Grant the app role on *table*; the migration role GUC carries the name. The…, upgrade()
+### Community 236 - "7. Secure delivery of certificate material to authorized nodes"
+Cohesion: 0.33
+Nodes (6): 7.2 The mechanism: reference-only op + material in the claim response, 7.3 Authorization binding, 7.4 Derived (never configured) target set, 7.5 Recovery for an interrupted delivery, 7.6 Material never persists in ordinary data, 7. Secure delivery of certificate material to authorized nodes
 
-### Community 231 - "test_remove_honours_force_and_never_shells"
-Cohesion: 0.50
-Nodes (3): test_container_start_maps_to_a_fixed_api_call(), fake_raw(), test_remove_honours_force_and_never_shells()
-
-### Community 232 - "require_permission"
-Cohesion: 0.17
-Nodes (11): permission_dep(), Any, Dependency factory enforcing a permission; returns 403 when denied., require_permission(), _check(), _FakeCtx, Duck-typed stand-in for AuthContext., test_require_permission_raises_forbidden_when_denied() (+3 more)
-
-### Community 234 - "get_meta"
-Cohesion: 0.40
-Nodes (5): get_meta(), DbSessionDep, get, Public metadata; identity fields appear only for valid credentials., OptionalUser
-
-### Community 236 - "v1/agent.py"
-Cohesion: 0.09
-Nodes (36): agent_enroll(), agent_heartbeat(), agent_hello(), claim_operation(), _presented_token(), DbDep, post, Request (+28 more)
+### Community 241 - "redact_log_event"
+Cohesion: 0.18
+Nodes (12): configure_logging(), _orjson_dumps(), Any, structlog processor: scrub one record before anything renders it. The pipeline…, Configure structlog + stdlib logging once at process start. Everything…, redact_log_event(), Both chains carry the processor: structlog's, and the foreign one.…, test_configure_logging_installs_redaction_on_every_logging_path() (+4 more)
 
 ## Knowledge Gaps
-- **494 isolated node(s):** `meta`, `SCHEMA`, `RESEARCH_COMMON`, `CHALLENGE_COMMON`, `TASKS` (+489 more)
-  These have ≤1 connection - possible missing edges or undocumented components. (Counts symbols only; 2356 node(s) total have ≤1 connection when file, concept and rationale nodes are included.)
-- **25 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
+- **495 isolated node(s):** `meta`, `SCHEMA`, `RESEARCH_COMMON`, `CHALLENGE_COMMON`, `TASKS` (+490 more)
+  These have ≤1 connection - possible missing edges or undocumented components. (Counts symbols only; 2459 node(s) total have ≤1 connection when file, concept and rationale nodes are included.)
+- **20 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
 
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
-- **Why does `6. Tooling: reproducible e2e` connect `maintenance.py` to `NexusOps — Phase 1 (Multi-Tenancy) Report`, `run_async`, `client.ts`, `NotFound`, `org_scope`, `auth_service.py`?**
-  _High betweenness centrality (0.246) - this node is a cross-community bridge._
-- **Why does `useEventStream()` connect `client.ts` to `apiGet`, `App.tsx`, `AuthContext.tsx`, `ServerDetailPage.tsx`, `@tanstack/react-query`, `maintenance.py`?**
-  _High betweenness centrality (0.246) - this node is a cross-community bridge._
-- **Why does `TenancyScopeError` connect `org_scope` to `AuthContext`, `deps.py`, `core/tenancy.py`, `resolve_auth`, `maintenance.py`, `assert_error_code`, `publish`, `enrollment_service.py`, `enums.py`, `test_tenant_isolation.py`, `apply_scope_to_session`?**
+- **Why does `6. Tooling: reproducible e2e` connect `run_async` to `test_ws_hub.py`, `TenancyScopeError`, `client.ts`, `Conflict`, `get_sessionmaker`, `seed.py`?**
+  _High betweenness centrality (0.237) - this node is a cross-community bridge._
+- **Why does `useEventStream()` connect `client.ts` to `apiGet`, `Layout.tsx`, `DashboardPage.tsx`, `App.tsx`, `ServerDetailPage.tsx`, `DeploymentDetailPage.tsx`, `run_async`?**
+  _High betweenness centrality (0.230) - this node is a cross-community bridge._
+- **Why does `TenancyScopeError` connect `TenancyScopeError` to `test_certificates.py`, `enums.py`, `AuthContext`, `run_async`, `assert_error_code`, `deps.py`, `enrollment_service.py`, `test_tenant_isolation.py`, `get_sessionmaker`?**
   _High betweenness centrality (0.109) - this node is a cross-community bridge._
-- **Are the 94 inferred relationships involving `AuthContext` (e.g. with `TenancyScopeError` and `MembershipStatus`) actually correct?**
-  _`AuthContext` has 94 INFERRED edges - model-reasoned connections that need verification._
+- **Are the 98 inferred relationships involving `AuthContext` (e.g. with `TenancyScopeError` and `MembershipStatus`) actually correct?**
+  _`AuthContext` has 98 INFERRED edges - model-reasoned connections that need verification._
 - **Are the 3 inferred relationships involving `APIModel` (e.g. with `OperationSpec` and `test_specs_reject_unknown_params()`) actually correct?**
   _`APIModel` has 3 INFERRED edges - model-reasoned connections that need verification._
 - **Are the 5 inferred relationships involving `Server` (e.g. with `ServerStatus` and `2.3 Infrastructure — Nodes`) actually correct?**
   _`Server` has 5 INFERRED edges - model-reasoned connections that need verification._
-- **Are the 5 inferred relationships involving `apiGet()` (e.g. with `ContainerDetailPage.test.tsx` and `mockApi()`) actually correct?**
-  _`apiGet()` has 5 INFERRED edges - model-reasoned connections that need verification._
+- **Are the 8 inferred relationships involving `record()` (e.g. with `AuthContext` and `client_ip()`) actually correct?**
+  _`record()` has 8 INFERRED edges - model-reasoned connections that need verification._

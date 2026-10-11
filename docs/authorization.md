@@ -73,6 +73,16 @@ compatibility alias.
 `deployment.build` (Phase 6b git builds — DevOps holds it via the `deployment.*`
 wildcard, Developer explicitly; 6b ships only after this codename exists).
 
+**Certificate permissions — matrix decided (Phase 5.0.1).** Phase 5.1 registers
+`certificate.read` / `certificate.manage` and seeds them against the **stored role
+names as they are today** (the `Operator` → `DevOps` rename below is *not* part of
+Phase 5): **Owner** via the `*` wildcard, **Admin** and **Operator** hold both,
+**Developer** and **Viewer** hold `certificate.read` only. Both codenames are
+organization-scoped (resolved from the active membership like every Phase 1 codename),
+and certificate reads are **metadata-only** — neither codename exposes a private key,
+plaintext certificate material, or ciphertext. This closes the Phase 5 design's open
+item O3 (phase5-design.md §4.1).
+
 **Deliberately NOT added: `node.execute`.** There is no remote shell. Operations are
 whitelisted types, each mapping to an existing or new codename (container lifecycle
 → `container.lifecycle`; nginx apply → `domain.manage`). If a legitimate need for
@@ -100,6 +110,11 @@ update, not a data migration). Until it lands the seeded role is still `Operator
 No display-vs-stored split: docs, API, and DB use one name.
 
 ## 3. The five system roles (target)
+
+> **Role names:** the bullets below use the *target* name `DevOps`; until the rename
+> ships (§2) the **stored** role is `Operator`. For the certificate permissions the two
+> names are the same role: `Operator`/`DevOps` holds `certificate.read` +
+> `certificate.manage` today, under the current seed.
 
 Per-role permission sets (authoritative source after migration: `ROLE_MATRIX` in
 `backend/app/core/permissions.py`):

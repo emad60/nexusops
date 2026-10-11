@@ -174,7 +174,7 @@ stateDiagram-v2
     FAILED --> ORDERING: retry (bounded backoff)
     ISSUED --> SUPERSEDED: a newer generation became ISSUED
     ISSUED --> SUSPENDED: ownership lost for all its identifiers
-    SUPERSEDED --> SUSPENDED: ownership lost; retained identifiers ?
+    SUPERSEDED --> SUSPENDED: ownership lost for some identifiers
     ISSUED --> EXPIRED: notAfter passed (from CA material)
     SUSPENDED --> REVOCATION_PENDING: impact check passed (or split complete)
     ISSUED --> REVOCATION_PENDING: manual revoke (certificate.manage)
@@ -276,25 +276,33 @@ sequenceDiagram
 ## 3. Database entities, ownership, indexes, constraints, lifecycle fields
 
 All Phase 5 tables are `OrgScoped` (session guard + RLS + `org_id`), following
-`domains`/`routes`. Columns marked *(+)* are new; all tables are **new** in Phase 5.
+`domains`/`routes`; all tables and columns below are **new** in Phase 5.
+
+**Slice column.** Each table below has a **Slice** column naming the migration that
+introduces that column, because the schema is delivered in two schema migrations, not
+one: Phase 5.1 (certificate metadata and lifecycle foundations) and Phase 5.2 (key
+envelope, DNS providers, ACME accounts, and the issuance/material columns). The
+dependency order and the constraint that ties `state` to material are in §3.7. **There
+is no placeholder provider and no placeholder DEK:** a column that references a table
+or an envelope is introduced in the same slice that creates it.
 
 ### 3.1 `certificates` — the identity (one row per requested certificate)
 
-| Column | Type | Notes |
+| Column | Slice | Notes |
 |---|---|---|
-| `id`, `org_id`, `created_at`, `updated_at` | — | `OrgScoped` + `TimestampMixin` |
-| `domain_id` *(+)* | UUID FK → `domains.id`, NOT NULL | The verified name this certificate is for; `ON DELETE RESTRICT` while any generation is live |
-| `primary_cn` | String(253) | Subject CN; canonical (same form as `domains.name`) |
-| `sans` | JSONB list | Additional identifiers on the order (apex + wildcard share one generation) |
-| `status` | String(16) + CHECK | Certificate-level view: `PENDING`/`ISSUED`/`FAILED`/`EXPIRED`/`SUSPENDED`/`REVOCATION_PENDING`/`REVOKED`/`REVOKED_LOCAL_ONLY` |
-| `suspended_at`, `suspension_reason` *(+)* | DateTime / String(64) | Set on ownership loss (`domain_ownership_lost`) or an operator suspension; cleared when the certificate is rebound or revoked |
-| `current_generation_id` *(+)* | UUID FK → `certificate_generations.id`, nullable | The generation a *new* bind should reference. NULL before the first `ISSUED`. |
-| `dns_provider_id` *(+)* | UUID FK → `dns_providers.id`, nullable | Overrides the Domain's provider for the challenge; NULL ⇒ inherit Domain then org default |
-| `challenge_type` | String(8) + CHECK | `dns-01` only in v1 (`http-01` is rejected at create for wildcards and not offered in the UI) |
-| `auto_renew` | Boolean, default true | The renewal sweep skips `false` |
-| `key_algorithm` | String(16) | v1 fixed `ecdsa-p256`; recorded so a future algorithm change is observable |
-| `expires_at` | DateTime, nullable | Copied from the current generation's `notAfter`, for list/sort/index convenience |
-| `last_error` | String(500) | Sanitized reason of the current generation's last failure |
+| `id`, `org_id`, `created_at`, `updated_at` | 5.1 | `OrgScoped` + `TimestampMixin` |
+| `domain_id` | 5.1 | UUID FK → `domains.id`, NOT NULL; the verified name this certificate is for; `ON DELETE RESTRICT` while any generation is live |
+| `primary_cn` | 5.1 | String(253); canonical (same form as `domains.name`) |
+| `sans` | 5.1 | JSONB list; additional identifiers on the order (apex + wildcard share one generation) |
+| `status` | 5.1 | String(16) + CHECK; certificate-level view: `PENDING`/`ISSUED`/`FAILED`/`EXPIRED`/`SUSPENDED`/`REVOCATION_PENDING`/`REVOKED`/`REVOKED_LOCAL_ONLY`. **Derived** from the current generation by the service; the *enforceable* material constraint lives on `certificate_generations` (§3.2/§3.7) |
+| `current_generation_id` | 5.1 | UUID FK → `certificate_generations.id`, nullable; the generation a *new* bind should reference. NULL before the first `ISSUED`. |
+| `challenge_type` | 5.1 | String(8) + CHECK; `dns-01` only in v1 (`http-01` is rejected at create for wildcards and not offered in the UI) |
+| `auto_renew` | 5.1 | Boolean, default true; the renewal sweep skips `false` |
+| `key_algorithm` | 5.1 | String(16); v1 fixed `ecdsa-p256` |
+| `expires_at` | 5.1 | DateTime, nullable; denormalized from the current generation's `notAfter` for list/sort; unset until a generation is issued |
+| `last_error` | 5.1 | String(500); sanitized reason of the current generation's last failure |
+| `dns_provider_id` | **5.2** | UUID FK → `dns_providers.id`, nullable; overrides the Domain's provider. Added **with** `dns_providers` — no forward reference, no placeholder provider row |
+| `suspended_at`, `suspension_reason` | **5.2** | DateTime / String(64); set on ownership loss (`domain_ownership_lost`) or an operator suspension; cleared when the certificate is rebound or revoked |
 
 Indexes / constraints:
 
@@ -309,39 +317,56 @@ Indexes / constraints:
 
 ### 3.2 `certificate_generations` — one ACME order + one key pair
 
-| Column | Type | Notes |
+| Column | Slice | Notes |
 |---|---|---|
-| `id`, `org_id`, `created_at`, `updated_at` | — | |
-| `certificate_id` | UUID FK → `certificates.id`, `ON DELETE CASCADE` | |
-| `generation` | Integer, `>= 1` | Monotonic per certificate; the *generation number* is what delivery binds to |
-| `state` | String(24) + CHECK | §2.2 |
-| `key_ciphertext` | Text | Fernet(org DEK) of the PKCS#8 private key |
-| `chain_ciphertext` | Text | Fernet(org DEK) of the full chain |
-| `fingerprint` | String(64) | SHA-256 of the leaf DER (server-verifiable, display + change detection, never a decryption oracle) |
-| `not_before`, `not_after` | DateTime | From the issued material |
-| `order_state` | JSONB | ACME order/challenge URLs, key authorizations, DNS record names/values — **public ACME data only, never the account key** |
-| `deke_id` | Integer, NOT NULL | Which org-DEK generation encrypted these columns, so a future DEK rotation can find rows to re-wrap (§6.3) |
-| `issued_at`, `revoked_at`, `revocation_state` | DateTime / String(24) | `NOT_REQUESTED` / `PENDING` / `REVOKED` / `FAILED` / `REVOKED_LOCAL_ONLY`; the CA axis, separate from `state` (§2.2, §9.3) |
-| `suspended_at`, `suspension_reason` | DateTime / String(64) | Generation-level suspension (a shared generation may be suspended for *some* identifiers only) — §9.3 |
-| `last_error`, `next_attempt_at`, `attempt_count` | — | Backoff cursors of the *generation* |
+| `id`, `org_id`, `created_at`, `updated_at` | 5.1 | |
+| `certificate_id` | 5.1 | UUID FK → `certificates.id`, `ON DELETE CASCADE` |
+| `generation` | 5.1 | Integer, `>= 1`; monotonic per certificate; the *generation number* is what delivery binds to |
+| `state` | 5.1 → **widened 5.2** | String(24) + CHECK. **5.1** holds only the pre-issuance lifecycle: `PENDING`/`ORDERING`/`CHALLENGE_PUBLISHED`/`VALIDATING`/`FAILED` (so an issued generation is *unrepresentable* before the envelope exists). **5.2** widens it to the full vocabulary (§2.2) once material can be stored. |
+| `order_state` | 5.1 | JSONB; ACME order/challenge URLs, key authorizations, DNS record names/values — **public ACME data only, never the account key** (no key material, so it may exist before the envelope) |
+| `last_error`, `next_attempt_at`, `attempt_count` | 5.1 | Backoff cursors of the *generation* |
+| `key_ciphertext` | **5.2** | Text; Fernet(org DEK) of the PKCS#8 private key |
+| `chain_ciphertext` | **5.2** | Text; Fernet(org DEK) of the full chain |
+| `fingerprint` | **5.2** | String(64); SHA-256 of the leaf DER (display + change detection, never a decryption oracle) |
+| `not_before`, `not_after` | **5.2** | DateTime; from the issued material |
+| `deke_id` | **5.2** | Integer, **nullable** (pre-issuance rows have none); which org-DEK generation encrypted the material, so a DEK rotation can find rows to re-wrap (§6.3). Made effectively mandatory for material-bearing states by the guard CHECK below. |
+| `issued_at`, `revoked_at`, `revocation_state` | **5.2** | DateTime / String(24); `NOT_REQUESTED` / `PENDING` / `REVOKED` / `FAILED` / `REVOKED_LOCAL_ONLY` — the CA axis, separate from `state` (§2.2, §9.3). Unused until 5.6 |
+| `suspended_at`, `suspension_reason` | **5.2** | DateTime / String(64); generation-level suspension (a shared generation may be suspended for *some* identifiers only) — §9.3. Unused until 5.6 |
 
 Indexes / constraints:
 
-- `uq_certificate_generations_cert_number` UNIQUE `(certificate_id, generation)` —
+- `uq_certificate_generations_cert_number` UNIQUE `(certificate_id, generation)` (5.1) —
   the backstop against a rewound/duplicated renewal.
-- `ix_certificate_generations_sweep` `(state, next_attempt_at)`.
-- CHECK: `state='ISSUED'` ⇒ `chain_ciphertext`, `key_ciphertext`, `not_after` are
-  NOT NULL — a generation cannot be "issued" without material.
-- **At most one non-terminal generation per certificate** — enforced by
+- `ix_certificate_generations_sweep` `(state, next_attempt_at)` (5.1).
+- **At most one pre-issuance generation per certificate** (5.1) —
   `CREATE UNIQUE INDEX uq_cert_generations_one_live ON certificate_generations
   (certificate_id) WHERE state IN ('PENDING','ORDERING','CHALLENGE_PUBLISHED','VALIDATING')`.
   A second concurrent issuance is therefore a database error, not two racing orders.
+- **Material guard CHECK (added in 5.2, with the columns and the envelope).** A
+  generation in any post-issuance state must carry its material *and* the DEK generation
+  that encrypted it:
+
+  ```sql
+  CHECK (state IN ('PENDING','ORDERING','CHALLENGE_PUBLISHED','VALIDATING','FAILED')
+         OR (key_ciphertext IS NOT NULL AND chain_ciphertext IS NOT NULL
+             AND deke_id IS NOT NULL AND issued_at IS NOT NULL
+             AND not_before IS NOT NULL AND not_after IS NOT NULL))
+  ```
+
+  `SUPERSEDED`, `SUSPENDED`, `EXPIRED`, `REVOCATION_PENDING`, `REVOKED`,
+  `REVOCATION_FAILED` and `REVOKED_LOCAL_ONLY` are all material-bearing, so none of them
+  can exist without ciphertext and a DEK generation. This is the constraint the
+  dependency-ordering in §3.7 relies on: it is introduced **exactly when** the
+  envelope and the material columns are, not before (no placeholder `deke_id`).
 - Existing `ISSUED` generations are **never updated in place**: renewal inserts a new
   generation and flips the old one to `SUPERSEDED` in one transaction. This is what
   makes "an older generation must not replace a newer one" a structural property
   (§8.5), not a comparison the code must remember to do.
 
 ### 3.3 `certificate_deliveries` — per certificate × node, material-free
+
+**Slice: 5.4.** Depends on the `certificate_generations` material from 5.2; it adds no
+material of its own.
 
 | Column | Type | Notes |
 |---|---|---|
@@ -364,6 +389,9 @@ Constraints:
 
 ### 3.4 `dns_providers` — customer DNS credentials (metadata-only reads)
 
+**Slice: 5.2.** Created together with `certificates.dns_provider_id`'s FK (§3.7) — the
+reference never precedes its target table.
+
 A **dedicated table**, not a reuse of deployment-resolvable secrets and not a
 notification channel (rationale in §5.3).
 
@@ -385,17 +413,17 @@ exposes `name`, `kind`, `scopes`, `zone_allowlist`, `verified_at`, `credential_f
 
 ### 3.5 Reused / changed existing entities
 
-- **`routes`** gains `certificate_id` *(+)* (UUID FK → `certificates.id`,
+- **`routes`** gains `certificate_id` (UUID FK → `certificates.id`,
   `ON DELETE RESTRICT`, nullable) and a CHECK widened to
   `scheme IN ('http','https')` with the pairing rule:
   `(scheme='http' AND certificate_id IS NULL) OR (scheme='https' AND certificate_id IS NOT NULL)`.
   `scheme='https'` is **only** settable through the activation path in §5.6, never
-  by a plain PATCH.
+  by a plain PATCH. **Slice: 5.5.**
 - **`servers.proxy_state`** gains `tls` keys: the desired/confirmed certificate
   fingerprint set per node, written under the Phase 4.4 single-writer lock. No new
-  column.
+  column. **Slice: 5.5.**
 - **`monitors.target_type`** gains `CERTIFICATE` (currently only `URL`/`ROUTE`), for
-  the TLS-expiry monitor (§3.6). This is a CHECK-widening in the same migration.
+  the TLS-expiry monitor (§3.6). This is a CHECK-widening. **Slice: 5.6.**
 
 ### 3.6 Monitors
 
@@ -407,18 +435,61 @@ monitor (probe success/failure) is a separate monitor and a separate incident pa
 "the certificate is expiring" and "the endpoint is not answering" must not be the same
 alert.
 
+### 3.7 Chosen migration sequence and dependency order (decided)
+
+The dependencies are real: `certificates.dns_provider_id` references `dns_providers`,
+and `certificate_generations`' encrypted material references the organization DEK
+envelope. Both arrive in Phase 5.2. The chosen sequence is **two schema migrations**,
+sized so each slice introduces a column in the same slice that creates what it
+references — no forward reference, no placeholder DEK id, no artificial provider row.
+
+| Migration | Creates | Alters | Why this boundary |
+|---|---|---|---|
+| **5.1** — certificate metadata & lifecycle foundations | `certificates` (identity + lifecycle metadata, **including `domain_id`, `status`, `current_generation_id`, `challenge_type`, `auto_renew`, `key_algorithm`, `expires_at`**), `certificate_generations` (pre-issuance states + cursors) | — | 5.1 performs **no issuance**, so it needs no providers, no ACME account and no key material. The generation `state` CHECK is deliberately limited to pre-issuance states, so a material-less `ISSUED` generation is unrepresentable rather than merely discouraged. |
+| **5.2** — key envelope, providers, ACME accounts, material | `dns_providers`, `acme_accounts`; `organizations.dek_ciphertext` / `organizations.dek_generation` | `certificates`: `+dns_provider_id` (FK → `dns_providers`), `+suspended_at`, `+suspension_reason`. `certificate_generations`: `+key_ciphertext`, `+chain_ciphertext`, `+fingerprint`, `+not_before`, `+not_after`, `+deke_id`, `+issued_at`, `+revoked_at`, `+revocation_state`, `+suspended_at`, `+suspension_reason`; **widen `state`** to the full vocabulary; **add the material guard CHECK** | The FK target, the envelope and the material columns land together, so the reference is always satisfiable and the guard CHECK can be written once. |
+| 5.4 / 5.5 / 5.6 | `certificate_deliveries` (5.4); `routes.certificate_id` + widened `scheme` (5.5); `monitors.target_type` + `CERTIFICATE` (5.6) | as scoped in §10.1 | Each consumes the 5.1/5.2 foundations; none introduces an earlier dependency. |
+
+**The rule the sequence encodes:** a nullable column introduced early is acceptable
+only when a constraint makes its absence invalid in every state that requires it. Here
+`deke_id` is nullable (pre-issuance rows legitimately have no DEK), but the 5.2 guard
+CHECK makes it and the ciphertext **mandatory for every material-bearing state** — so
+there is no window in which an issued generation can lack its key material or its DEK
+generation. `dns_provider_id` is nullable by design (a certificate may inherit the
+Domain's provider), and its FK is created with its target table.
+
+**No placeholder identifiers.** `deke_id` is never seeded with a dummy generation, and
+no provider row is invented to satisfy the FK; if issuance is attempted before 5.2,
+the generation `state` CHECK rejects it because `ISSUED` is not in the 5.1 vocabulary.
+
 ---
 
 ## 4. Authorization and tenant isolation
 
-### 4.1 Codenames
-
-Phase 5 adds the two codenames already listed in authorization.md §2 — they are
-**not** registered today (`backend/app/core/permissions.py`):
+### 4.1 CodenamesPhase 5 adds the two codenames already listed in authorization.md §2 — they are **not**
+registered today (`backend/app/core/permissions.py`):
 
 - `certificate.read` — metadata, fingerprints, delivery state, monitor state.
 - `certificate.manage` — create/renew/revoke/delete; bind a certificate to a route;
   manage `dns_providers` (create/rotate/delete/verify).
+
+**Role matrix (O3, decided — resolved 2026-10-12).** The target matrix in
+authorization.md §3 is adopted, with the **current stored role names** — the
+`Operator` → `DevOps` rename is *not* implemented in Phase 5 and must not be implied:
+
+| Stored role (today) | `certificate.read` | `certificate.manage` | Note |
+|---|---|---|---|
+| Owner | ✓ (via `*`) | ✓ (via `*`) | wildcard, unchanged |
+| Admin | ✓ | ✓ | matches every other registry group |
+| **Operator** (future `DevOps`) | ✓ | ✓ | both; the rename is a separate change |
+| Developer | ✓ | — | read-only |
+| Viewer | ✓ | — | read-only |
+
+`certificate.manage` is **not** granted to Developer or Viewer; `certificate.read` is
+not action-bearing. Both codenames are **organization-scoped** (resolved from the
+active membership, like every Phase 1 codename) and reads stay **metadata-only**:
+`certificate.read` must never expose a private key, plaintext certificate material, or
+ciphertext — `certificate.manage` likewise never returns key material through any
+endpoint (management is create/renew/revoke/bind, not read).
 
 `dns_providers` deliberately has **no separate codename in v1**: managing a DNS
 credential is part of `certificate.manage`, because the credential exists only to
@@ -1083,8 +1154,8 @@ so an operator is never told a certificate is revoked when it is not.
 
 | Slice | Scope | Ships | Acceptance criteria |
 |---|---|---|---|
-| **5.1 — Certificate data model & read API** | `certificates`, `certificate_generations` (schema + migration + RLS/grant pattern from the Phase 4 migration), `certificate.read`/`certificate.manage` codenames + role matrix (O3), metadata-only CRUD (no issuance yet) | Migration + API + IDOR cases | A `certificates` row is org-scoped; a foreign id is 404; `GET` returns no ciphertext field; the one-live-generation unique index rejects a second concurrent issuance; the split-axis `state`/`revocation_state` CHECKs hold; drift test green. **Blocked by O3 (role matrix) only.** |
-| **5.2 — Key envelope & DNS provider registry** | `organizations.dek_ciphertext`/`dek_generation`, `dns_providers`, org-DEK wrap/unwrap + LRU, `deke_id`, `verify_creds` + zone allowlist | Migration + service + write-only API | DNS credential never returned by any endpoint; a challenge outside `zone_allowlist` is refused; DEK rotation re-encrypts only Phase-5 rows; no existing secret is re-encrypted; a `decrpyt_str` mismatch fails closed |
+| **5.1 — Certificate metadata & lifecycle foundations** | `certificates` + `certificate_generations` **first** migration (identity + pre-issuance lifecycle only — **no `dns_provider_id`, no material columns, no `deke_id`**), `certificate.read`/`certificate.manage` codenames **+ the role matrix (§4.1, O3 resolved)**, RLS/grant pattern from the Phase 4 migration, metadata-only CRUD (no issuance) | Migration + API + IDOR cases | A `certificates` row is org-scoped; a foreign id is 404; `GET` returns no ciphertext field; the one-live-generation unique index rejects a second concurrent issuance; **the generation `state` CHECK is limited to pre-issuance states, so an `ISSUED` row is rejected** (no forward dependency on 5.2); no `dns_providers` table exists yet and nothing references one; no `deke_id` column exists, so no placeholder can be written; role matrix matches §4.1; drift test green. |
+| **5.2 — Key envelope, providers & issuance foundations** | `dns_providers`, `acme_accounts`, `organizations.dek_ciphertext`/`dek_generation`, the generation material columns + `deke_id`, `certificates.dns_provider_id` **FK added with its target table**, widened `state` vocabulary, **material guard CHECK**; org-DEK wrap/unwrap + LRU, `verify_creds` + zone allowlist | Migration + service + write-only API | **An issued (or superseded/suspended/expired/revoked) generation cannot exist without `key_ciphertext`, `chain_ciphertext`, `deke_id`, `issued_at` and `not_after`** (guard CHECK rejects it); `dns_provider_id` FK resolves to a real row (no artificial provider); DNS credential never returned by any endpoint; a challenge outside `zone_allowlist` is refused; DEK rotation re-encrypts only Phase-5 rows; no existing secret re-encrypted; a `decrypt_str` mismatch fails closed |
 | **5.3 — ACME issuance (staging + pebble)** | `acme`/`josepy` dependency behind `AcmeProvider`; per-org account; DNS-01 order → publish → propagate → validate → finalize → store; state machine; backoff | Worker task + tests against pebble | Issue a certificate for a name whose TXT record the test publishes; generation reaches `ISSUED` with `not_after` set; retry/backoff and stuck-state sweep pinned; **no production CA traffic in tests** |
 | **5.4 — Secure delivery** | `certificate_deliveries`, `POST /agent/certificates/{id}/material`, `certificate.install`/`.remove` op types + agent handlers, content-addressed paths, fingerprint check, no-store response policy | Endpoint + op types + agent + contract tests | **No certificate private key or chain appears in operation params, results, audit metadata, events or logs** (asserted by tests over each path, §7.6); a foreign node's delivery is 404; a superseded generation is refused; a duplicate claim is idempotent; interrupted delivery recovers within the window and not after. **Non-production only until C1–C6 (§6.6) are met.** |
 | **5.5 — HTTPS activation & verification** | Renderer TLS block, allowlisted `tls` paths, `routes.certificate_id` + widen `scheme`, `proxy_state.tls`, activation endpoint, control-plane HTTPS probe | Migration + renderer + API | HTTP keeps serving until the probe succeeds; a bad cert path fails `nginx -t` and rolls back to the HTTP tree; `scheme` flips to `https` only after `VERIFIED_ACTIVE`; content-addressed path change ⇒ different `bundle_id` ⇒ drift detected |
@@ -1121,6 +1192,7 @@ so an operator is never told a certificate is revoked when it is not.
 | D1 | **Centralized control-plane custody** of TLS private keys for v1, accepted **conditionally**. | Conditions C1–C6 in §6.6. Production 5.4 is blocked until they are met; non-production accepts the risk. Node-side keygen stays out of scope. |
 | D2 | **ACME staging by default** for dev/tests/non-production; **production requires explicit configuration**; no silent fallback in either direction. | §5.4. A missing production config fails closed; a staging cert is labeled staging and never presented as production. |
 | D3 | **Ownership loss → immediate suspension + automatic reconcile, then automated CA revocation** subject to a certificate-impact safeguard; shared multi-identifier certificates are replaced/split **before** revocation; CA revocation never blocks removal. | §9.3 Stages 1–5. |
+| D4 | **Certificate role matrix (O3) resolved** per authorization.md §3, using the **current stored role name `Operator`** (no `Operator`→`DevOps` rename): Owner/Admin/Operator hold `certificate.read` + `certificate.manage`; Developer/Viewer hold `certificate.read`. Both org-scoped; reads metadata-only, never key material. | §4.1; authorization.md §2/§3. Registered with 5.1. |
 
 #### 10.3.2 Known limitations (accepted, not blockers)
 
@@ -1145,15 +1217,16 @@ with whether it blocks 5.1.
 |---|---|---|
 | O1 | **KMS / secret-manager vendor** for the KEK (C1). An external dependency choice; the `unwrap` seam and `deke_id` are already designed. | **No** — but blocks production (C1) and Phase 5.2's unwrap path. Decide before 5.2 lands. |
 | O2 | **Exact `acme`/`josepy` versions and pin policy**, and whether to use `acme`'s `ClientNetwork` or its higher-level message helpers. | **No** — needed at 5.3. |
-| O3 | **Role seeding for `certificate.read`/`certificate.manage`** (which of Owner/Admin/Operator-aka-DevOps/Developer/Viewer hold them). authorization.md §3 gives the target matrix; the registry change lands with 5.1. | **Yes (small)** — 5.1 registers the codenames, so the matrix must be confirmed with it. |
 | O4 | **`REVOCATION_FAILED` → operator action vs extended automatic retry budget.** The bounded-budget default is designed (§9.5); the exact budget/threshold is a tuning decision. | **No** — 5.6. |
 | O5 | **Expiry-monitor thresholds** (warn/critical days) — defaults proposed (30/7) but org-configurability is undecided. | **No** — 5.6. |
 | O6 | **Whether the multi-identifier split is automatic or operator-confirmed** when the replacement issuance itself needs DNS credentials for a still-owned zone. | **No** — 5.6; the safeguard (never revoke a still-serving shared cert) holds either way. |
 | O7 | **CAA record handling** — honor/refuse at issuance. Not designed here. | **No** — 5.3/5.7 hardening. |
 
-**Bottom line for 5.1:** only **O3** (the role matrix for the two new codenames) must be
-settled alongside 5.1; every other open item is bounded to a later slice or to
-production readiness, and none blocks starting 5.1. This task does not begin 5.1.
+**Bottom line for 5.1:** **O3 is resolved (D4, §4.1)** — Phase 5.1 registers the two
+codenames with the matrix Owner/Admin/Operator = read+manage, Developer/Viewer = read,
+using the current stored role name. Every remaining open item is bounded to a later
+slice or to production readiness, and **none blocks starting 5.1**. This task does not
+begin 5.1.
 
 ### 10.4 Reserved-operation-type lists — one source of truth (required consolidation)
 

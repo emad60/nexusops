@@ -129,7 +129,12 @@ policy as roles); delete is allowed only when orphaned.
 
 Codenames per authorization.md §2: `certificate.read`, `certificate.manage` — **not yet
 registered**; they are added to `backend/app/core/permissions.py` by the Phase 5 slice.
-Today only `domain.read` / `domain.manage` exist. No `node.execute` is introduced;
+Today only `domain.read` / `domain.manage` exist. **Role matrix (decided):** with the
+current stored role names (the `Operator` → `DevOps` rename is *not* shipped),
+Owner/Admin/**Operator** hold `certificate.read` + `certificate.manage`, and
+Developer/Viewer hold `certificate.read` only. Both are organization-scoped, and reads
+remain **metadata-only** — no endpoint returns a private key, plaintext certificate
+material or ciphertext (phase5-design.md §4.1). No `node.execute` is introduced;
 delivery rides whitelisted Operation types (§6) gated by `certificate.manage` +
 the `nginx` capability.
 
@@ -482,5 +487,9 @@ dedicated material endpoint assembled at read time, `Cache-Control: no-store`, b
    to a certificate-impact safeguard: a shared multi-identifier certificate is
    **replaced/split before revocation**, and CA revocation **never blocks removal** of
    the old configuration (phase5-design.md §9.3/§9.5).
+9. **Certificate role matrix** — Owner/Admin/Operator (`certificate.read` +
+   `certificate.manage`), Developer/Viewer (`certificate.read`), with the current stored
+   role name `Operator`; organization-scoped and metadata-only reads (§3,
+   phase5-design.md §4.1).
 
 Remaining open items for Phase 5.1 and beyond are listed in phase5-design.md §10.3.3.

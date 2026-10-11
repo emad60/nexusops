@@ -94,7 +94,8 @@ still design):
 | [authorization.md](authorization.md) | registry changes, 5 roles, grants design, no `node.execute` |
 | [node-agent-architecture.md](node-agent-architecture.md) | agent v2: capabilities, facts, Operation protocol |
 | [domain-routing.md](domain-routing.md) | Domain/Route, DNS verification, NginxProvider apply pipeline |
-| [certificate-management.md](certificate-management.md) | ACME DNS-01, renewal, encrypted delivery |
+| [certificate-management.md](certificate-management.md) | ACME DNS-01, renewal, encrypted delivery (subsystem overview) |
+| [phase5-design.md](phase5-design.md) | **authoritative Phase 5 design**: trust model, key hierarchy, private-key delivery, activation, slices |
 | [deployment-architecture.md](deployment-architecture.md) | real runners (image-based 6a, git 6b), env config layering |
 | [secrets-architecture.md](secrets-architecture.md) | SecretVersion, layered scope, node minimization |
 | [platform-security-model.md](platform-security-model.md) | threat model, tenancy invariants |

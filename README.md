@@ -221,6 +221,8 @@ tenancy model as built — org resolution, the session guard, PostgreSQL RLS and
   [node-agent-architecture.md](docs/node-agent-architecture.md),
   [domain-routing.md](docs/domain-routing.md) (its HTTP half is now shipped),
   [certificate-management.md](docs/certificate-management.md),
+  [phase5-design.md](docs/phase5-design.md) (authoritative Phase 5 HTTPS/certificate
+  design — not implemented),
   [deployment-architecture.md](docs/deployment-architecture.md),
   [secrets-architecture.md](docs/secrets-architecture.md),
   [platform-security-model.md](docs/platform-security-model.md).

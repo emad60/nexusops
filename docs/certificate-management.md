@@ -1,16 +1,33 @@
 # Certificate Management — NexusOps
 
-**Status:** Target design for Phase 2+ — nothing in this subsystem is implemented yet.
-**Date:** 2026-09-21 (status updated 2026-10-07)
-**Companions:** [platform-vision.md](platform-vision.md) · [domain-model.md](domain-model.md) · [multi-tenancy.md](multi-tenancy.md) · [authorization.md](authorization.md) · [node-agent-architecture.md](node-agent-architecture.md) · [domain-routing.md](domain-routing.md)
+**Status:** Subsystem overview. **No certificate issuance, TLS listener or HTTPS
+redirect is implemented** — the schema has no `certificate_id` column and
+`routes.scheme` is a closed CHECK of `'http'` (`backend/app/models/routing.py`). Everything
+below is **Phase 5 design**, not shipped behavior. The authoritative Phase 5 design
+(architecture, threat model, key hierarchy, delivery mechanism, slices and acceptance
+criteria) is [phase5-design.md](phase5-design.md); this document is the subsystem
+overview and defers to it on every decision where the two differ. The **HTTP half**
+of the surrounding subsystem — domains, routes, TXT verification, the nginx renderer
+and the `nginx.*` operations — **shipped in Phase 4** and is described in
+[domain-routing.md](domain-routing.md).
+**Date:** 2026-09-21 (status updated 2026-10-12)
+**Companions:** [phase5-design.md](phase5-design.md) · [domain-routing.md](domain-routing.md) · [domain-model.md](domain-model.md) · [multi-tenancy.md](multi-tenancy.md) · [authorization.md](authorization.md) · [node-agent-architecture.md](node-agent-architecture.md) · [secrets-architecture.md](secrets-architecture.md)
 
 ## 1. Scope and current state
 
-Nothing in this subsystem exists today. There is **no domains/certificates/reverse-proxy
-subsystem at all** — no certificate model, no ACME client, no DNS integration
-(platform-vision.md §1; the only TLS today is the outer reverse proxy documented in
-docs/deployment.md, which terminates the *dashboard's* own TLS, not customer traffic).
-Everything below is a design spec for new work.
+**Shipped (Phase 4):** the domains and routes tables (tenant RLS plus the
+platform-unique verified-name index), TXT ownership verification with the
+STALE → UNVERIFIED grace lifecycle and its sweeps, the nginx renderer, the three
+`nginx.*` operations, and the agent-side nginx provider with atomic apply and
+rollback — **HTTP only**. See domain-routing.md §1.
+
+**Not shipped (this document):** every certificate/TLS shape below — no
+`certificates` table, no ACME client, no DNS provider credential store, no TLS
+listener, no HTTPS redirect, and no certificate delivery. `routes.scheme` cannot be
+set to `https` and there is no `certificate_id` column, so an HTTPS route is not
+merely unwired — it is unrepresentable until Phase 5 adds it by migration. The only
+TLS anywhere today is the dashboard edge documented in docs/deployment.md, which
+terminates the *dashboard's* own TLS, not customer traffic (domain-routing.md §1).
 
 **v1 constraint, stated where HTTPS is promised:** issuance is DNS-01 only, and v1's
 DNSProvider implementation is **Cloudflare only** — v1 HTTPS requires the domain's
@@ -23,62 +40,85 @@ What exists and is reused:
 
 | Existing capability | Ground | Reuse here |
 |---|---|---|
-| Fernet helpers `encrypt_str` / `decrypt_str` / `digest_of` | backend/app/core/security.py:131-158 | Encrypt cert chain + private key at rest; display fingerprint |
-| Fernet-ciphertext-at-rest precedents | secrets.ciphertext (models/secrets.py:23-59), server_credentials.secret_ciphertext (models/infra.py:101-116), notification_channels.config_ciphertext (models/notify.py:27-48) | Same pattern for cert columns and Connection creds |
-| Metadata-only reads for secret-like resources | secret_service.py:49-62, channel config write-only (notification_service.py:103-120) | Certificate API never returns key material |
-| Log/audit redaction of sensitive keys | core/logging.py:19-60 (`private_key`, `token`, `credential`, ... substrings), applied in audit_service.py:54 | Defense-in-depth on every leak path |
-| Beat cadences + atomic claims | celery_app.py:47-93, claim pattern monitor_service.py:293-313 (`FOR UPDATE SKIP LOCKED`) | Renewal sweep, stuck-state sweep |
-| Incident/alert pipeline | incident_service.py:104-246, alert_service.py:17-29 | Issuance/expiry failures open incidents |
-| Append-only audit | audit_service.py:20-65, DB trigger | `certificate.*` events |
-| Agent auth (`X-Agent-Token`, SHA-256 lookup) | api/v1/agent.py:37-48 | Authenticated channel for delivery ops |
-| Operation rows the agent PULLS | domain-model.md §2.3, node-agent-architecture.md (spec) | `certificate.install` / `certificate.remove` op types |
+| Fernet helpers `encrypt_str` / `decrypt_str` / `digest_of` | `backend/app/core/security.py` | Encrypt cert chain + private key at rest; display fingerprint |
+| Fernet-ciphertext-at-rest precedents | `secrets.ciphertext` (`models/secrets.py`), `server_credentials.secret_ciphertext` (`models/infra.py`), `notification_channels.config_ciphertext` (`models/notify.py`) | Same pattern for cert columns and DNS-provider credentials |
+| Metadata-only reads for secret-like resources | `secret_service._detail` (`app/services/secret_service.py`), channel config write-only (`notification_service`) | Certificate API never returns key material |
+| Recursive, PEM-aware redaction | `core/logging.py` — `redact_mapping` / `redact_text` / `redact_value` / `redact_log_event` (Phase 4.4: dicts, lists and tuples at any depth **and** PEM-armor content matching), applied at write in `audit_service.record` | Defense-in-depth on every leak path — **not** a license to put keys in an unsafe data path (phase5-design.md §7) |
+| Beat cadences + atomic claims | `celery_app.py` `beat_schedule`; claim pattern `monitor_service` (`FOR UPDATE SKIP LOCKED`) | Renewal sweep, stuck-state sweep |
+| Incident/alert pipeline | `incident_service`, `alert_service` | Issuance/expiry failures open incidents |
+| Append-only audit | `audit_service.record` + DB trigger | `certificate.*` actions |
+| Agent auth (`X-Agent-Token`, SHA-256 lookup) | `api/v1/agent.py` (`require_server`) | Authenticated channel for delivery ops |
+| Pull-based operation control plane | shipped in Phase 1/3 — `operations` table, CAS claim/result, closed whitelist | `certificate.install` / `certificate.remove` op types (Phase 5, reference-only params) |
 
-Honesty labels: the agent today implements hello/heartbeat only — no operations channel
-exists yet; the ops framework this doc leans on is specified in
-node-agent-architecture.md, not built. Likewise the `Connection` entity (the DNS
-credential home; called *Integration* in earlier drafts) is design-only
-(domain-model.md §2.7). Nothing here is simulated *or* real — it is unbuilt.
+Honesty labels: the operations framework this document leans on **is real and shipped**
+(Phase 1/3, node-agent-architecture.md §5) — it is not a spec. The certificate
+subsystem itself is **not built**: no `certificates` table, no ACME client. Earlier
+drafts' `Connection`/`Integration` entity for DNS credentials does not exist in the
+tree; [phase5-design.md](phase5-design.md) §3.4/§5.3 decides a dedicated
+`dns_providers` table instead.
 
 ## 2. Certificate entity
 
-Per domain-model.md §2.4: the Route table carries an optional `certificate_id`, so one
-certificate may serve many routes while a route binds at most one (the spine ER line
-`Route |o--o| Certificate` understates this to 0..1:0..1; the Route table is
-authoritative). One row per issued certificate.
+**Not in the schema.** The shipped Route table has no `certificate_id` column and
+`scheme` is a closed CHECK of `'http'` (`backend/app/models/routing.py`); Phase 5 adds
+the column and widens the CHECK by migration. The design is that a Route carries an
+optional `certificate_id`, so one certificate may serve many routes while a route
+binds at most one (the spine ER line `Route |o--o| Certificate` understates this to
+0..1:0..1; the Route table is authoritative). One row per requested certificate.
+
+**Generation model (decided in phase5-design.md §3.2).** A certificate row is the
+*identity*; each ACME order + key pair is a separate **generation** row
+(`certificate_generations`, unique `(certificate_id, generation)`, at most one
+non-terminal generation per certificate). Renewal inserts a new generation and marks
+the old `SUPERSEDED`; it does **not** overwrite the material in place. Earlier drafts
+of this document said renewal reuses the row and replaces `chain_ciphertext` — that is
+corrected: keeping generations separate is what makes "an older generation must not
+replace a newer one" a structural property rather than a comparison the code must
+remember.
 
 | Field | Type | Notes |
 |---|---|---|
 | `org_id` | UUID FK, NOT NULL | Tenant root; session guard applies (multi-tenancy.md §3) |
 | `primary_cn` | String | Subject CN, e.g. `api.example.com` or `*.example.com` |
 | `sans` | JSONB list | Additional identifiers on the order (e.g. apex + wildcard) |
-| `status` | String + CHECK | `pending` → `validating` → `issued`; `failed`, `revoked`, `expired` (§10) |
-| `challenge_type` | String | `dns01` (default) or `http01` |
+| `status` | String + CHECK | Certificate-level view: `PENDING`/`ISSUED`/`FAILED`/`EXPIRED`/`SUSPENDED`/`REVOCATION_PENDING`/`REVOKED`/`REVOKED_LOCAL_ONLY`; `state` (material) and `revocation_state` (CA) are separate axes (phase5-design.md §2.2/§9.3) |
+| `challenge_type` | String + CHECK | `dns-01` only in v1; `http-01` is a later fallback, not offered (phase5-design.md §5.2/§5.7) |
 | `auto_renew` | Bool | Renewal scan skips rows with false |
-| `dns_provider_id` | UUID FK → integrations | DNSProvider creds for DNS-01; defaults from the Domain |
+| `dns_provider_id` | UUID FK → `dns_providers` | DNSProvider creds for DNS-01; defaults from the Domain (phase5-design.md §3.4/§5.3) |
 | `issued_at`, `expires_at` | DateTime | From the issued cert's notBefore/notAfter |
-| `chain_ciphertext` | Text | Fernet(`fullchain.pem`) via `encrypt_str` |
-| `key_ciphertext` | Text | Fernet(`privkey.pem`) via `encrypt_str` |
-| `fingerprint` | String | SHA-256 of the DER cert, truncated — display-only, like `digest_of` |
-| `order_state` | JSONB | ACME order/challenge URLs, key authorizations (public ACME data, no keys) |
-| `last_error` | Text nullable | Sanitized failure reason of the last attempt |
+| `chain_ciphertext` | Text | Fernet(**org DEK**, phase5-design.md §6) of `fullchain.pem` — on the generation row, not the certificate row |
+| `key_ciphertext` | Text | Fernet(**org DEK**) of `privkey.pem` — generation row |
+| `fingerprint` | String | SHA-256 of the leaf DER — display + change detection, never a decryption oracle (like `digest_of`) |
+| `order_state` | JSONB | ACME order/challenge URLs, key authorizations, TXT record refs (public ACME data, no keys) |
+| `last_error` | Text nullable | Sanitized failure reason of the current generation's last attempt |
 | `next_attempt_at` | DateTime nullable | Backoff cursor for failed attempts |
 | `attempt_count` | Int | Reset to 0 on success; drives backoff + give-up |
 
-Status machine:
+> **Ownership note:** the ciphertext columns, `fingerprint`, `order_state` and the
+> attempt cursors live on `certificate_generations` (one ACME order + key pair), not on
+> `certificates`. `certificates` holds identity (`primary_cn`, `sans`,
+> `dns_provider_id`, `auto_renew`) and a denormalized `status`/
+> `current_generation_id`/`expires_at`. Full column/index/constraint list:
+> phase5-design.md §3.
+
+Certificate **status** is a denormalized view of the current generation; the status
+machine below describes a single **generation** (phase5-design.md §2.2), which is what
+renewal creates and supersedes. Renewal does not re-enter `validating` on the same row:
 
 ```mermaid
 stateDiagram-v2
-    [*] --> pending: create (certificate.manage)
-    pending --> validating: ACME order created
-    validating --> issued: chain+key stored, expires_at set
-    validating --> failed: validation/DNS/finalize error
-    pending --> failed: order creation error
-    failed --> validating: retry (backoff) or manual renew
-    issued --> validating: renewal (new order, same row)
-    issued --> expired: expires_at passed without renewal
-    issued --> revoked: ACME revocation (certificate.manage)
-    failed --> [*]: deleted when no routes reference it
-    expired --> validating: renewal retry
+    [*] --> PENDING: generation created (certificate.manage)
+    PENDING --> ORDERING: ACME order created
+    ORDERING --> CHALLENGE_PUBLISHED: DNS-01 TXT published
+    CHALLENGE_PUBLISHED --> VALIDATING: challenge accepted by CA
+    VALIDATING --> ISSUED: finalize OK, chain+key stored, expires_at set
+    VALIDATING --> FAILED: validation/DNS/finalize error
+    ORDERING --> FAILED: order creation error
+    FAILED --> ORDERING: retry (backoff) or manual renew
+    ISSUED --> SUPERSEDED: a newer generation became ISSUED
+    ISSUED --> EXPIRED: notAfter passed without renewal
+    ISSUED --> REVOKED: ACME revocation (certificate.manage)
+    FAILED --> [*]: deleted with its certificate once unreferenced
 ```
 
 Certificate is referenced by `routes.certificate_id` (domain-model.md §2.4). A
@@ -87,9 +127,11 @@ policy as roles); delete is allowed only when orphaned.
 
 ## 3. API surface and permissions
 
-Codenames per authorization.md §2: `certificate.read`, `certificate.manage` — new
-registrations in `backend/app/core/permissions.py`. No `node.execute` is introduced;
-delivery rides whitelisted Operation types (§6).
+Codenames per authorization.md §2: `certificate.read`, `certificate.manage` — **not yet
+registered**; they are added to `backend/app/core/permissions.py` by the Phase 5 slice.
+Today only `domain.read` / `domain.manage` exist. No `node.execute` is introduced;
+delivery rides whitelisted Operation types (§6) gated by `certificate.manage` +
+the `nginx` capability.
 
 | Endpoint | Gate | Behavior |
 |---|---|---|
@@ -130,11 +172,15 @@ Cloudflare:
 | `propagation_check(name, value, deadline)` | Query authoritative NS before telling ACME "ready" |
 | `verify_creds()` | Health check on save |
 
-- Credentials live in **Integration rows** (domain-model.md §2.7: `org_id`, kind
-  `dns/cloudflare`, encrypted credentials) — Fernet-encrypted whole, write-only via the
-  API, masked display target: the exact pattern proven by notification channel config
-  (notification_service.py:93-120). A Cloudflare API token scoped to the zone is the
-  v1 credential shape.
+- Credentials live in the dedicated **`dns_providers` table** (`org_id`, `name`,
+  `kind`, `credentials_ciphertext`, `credential_fingerprint`, `scopes`,
+  `zone_allowlist`, `verified_at`) — Fernet(**org DEK**)-encrypted whole, write-only via
+  the API, metadata-only reads: the pattern proven by notification channel config and
+  secret metadata. A Cloudflare API token **scoped to the zone** is the v1 credential
+  shape, and `zone_allowlist` is enforced before any provider call. Rationale for a
+  dedicated table (vs reusing deployment-resolvable secrets or a notification channel)
+  and cleanup/validation rules: phase5-design.md §3.4/§5.3. **A customer DNS token must
+  never be delivered to a node.**
 - The Domain row carries `dns_provider_id` (domain-model.md §2.4); a certificate may
   override it for the challenge.
 - Later implementations (Route53, DigitalOcean, ...) add a class, a kind enum value,
@@ -144,11 +190,15 @@ Cloudflare:
 
 - Directory URL is configuration: Let's Encrypt production plus **staging**, which is
   the default for all non-production environments and for tests — staging exempts
-  development from production rate limits.
-- One ACME account per Organization per directory. The account key is generated
-  control-plane-side on first use and stored as a kind `acme/letsencrypt` Integration
-  row (Fernet-encrypted). Per-org accounts keep rate-limit blast radius and revocation
-  ownership scoped to the tenant.
+  development from production rate limits. **Staging is the default; production
+  issuance requires explicit production configuration and never silently falls back to
+  staging**, and a staging-issued certificate is never presented as a production one
+  (phase5-design.md §5.4).
+- One ACME account per Organization per directory (staging and production are
+  separate accounts). The account key is generated control-plane-side on first use and
+  stored in a dedicated `acme_accounts` row (`org_id`, `directory_url`, `account_url`,
+  `key_ciphertext` Fernet(**org DEK**)). Per-org accounts keep rate-limit blast radius
+  and revocation ownership scoped to the tenant (phase5-design.md §5.4).
 
 ### 4.4 HTTP-01 via node nginx (later fallback)
 
@@ -214,19 +264,29 @@ Delivery is an **Operation** (whitelisted type — the agent pulls; no remote sh
 
 | Op type | Params (at rest) | Effect on node |
 |---|---|---|
-| `certificate.install` | `{certificate_id, fingerprint}` — reference only | Pull response carries chain + key; writes `privkey.pem` 0600, `fullchain.pem` 0644 under `/etc/nexusops/tls/<certificate_id>/`; renders server block; `nginx -t`; atomic apply with rollback |
-| `certificate.remove` | `{certificate_id}` | Drops the served files + config fragment; applies |
+| `certificate.install` | `{certificate_id, generation, fingerprint}` — reference only | Material is fetched from the dedicated delivery endpoint (below); writes `privkey.pem` 0600, `fullchain.pem` 0644 under a **content-addressed** `/etc/nexusops/tls/<fingerprint>/`; then the existing `nginx.apply` path renders the TLS block and applies it atomically with rollback |
+| `certificate.remove` | `{certificate_id, generation}` | Drops the generation's managed directory; applies a config without it |
 
-Key property: **private key material is never persisted in the Operation row.** Params
-hold a reference; the pull response body is assembled at read time —
-`decrypt_str(key_ciphertext)` in the request path, returned once over the agent's
-authenticated TLS channel (X-Agent-Token, api/v1/agent.py:37-48), and never stored.
-Op results carry success/failure only. This mirrors the rule that secrets reach a node
-only in the payload of work actually assigned to it.
+Key property: **private key material is never persisted in the Operation row, its
+params, its result, events, audit metadata or logs.** Params hold a reference. The
+material is served by a **dedicated, narrowly scoped endpoint** —
+`POST /agent/certificates/{delivery_id}/material`, bound to the authenticated node and
+its organization, to the specific certificate/generation, and to a bounded recovery
+window; the body is assembled at read time (`decrypt_str(key_ciphertext)` inside the
+request) with `Cache-Control: no-store`, and is never stored. Op results carry
+success/failure and a fingerprint only. Full mechanism, replay/supersession rules and
+leak-path table: **phase5-design.md §7**. Redaction (`core/logging.py`) is
+defense-in-depth, not the control.
+
+**Issuance success is not activation.** A certificate can be `ISSUED` at the control
+plane while every serving node is offline. The platform reports six distinct stages —
+issued, delivered, installed, applied, verified, active (phase5-design.md §2) — and
+never equates issuance with a working HTTPS endpoint.
 
 Failure semantics: the op retries while the node is offline (standard Operation queue
 behavior, node-agent-architecture.md); a cert whose deliveries are all pending shows
-`issued` but the routes page surfaces delivery state per node.
+`issued` but the routes page surfaces delivery state per node. HTTP keeps serving until
+the HTTPS endpoint has been independently verified (phase5-design.md §5.6).
 
 ## 7. Renewal
 
@@ -236,14 +296,18 @@ monitor_service.py:293-313):
 
 | Beat entry | Cadence | Work |
 |---|---|---|
-| `sweep-certificates` | hourly | Claim rows `auto_renew AND status IN (issued, expired) AND expires_at < now() + 30 days`; reset `attempt_count=0`, enqueue reissue (same flow as §5, same row) |
+| `sweep-certificates` | hourly | Claim certificates `auto_renew AND current generation ISSUED AND not_after < now() + 30 days`; enqueue a **new generation** (same flow as §5) |
 | `retry-failed-certificates` | hourly | Claim `status=failed AND next_attempt_at <= now()`; re-enqueue with backoff |
 
-Renewal reuses the row: a new ACME order replaces `chain_ciphertext` / `key_ciphertext`
-/ `expires_at` / `fingerprint` in one transaction, then re-runs delivery to the
-currently-derived target set. There is no separate renewal entity and no grace juggling
-— the old cert stays served on nodes until the new one is delivered, since renewal
-starts 30 days before expiry.
+Renewal creates a **new generation** (new ACME order + new key pair) and marks the
+previous generation `SUPERSEDED`, in one transaction; then it re-runs delivery to the
+currently-derived target set. The old material stays installed and serving on nodes
+until the new one is delivered and applied, since renewal starts 30 days before
+expiry. An older generation can never replace a newer one: the generation is immutable
+once issued, paths are content-addressed by fingerprint, and a `SUPERSEDED` generation
+refuses delivery (phase5-design.md §8.5). A node that is offline during renewal stays
+`PENDING` and converges on its next heartbeat — the state is visible, not a silent
+success (phase5-design.md §8.6).
 
 - **Failure alerts + incident.** An attempt that exhausts its budget (§11) raises
   `certificate.failed` → CRITICAL alert via the existing alert mapping
@@ -276,25 +340,30 @@ starts 30 days before expiry.
 
 ## 9. Storage and leak paths
 
-Ciphertext columns are Fernet via `encrypt_str` (core/security.py:131-133) under the
-platform `ENCRYPTION_KEY` — the same write-once key contract as secrets today
-(decrypt_str raises on key mismatch, security.py:135-142; no re-encryption path exists,
-which is an accepted platform-wide constraint, not a cert-specific one).
+**Phase 5 target (not the current secret-store path):** certificate and DNS-credential
+ciphertext is Fernet under a **per-organization DEK**, itself wrapped under
+`ENCRYPTION_KEY` (the KEK) and stored on the organization row. `decrypt_str` fails
+closed on a mismatch. This does **not** re-encrypt the existing secret store — secrets,
+`secret_versions`, `server_credentials` and channel configs keep the current single-key
+path (`backend/app/core/security.py`), and migrating them is a separate reviewed change.
+The full key hierarchy, threat model, rotation, backup and recovery rules are in
+**phase5-design.md §6**; in particular, a per-org envelope does **not** bound a
+compromise of the KEK or of the application runtime.
 
 | Path | Guarantee | Enforcement |
 |---|---|---|
-| REST responses | Metadata only: CN, SANs, status, dates, fingerprint | Schemas define no ciphertext field (pattern: secret metadata-only reads, secret_service.py:49-62) |
-| Operation rows at rest | Reference `{certificate_id}` only, no key material | §6; worker assembles pull response at read time |
-| Operation results | success/failure + error class only | Op result schema; worker never echoes payload |
-| Logs | No PEM/Key contents | structlog `redact_mapping` already matches `private_key`/`token`/`credential` substrings (core/logging.py:19-60); issuance code never logs payload values |
-| Audit metadata | No key material | `redact_mapping` applied at write (audit_service.py:54); audited actions carry ids + fingerprint only |
-| WS / events | No cert channel publishes material | `certificate.*` event frames carry ids, status, node ids (event_bus frame shape, event_bus.py:114-125) |
+| REST responses | Metadata only: CN, SANs, status, dates, fingerprint — **no ciphertext field** | Schemas define no ciphertext field (pattern: `secret_service._detail` metadata-only) |
+| Operation rows at rest | Reference `{certificate_id, generation, fingerprint}` only, no key material | §6; the dedicated material endpoint assembles the body at read time |
+| Operation results / history API | success/failure + fingerprint only | Op result schema; params *are* reference-only, so the history endpoint is safe by construction |
+| Logs | No PEM/key contents | Phase 4.4 recursive, PEM-aware redaction (`core/logging.py`) runs on every structlog record — **defense in depth**; issuance code never logs payload values |
+| Audit metadata | No key material | `redact_mapping` applied at write (`audit_service.record`); audited actions carry ids + fingerprint only |
+| WS / events | No cert channel publishes material | `certificate.*` event frames carry ids, status, node ids (event_bus frame shape) |
 | Frontend | types carry metadata fields only | Hand-mirrored types.ts gains no ciphertext field |
-| DB at rest | `chain_ciphertext`, `key_ciphertext` Fernet columns | §2; read paths limited to issuance write + delivery read |
+| DB at rest | `chain_ciphertext`, `key_ciphertext` Fernet(org DEK) columns **on the generation** | §2/§9; read paths limited to issuance write + the delivery endpoint's read |
 
 `fingerprint` (SHA-256, truncated) is the only value-derived field any API returns —
 display/change-detection use, never a decryption oracle, same reasoning as
-`digest_of` (core/security.py:145-158).
+`digest_of` (`backend/app/core/security.py`).
 
 ## 10. Status/expiry tracking and monitor tie-in
 
@@ -334,11 +403,13 @@ notification_service.py:44-46). Exhaustion → `failed`, alert + incident (§7).
 | Order/account errors (expired order, rejected account key) | ACME status | Account errors re-run registration (new keypair Integration) once; otherwise fail |
 | Stuck `validating` (worker died mid-order) | Stuck-state sweep: `validating` with no heartbeat older than order TTL (~1h) | Sweep marks `failed` with reason, best-effort TXT cleanup, normal backoff resumes |
 | Stuck deliveries (node offline) | Operation queue | Ops retry while node offline; `certificate.remove` for a decommissioned node is dropped by the op sweeper (node gone, nothing to remove) |
-| ENCRYPTION_KEY mismatch at decrypt | `decrypt_str` ValueError (security.py:135-142) | Delivery fails closed — the op reports failure, never ships a broken payload; same restore-the-key runbook as secrets |
+| DEK/KEK mismatch at decrypt | `decrypt_str` ValueError | Delivery fails closed — the endpoint reports failure, never ships a broken payload; a generation whose material cannot be decrypted is re-issued (§6.5) |
 
-No partial state: the ciphertext columns are replaced in one transaction, and node
-files are written to temp paths then atomically moved only after `nginx -t` passes
-(ProxyProvider apply contract, domain-model.md §2.4).
+No partial state: a generation's ciphertext columns are written in one transaction and
+never rewritten (renewal inserts a new generation), and node files are written to temp
+paths then atomically moved only after `nginx -t` passes (the shipped Phase 4
+stage → validate → backup → swap → reload → rollback pipeline,
+phase5-design.md §8.4).
 
 ## 12. Audit and events
 
@@ -353,7 +424,12 @@ Audit actions (append-only, org-attributed once tenancy lands, named per the
 | `certificate.failed` | Attempt budget exhausted | system (worker) |
 | `certificate.deployed` | Node reports install success | agent |
 | `certificate.removed` | Node reports removal | agent |
-| `certificate.revoked` | ACME revocation | user |
+| `certificate.suspended` | Ownership lost / operator suspension | system (worker) / user |
+| `certificate.ownership_lost` | Cross-org ownership flip affecting this cert | system (worker) |
+| `certificate.split` | Shared cert replaced/split before revocation | system (worker) |
+| `certificate.revocation_requested` | Revocation queued (automated or manual) | system / user |
+| `certificate.revoked` | ACME revocation acknowledged | system / user |
+| `certificate.revocation_failed` | CA unreachable/rejected at the retry budget | system (worker) |
 | `certificate.deleted` | Row deleted | user |
 
 SystemEvent equivalents (`certificate.issued`, `certificate.renewed`,
@@ -368,25 +444,43 @@ ids/status/fingerprint only (§9), giving the events feed and a future
 - No custom CA / private PKI in v1 (the ACME provider abstraction would accept a
   private ACME server directory later).
 - No SNI-only multi-cert-per-route serving in v1: one certificate per route.
-- No key rotation of `ENCRYPTION_KEY` — platform-wide write-once constraint (§9).
+- No node-side key generation in v1 — the control plane generates and holds the key.
+- No re-encryption of the **existing secret store** under the org DEK; that is a
+  separate reviewed change (phase5-design.md §6.4). KEK *re-wrap* of org DEKs is
+  designed for the Phase-5 scope only (§6.3).
 
-## Open questions
+## Open questions — resolved (see phase5-design.md Appendix A)
 
-1. **ACME client library vs minimal implementation.** A vendored ACME client (e.g.
-   acme-python via josepy) adds dependencies to the backend; a minimal in-repo client
-   is small but must track ACME RFC 8555 drift. Decide at implementation time; the
-   `AcmeProvider` interface is the seam either way.
-2. **Per-org vs single platform ACME account.** Per-org accounts (spec'd, §4.3) give
-   rate-limit isolation but multiply account keys to protect. A single control-plane
-   account is simpler; revisit if org scale makes the shared budget a problem.
-3. **Wildcard-vs-exact matching at route bind time** — ownership is settled: this
-   subsystem (the certificates API) owns the covering check and reject-on-mismatch;
-   the open question is only the error shape surfaced to the caller.
-4. **Renewal window vs shorter-lived certs / ARI.** If ACME renewals move to
-   much shorter-lived certs (ARI-driven renewal info), the fixed 30-day scan needs a
-   second trigger; defer until the ACME landscape settles.
-5. **Delivery pull-response persistence.** The spec keeps key material out of the
-   Operation row; if the ops framework later logs full request/response bodies for
-   debugging, `certificate.install` must be exempted (or payloads moved to a
-   short-lived signed-URL flow). Needs a decision recorded in
-   node-agent-architecture.md.
+These were the open questions in earlier drafts. They are now **decided** in the
+authoritative Phase 5 design; recorded here so the two documents agree.
+
+1. **ACME client library vs minimal implementation** — **library** (`acme` +
+   `josepy`) behind an `AcmeProvider` seam; a hand-rolled RFC 8555 client is rejected
+   (phase5-design.md §5.1).
+2. **Per-org vs single platform ACME account** — **per-org per-directory** account
+   (§5.4).
+3. **Wildcard-vs-exact matching at route bind time** — exhaustive covering check owned
+   by the certificate service; error `CERTIFICATE_DOES_NOT_COVER_HOSTNAME` (§4.4).
+4. **Renewal window vs shorter-lived certs / ARI** — fixed 30-day sweep in v1; the
+   **generation** model leaves room for an ARI-driven second trigger without a schema
+   change (§3.2, §9.1).
+5. **Delivery pull-response persistence** — resolved by **not** persisting: a
+dedicated material endpoint assembled at read time, `Cache-Control: no-store`, bounded
+   recovery (§7). Ordinary operation params/result/history stay reference-only.
+
+**Decided in the Phase 5.0 finalization (2026-10-12):**
+
+6. **Centralized TLS key custody** — accepted **conditionally**, with the global
+   KEK's blast radius, a preferred external KMS/secret-manager integration, access
+   restrictions, rotation, backup recovery and production-readiness conditions
+   (C1–C6) recorded in phase5-design.md §1.5/§6.6. Per-org DEKs do **not** bound a KEK
+   or application-runtime compromise and are not claimed to.
+7. **ACME staging by default**; production issuance requires explicit production
+   configuration and never silently falls back to a staging certificate (§4.3 above,
+   phase5-design.md §5.4).
+8. **Ownership loss triggers automated CA revocation after confirmed loss**, subject
+   to a certificate-impact safeguard: a shared multi-identifier certificate is
+   **replaced/split before revocation**, and CA revocation **never blocks removal** of
+   the old configuration (phase5-design.md §9.3/§9.5).
+
+Remaining open items for Phase 5.1 and beyond are listed in phase5-design.md §10.3.3.

@@ -404,6 +404,14 @@ Today one `ENCRYPTION_KEY` protects everything (`config.py:61`; users: secrets,
 server credentials, notification-channel config — §1.1). Loss is unrecoverable
 and rotation is impossible (§1.1). Target: **per-org DEK envelope, KMS-ready**.
 
+> **Scope note (Phase 5):** the authoritative decision on the key hierarchy — its
+> threat model, rotation, backup and recovery — is [phase5-design.md](phase5-design.md)
+> §6. Phase 5 applies the org-DEK envelope to **certificate/DNS/ACME material only**;
+> re-encrypting the existing secret store is deliberately a **separate reviewed
+> change** (§6.4 there), not a Phase 5 side effect. In particular the per-org envelope
+> does **not** bound a compromise of the global `ENCRYPTION_KEY` or of the application
+> runtime, and this document should not be read as claiming it does.
+
 ```mermaid
 flowchart LR
     KEK["KEK (ENCRYPTION_KEY today; KMS-managed later)"] -->|"wraps"| D1["Org A DEK (wrapped, stored on org row)"]
@@ -485,6 +493,20 @@ Flow (when the real runner + agent ops exist):
    bounded by the per-type timeout (node-agent-architecture.md §5.1), not by ack.
    Results never echo values (whitelisted result fields only).
 
+> **Design reconciliation (2026-10-12) — the params-ciphertext pattern is**
+> **superseded.** Step 3 above (resolved values Fernet-encrypted into
+> `operations.params`) is *not* the pattern Phase 5 adopted for the stronger case —
+> certificate private keys — because the ordinary operation params and
+> operation-history APIs are readable paths and redaction is defense-in-depth, not a
+> control. Phase 5 uses **reference-only operation params plus a dedicated,
+> narrowly-scoped material endpoint** ([phase5-design.md](phase5-design.md) §7).
+> `secret.env.apply` remains a *reserved name only* — it is **not** in the
+> `OperationType` enum or `OPERATION_SPECS`, so a dispatch is a 422. When secret
+> delivery ships, it should adopt the reference-only/dedicated-endpoint pattern rather
+> than the params-ciphertext sketch here. The registry (enum + `OPERATION_SPECS`) is
+> the single source of truth for types; the divergent reserved-type lists across docs
+> and tests are catalogued in phase5-design.md §10.4.
+
 Blast radius:
 
 | Compromised | Sees |
@@ -534,7 +556,7 @@ Rules:
 | Path | Today | Guard today | Guard target |
 |---|---|---|---|
 | REST API responses | Safe | `SecretOut` excludes value fields (`schemas/secret.py:56-66`); `_detail()` no value field; tests enforce (`test_secrets.py:28-51`) | Unchanged + IDOR suite covers `/secrets` cross-org (multi-tenancy.md §7) |
-| Logs | Mostly guarded | `redact_mapping` substring redaction (`core/logging.py:19-60`); runner logs counts only (`deployment_runner.py:210`) | Fix hole: redaction recurses dicts only — sensitive values inside lists pass through; recurse lists too. Resolution audit never logs values |
+| Logs | Guarded | Phase 4.4 redaction recurses dicts, lists and tuples at any depth **and** matches PEM private-key armor (`core/logging.py` — `redact_mapping`/`redact_text`/`redact_log_event`), running on every structlog record; the runner logs counts only (`deployment_runner.py`). Resolution audit never logs values | Unchanged — the S8 hole (lists passed through) is **fixed**. Still defense-in-depth, not a control: a bare JWT or embedded DSN password is neither key-named nor PEM-armored and would not be scrubbed |
 | WS frames | Safe by omission | No secret-bearing channel; deployment-logs carry runner output (counts only) | Org-prefixed channels (multi-tenancy.md §5); delivery-op frames never include values |
 | Audit metadata | Guarded | `redact_mapping` applied at `audit_service.py:54`; resolution audit carries names+versions only | Unchanged |
 | Frontend state | Minimal | A value lives only in the create/rotate form's component state, never persisted, never cached, never logged; no reveal control anywhere. Version history (`SecretHistory.tsx`) renders metadata only and has no value field to render. | Clear value on modal unmount; never persist to localStorage (unchanged) |

@@ -23,8 +23,11 @@ proposal:
    realistic docker-style logs for 7 steps (pull → checkout → build → stop → start →
    health check → finalize) but performs no real work (`backend/app/providers/deployment_runner.py:107`).
 2. `sim://` monitor transports and the `docker_sim` provider exist for demo/CI (SIMULATION_MODE).
-3. There is **no domains/certificates/reverse-proxy subsystem at all** — nothing to
-   simulate; it must be built.
+3. The **HTTP half** of the domains/reverse-proxy subsystem **shipped in Phase 4**
+   (domains, routes, TXT verification, the nginx renderer and the `nginx.*`
+   operations — see [domain-routing.md](domain-routing.md)); it is real, not
+   simulated. **Not built:** certificates, TLS listeners and HTTPS redirects —
+   Phase 5 design, [phase5-design.md](phase5-design.md).
 
 Everything else — auth, sessions with refresh rotation + reuse detection, the
 permission registry, agents reporting real heartbeats/container stats/logs over

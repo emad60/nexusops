@@ -405,15 +405,19 @@ sequenceDiagram
     CP-->>U: WS event operation.updated
 ```
 
-### 5.2 Whitelisted operation types
-
-**This table is the entire exec surface. Nothing outside it ships; adding a type is
-a schema-registry change + contract tests + review, never a params pass-through.
-No companion doc may invent an op type outside this registry table** — the
-secret/cert delivery types the companions cite (`secret.env.apply` from
+### 5.2 Whitelisted operation types**This table is the entire exec surface. Nothing outside it ships; adding a type is a
+schema-registry change + contract tests + review, never a params pass-through.**
+**Single source of truth:** the `OperationType` enum and the `OPERATION_SPECS`
+registry in `backend/app/schemas/operation.py`. This table documents them; it does not
+define them, and **no companion doc may invent an op type outside the registry** —
+the secret/cert delivery types the companions cite (`secret.env.apply` from
 secrets-architecture.md §7, `certificate.install`/`certificate.remove` from
-certificate-management.md §6) appear here as *reserved* rows and ship only with
-secret/cert delivery, behind their own review.
+certificate-management.md §6 / phase5-design.md §7) are *reserved names only*: they are
+absent from the enum and the registry, so a dispatch of one is a 422, and they ship
+only with their subsystem, behind their own review. The five divergent places that
+currently re-enumerate reserved types are listed in phase5-design.md §10.4, which
+records the required consolidation (collapse them to a pointer at the enum + registry)
+**before any certificate operation type is introduced**.
 
 | Type | Params (validated schema) | Result | Permission codename | Capability | Timeout |
 |---|---|---|---|---|---|
@@ -422,11 +426,11 @@ secret/cert delivery, behind their own review.
 | `container.restart` | container_id | new status | `container.lifecycle` | docker | 60s |
 | `container.remove` | container_id, force? | removed | `container.remove` | docker | 60s |
 | `logs.tail` | container_id, tail ≤ 500, since? | bounded line batch | `container.logs` | docker | 30s |
-| `nginx.bootstrap` | `{}` | one-time: create the managed dirs and an empty managed config, add the two include lines (`nexusops.conf`, `routes.d/*.conf`) to the system `nginx.conf`, `nginx -t`, reload — rolling the system file back on any failure | `domain.manage` | nginx | 60s |
-| `nginx.apply` | `bundle` (fingerprint + manifest + allowlisted files), `reload` | staged → `nginx -t` → atomic swap → reload, with rollback; reports `applied`/`failed`/`rolled_back`/`rollback_failed` | `domain.manage` | nginx | 60s |
-| `nginx.status` | `{}` | live fingerprint, nginx version, `nginx -t` result — bounded, read-only | `domain.manage` | nginx | 30s |
+| `nginx.bootstrap` | `{}` | one-time: create the managed dirs and an empty managed config, add the two include lines (`nexusops.conf`, `routes.d/*.conf`) to the system `nginx.conf`, `nginx -t`, reload — rolling the system file back on any failure | `domain.manage` | nginx | **120s** |
+| `nginx.apply` | `bundle` (fingerprint + manifest + allowlisted files), `reload` | staged → `nginx -t` → backup → atomic swap → reload, with rollback; reports `applied`/`failed`/`rolled_back`/`rollback_failed` | `domain.manage` | nginx | **180s** |
+| `nginx.status` | `{}` | live fingerprint, nginx version, `nginx -t` result — bounded, read-only | `domain.manage` | nginx | **60s** |
 | `secret.env.apply` | *reserved* — defined by secrets-architecture.md §7 | delivery ack, never values | assigned with its own review | — | per §7 |
-| `certificate.install` / `certificate.remove` | *reserved* — defined by certificate-management.md §6 | file-write result, never key material | assigned with its own review | — | per cert doc |
+| `certificate.install` / `certificate.remove` | *reserved* — Phase 5 design (phase5-design.md §7/§8) | install/remove result + fingerprint; **never key material at rest** | `certificate.manage` (adds with Phase 5) | nginx | 180s / 120s |
 
 Notes:
 
@@ -434,7 +438,7 @@ Notes:
   container ops reuse the existing `container.lifecycle`/`container.remove`/
   `container.logs` codenames, nginx ops sit under `domain.manage`. Dispatch
   refuses any type whose capability the node has not reported (§5.4, §2.3).
-- nginx ops presuppose the routing subsystem (domain-routing.md, future); the
+- nginx ops serve the routing subsystem shipped in Phase 4 (domain-routing.md); the
   agent validates configs with `nginx -t` before apply and keeps the previous
   config for rollback (ProxyProvider contract, domain-model.md §2.4). `nginx -t`
   validates syntax only — an injected `location`/`proxy_pass` block passes it —
@@ -512,12 +516,20 @@ safety hole: the agent re-checks its own closed registry and local capability
 before executing, so a lie fails the operation rather than running something
 unsafe.
 
-**Reserved types are not shipped.** `nginx.*`, `certificate.*` and
-`secret.env.apply` remain in §5.2 as reserved rows only; they are absent from the
-enum and the registry, so a dispatch of one is a 422 and a raw insert is rejected
-by the `ck_operations_type_valid` CHECK
+**Reserved types are not shipped.** The *shipped* registry is exactly the eight types
+in §5.2 minus the reserved rows: `container.start/stop/restart/remove`, `logs.tail`,
+`nginx.bootstrap`/`apply`/`status`. The reserved names (`certificate.install`,
+`certificate.remove`, `secret.env.apply`) are absent from the enum and the registry, so
+a dispatch of one is a 422 and a raw insert is rejected by the
+`ck_operations_type_valid` CHECK
 (`test_no_reserved_phase2_type_is_dispatchable`,
 `test_the_database_whitelist_rejects_an_unregistered_type`).
+
+> **Corrected:** an earlier revision of this note listed `nginx.*` among the reserved
+> rows. `nginx.*` **shipped in Phase 4** (`backend/app/models/enums.py`,
+> `backend/app/schemas/operation.py`). The authoritative registry is the enum +
+> `OPERATION_SPECS`; see phase5-design.md §10.4 for the required consolidation of the
+> divergent reserved-type lists.
 
 ## 6. Agent security
 

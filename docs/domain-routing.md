@@ -4,10 +4,11 @@
 reconciliation hardened 2026-10-10; reconciliation candidate discovery and
 result handling hardened 2026-10-11). **No certificate issuance, no TLS listener and
 no HTTPS redirect exist yet** — every certificate-related shape in this document is
-**Phase 5 target design**, labelled as such below, and post-deploy route sync remains
-Phase 6 target design.
+**Phase 5 target design**, labelled as such below (authoritative spec:
+[phase5-design.md](phase5-design.md)), and post-deploy route sync remains Phase 6
+target design.
 **Date:** 2026-09-21 (status updated 2026-10-10)
-**Companions:** [platform-vision.md](platform-vision.md) · [domain-model.md](domain-model.md) · [multi-tenancy.md](multi-tenancy.md) · [authorization.md](authorization.md) · [node-agent-architecture.md](node-agent-architecture.md) · [certificate-management.md](certificate-management.md)
+**Companions:** [platform-vision.md](platform-vision.md) · [domain-model.md](domain-model.md) · [multi-tenancy.md](multi-tenancy.md) · [authorization.md](authorization.md) · [node-agent-architecture.md](node-agent-architecture.md) · [certificate-management.md](certificate-management.md) · [phase5-design.md](phase5-design.md)
 
 ## 1. Scope and current state
 
@@ -45,9 +46,9 @@ What exists and is reused:
 | Existing capability | Ground | Reuse here |
 |---|---|---|
 | Beat cadences + atomic claims | celery_app.py:47-93; `FOR UPDATE SKIP LOCKED` claim (monitor_service.py:293-313) | Verification + re-verification sweeps, apply fan-out |
-| Append-only audit | audit_service.py:20-65 + DB trigger | `domain.*` / `route.*` actions (§12) |
-| Event bus + WS frames | event_bus.py:114-125; hub.py | `org:{org_id}:domains` channel (§12) |
-| Agent auth (`X-Agent-Token`, SHA-256 lookup) | api/v1/agent.py:37-48 | Authenticated channel for `nginx.*` ops (§7) |
+| Append-only audit | `audit_service.record` + DB trigger | `domain.*` / `route.*` actions (§12) |
+| Event bus + WS frames | `event_bus` frame shape; `ws/hub.py` | `org:{org_id}:domains` channel (§12) |
+| Agent auth (`X-Agent-Token`, SHA-256 lookup) | `api/v1/agent.py` (`require_server`) | Authenticated channel for `nginx.*` ops (§7) |
 | Container status diff events | server_service.py:586-601 | Re-render triggers (§8) |
 
 ## 2. Where nginx runs
@@ -77,11 +78,13 @@ below describe what Phase 4 shipped; rows marked *(Phase 5 target)* are **not in
 schema yet**.
 
 > **Phase 5 target design (not shipped):** Route optionally carrying a
-> **Certificate** (`Route |o--o| Certificate` — full spec:
-> certificate-management.md §2). No `certificates` table exists; `routes.scheme`
-> is a closed CHECK of `'http'` and there is no `certificate_id` column, so a TLS
-> listener and an HTTPS redirect are not merely unwired — they are
-> unrepresentable. Phase 5 adds them by migration.
+> **Certificate** (`Route |o--o| Certificate` — authoritative spec:
+> [phase5-design.md](phase5-design.md) §3; overview: certificate-management.md §2).
+> No `certificates` table exists; `routes.scheme` is a closed CHECK of `'http'` and
+> there is no `certificate_id` column, so a TLS listener and an HTTPS redirect are not
+> merely unwired — they are unrepresentable. Phase 5 adds them by migration, with
+> certificate material content-addressed by fingerprint so replacing it changes the
+> rendered `bundle_id` and drift stays detectable (phase5-design.md §8.3).
 
 A route's upstream may be a container on the route's node (usual case) or, later,
 an external one.
@@ -159,7 +162,13 @@ enabled route on that name, marks it unresolved, and returns the node ids; each 
 is then re-rendered and applied *inside its own organization*, so the cross-tenant
 discovery never becomes a cross-tenant write (§8.4). A release that found nodes
 queues one apply per node, and the route reads as unresolved from that moment — the
-control plane never claims a removal that has not been applied. Success ⇒ `verified`,
+control plane never claims a removal that has not been applied. **Once certificates
+exist (Phase 5)** the same step additionally *suspends* every certificate bound to the
+lost name (immediate, automatic), so the previous owner's configuration is no longer
+authorized to serve it, and queues **automated CA revocation after confirmed ownership
+loss** — subject to an impact safeguard that replaces/splits a shared multi-identifier
+certificate before revoking it and that cannot block the config removal
+(phase5-design.md §9.3). Success ⇒ `verified`,
 `verified_at` set, audit `domain.verified`, event on `org:{org_id}:domains`.
 Failure ⇒ sanitized `last_error`, backoff, `failed` after budget. DNS library
 choice: Open question 1.
@@ -171,7 +180,7 @@ choice: Open question 1.
 | **No verification, no route** — verify before any route goes live | API rejects `enabled=true` on routes of non-`verified` domains; the renderer excludes them unconditionally |
 | **Re-verify on apex change** | Any sweep observing an apex NS set ≠ `ns_snapshot` flips the domain to `unverified` immediately; routes pulled from the next render |
 | **Continuing control** | Hourly `sweep-domains` re-checks the TXT of every `verified` domain; a miss starts a 72h `stale` grace, then `unverified` |
-| **One verified owner platform-wide** | Partial unique index on verified names; a later org's successful verification flips the earlier row to `UNVERIFIED` (audited, event to the losing org). Its routes are marked unresolved immediately and every node serving them is told to drop the name (§4.2); a node that cannot take the apply retries through the reconciler (§8.4), and the route is never reported as stopped until the node confirms |
+| **One verified owner platform-wide** | Partial unique index on verified names; a later org's successful verification flips the earlier row to `UNVERIFIED` (audited, event to the losing org). Its routes are marked unresolved immediately and every node serving them is told to drop the name (§4.2); a node that cannot take the apply retries through the reconciler (§8.4), and the route is never reported as stopped until the node confirms. **Phase 5:** the flip also suspends the losing org's certificates for that name and starts automated, impact-safeguarded CA revocation (§4.2 above, phase5-design.md §9.3) |
 
 The token becomes public once in DNS, so possession is not the long-term proof; the
 proof is **continued ability to control the zone's DNS** — exactly what
@@ -311,7 +320,7 @@ makes unknown JSONB keys 422. `nginx -t` (§7) is a syntax safety net, not a def
 | `port` | Int 1–65535 | `proxy_pass` |
 | `rate_limit` | `{requests 1..10000, window ∈ (1s, 1m), burst ≤ requests}` — nginx can express only per-second and per-minute windows, so "10s" is deliberately not offered | `limit_req_zone` / `limit_req` |
 | `redirect` | `{to_host, code ∈ (301,302,307,308)}` — **host only**: there is no `to_scheme` field in Phase 4, so no route can be made to emit an HTTPS redirect. `to_host` must be a verified name in the org | fixed `return` block |
-| `certificate_id` | *not in Phase 4* — Phase 5 adds the column and its validation by migration | `ssl_certificate` paths (Phase 5) |
+| `certificate_id` | *not in Phase 4* — Phase 5 adds the column and its validation by migration (phase5-design.md §3.5/§4.4) | `ssl_certificate` / `ssl_certificate_key` paths, content-addressed (phase5-design.md §8.3) |
 
 Why this hard line: co-hosted domains on one node share one nginx config — a config
 injection is traffic interception across *every* route on that node
@@ -334,16 +343,18 @@ Operation types. Per authorization.md §2, applying config is gated by
 **Bundles carry no secrets — and, in Phase 4, no certificates.** There is no
 field for a certificate or a key and no managed path for one; a bundle is a
 fingerprint, a provider name, a template version, a manifest of route ids and an
-allowlisted set of config files. TLS private keys arrive only via
-`certificate.install` (reference-only params, pull-time decryption —
-certificate-management.md §6, Phase 5).
+allowlisted set of config files. In Phase 5 the managed allowlist gains exactly the
+content-addressed `/etc/nexusops/tls/<fingerprint>/{fullchain,privkey}.pem` path
+shape — a closed shape, never a free path field. TLS private keys reach the node only
+through the dedicated delivery endpoint (reference-only operation params, read-time
+assembly, `no-store` — [phase5-design.md](phase5-design.md) §7), never in a bundle.
 
 Agent-side steps for `nginx.apply`:
 
 | Step | Action | On failure |
 |---|---|---|
 | Stage | Write the tree under `/etc/nexusops/nginx/staged/<bundle_id>/` (temp + fsync), creating `routes.d` **unconditionally** | Report failure; live tree untouched |
-| Validate | `nginx -t` against a test wrapper that includes the staged tree | Keep live tree; report sanitized stderr (redaction: core/logging.py:19-60) |
+| Validate | `nginx -t` against a test wrapper that includes the staged tree | Keep live tree; report sanitized stderr (redaction: `core/logging.py` `redact_text`) |
 | Swap | Atomically rename staged files over `nexusops.conf` + `routes.d/`; keep the previous bundle as backup | — |
 | Reload | `systemctl reload nginx` (SIGHUP fallback) | **Rollback:** restore the backup bundle, reload again, report `rolled_back`; if that restore + reload also fails, report `rollback_failed` — defined terminal state below |
 | Report | `{status: applied|failed|rolled_back|rollback_failed, bundle_id, fingerprint, error?}` | — |
@@ -428,8 +439,9 @@ owns the rule, and certificate-management.md §8 implements it.
 
 A route's HTTPS certificate must cover the hostname: exact CN/SAN preferred,
 otherwise a wildcard SAN one label deep (`*.example.com` covers `api.example.com`,
-not `a.b.example.com`). The covering check at bind time is certificate-management.md
-§8's job; no covering issued cert ⇒ bind rejected. One certificate per route.
+not `a.b.example.com`). The covering check at bind time is owned by the certificate
+service ([phase5-design.md](phase5-design.md) §4.4); no covering issued cert ⇒ bind
+rejected with `CERTIFICATE_DOES_NOT_COVER_HOSTNAME`. One certificate per route.
 
 ### 8.3 Re-render triggers
 
@@ -442,7 +454,7 @@ already exists:
 | Container REMOVED | heartbeat reconciliation (same path) | Routes → `config_state=stale`, excluded from render as `upstream_missing`; UI surfaces; no wrong-upstream traffic |
 | Deployment succeeded + health passed | deployment engine event (Phase 6) | Post-deploy route sync (§8.5) |
 | Route / domain / cert mutation | API | Re-render the affected node's bundle |
-| Certificate issued / renewed *(Phase 5)* | delivery fan-out (cert doc §6) | Re-render routes on the cert's serving nodes (fragments reference the new files) |
+| Certificate generation issued / renewed *(Phase 5)* | delivery fan-out (phase5-design.md §7.4) | Re-render routes on the cert's serving nodes; the new content-addressed path changes the `bundle_id`, so drift is detected by the §8.4 loop |
 | Domain `VERIFIED` / `UNVERIFIED` flip | sweeps (§4) | Exclude the domain's routes at the next render, and apply that render to **every** node that was serving them — including a previous owner's (§4.2) |
 | nginx capability first reported | hello | Queue `nginx.bootstrap` |
 
@@ -732,8 +744,9 @@ auto-attaches (opt-out via `monitor_optout`) an **uptime** monitor on the route'
 using the existing URL-monitor machinery. Disabling a route parks the monitor
 rather than deleting it; the monitor is org-scoped like every other row. Once
 certificates exist (Phase 5), a per-certificate **TLS-expiry** monitor
-(certificate-management.md §10) joins it on the same engine, the same incident
-pipeline, and fails independently of the uptime probe.
+(phase5-design.md §3.6) joins it on the same engine, the same incident
+pipeline, and fails independently of the uptime probe — "the certificate is
+expiring" and "the endpoint is not answering" must not be the same alert.
 
 **Vantage point, disclosed.** Uptime monitors probe **from the control plane** —
 the UI says so ("checked from the NexusOps control plane"), not just this doc. A

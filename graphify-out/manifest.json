@@ -252,10 +252,10 @@
     "semantic_hash": "5d7136435bec4f0e27d3d22871e4c302"
   },
   "backend/app/core/logging.py": {
-    "mtime": 1789081040.319391,
-    "seen": 1789933039.4043791,
-    "ast_hash": "d3cdc97145cd4350a8a341fc12a7d189",
-    "semantic_hash": "d3cdc97145cd4350a8a341fc12a7d189"
+    "mtime": 1791751199.4009578,
+    "seen": 1791752150.585247,
+    "ast_hash": "d19c4dbed6c7a2113ca9deb53c43b705",
+    "semantic_hash": ""
   },
   "backend/app/core/middleware.py": {
     "mtime": 1789080110.1644423,
@@ -780,9 +780,9 @@
     "semantic_hash": "d41d8cd98f00b204e9800998ecf8427e"
   },
   "backend/tests/conftest.py": {
-    "mtime": 1791326727.4429555,
-    "seen": 1791328960.3473005,
-    "ast_hash": "4395766ed6b23dfb926de531048acfd7",
+    "mtime": 1791748363.95657,
+    "seen": 1791752150.5854359,
+    "ast_hash": "138b3031dd92eb9a8d2e5e2d2c00fcc7",
     "semantic_hash": ""
   },
   "backend/tests/integration/__init__.py": {
@@ -918,10 +918,10 @@
     "semantic_hash": "bbb04c187e59f23d03aed13c6cb05d72"
   },
   "backend/tests/unit/test_logging.py": {
-    "mtime": 1787522327.854544,
-    "seen": 1789933039.4044635,
-    "ast_hash": "e036a30fa24c99d836df8c0f56012688",
-    "semantic_hash": "e036a30fa24c99d836df8c0f56012688"
+    "mtime": 1791750801.1329799,
+    "seen": 1791752150.5855093,
+    "ast_hash": "20d057b16de9a1c23f33e398c496ec72",
+    "semantic_hash": ""
   },
   "backend/tests/unit/test_monitor_transport.py": {
     "mtime": 1789078072.863555,
@@ -1524,9 +1524,9 @@
     "semantic_hash": "50ac6a5872a6cf8d7071b2064da53aed"
   },
   "docs/security.md": {
-    "mtime": 1791589378.8131552,
-    "seen": 1791589467.516915,
-    "ast_hash": "d5e9c85c9121905eed750005c1e48f74",
+    "mtime": 1791752074.4219096,
+    "seen": 1791752150.5857282,
+    "ast_hash": "341c10d67f290e725045affb92c27c73",
     "semantic_hash": ""
   },
   "docs/troubleshooting.md": {
@@ -1584,9 +1584,9 @@
     "semantic_hash": ""
   },
   "docs/domain-routing.md": {
-    "mtime": 1791742181.5045855,
-    "seen": 1791744723.9246192,
-    "ast_hash": "3913b9e0657432155fecbd995d500192",
+    "mtime": 1791752067.73891,
+    "seen": 1791752150.5857143,
+    "ast_hash": "463fde5769bdd7119d78adfd15a89ac1",
     "semantic_hash": ""
   },
   "docs/multi-tenancy.md": {
@@ -1602,9 +1602,9 @@
     "semantic_hash": ""
   },
   "docs/platform-security-model.md": {
-    "mtime": 1791658971.9225955,
-    "seen": 1791661929.3423345,
-    "ast_hash": "a287a235085520ce203950c42f864e5e",
+    "mtime": 1791752081.7239091,
+    "seen": 1791752150.5857224,
+    "ast_hash": "30e065f851a3a2c4a48abf39f325756c",
     "semantic_hash": ""
   },
   "docs/platform-vision.md": {
@@ -1764,9 +1764,9 @@
     "semantic_hash": ""
   },
   "backend/app/services/operation_service.py": {
-    "mtime": 1791741962.7306378,
-    "seen": 1791744723.9244134,
-    "ast_hash": "a97efe71961dea4bf1a996a7875dc3b0",
+    "mtime": 1791751124.198876,
+    "seen": 1791752150.5853868,
+    "ast_hash": "19d5b16471946e77cac9f9e5d947e601",
     "semantic_hash": ""
   },
   "backend/tests/integration/test_operations.py": {
@@ -2058,15 +2058,15 @@
     "semantic_hash": ""
   },
   "backend/app/services/proxy_service.py": {
-    "mtime": 1791741962.7306378,
-    "seen": 1791744723.9244168,
-    "ast_hash": "a028fc4c299e65c5224bb6996161229a",
+    "mtime": 1791751124.1994872,
+    "seen": 1791752150.5853913,
+    "ast_hash": "774f408647c34232eaf596adbf05441c",
     "semantic_hash": ""
   },
   "backend/app/services/route_service.py": {
-    "mtime": 1791741962.7306378,
-    "seen": 1791744723.924419,
-    "ast_hash": "d09eea17416cabbb267fc3ea380aa8e8",
+    "mtime": 1791751124.1997366,
+    "seen": 1791752150.5853944,
+    "ast_hash": "089c22f5ff4348215751b973d6101f0a",
     "semantic_hash": ""
   },
   "backend/app/tasks/domain_routing.py": {
@@ -2082,9 +2082,9 @@
     "semantic_hash": ""
   },
   "backend/tests/integration/test_phase4_routing.py": {
-    "mtime": 1791742838.043549,
-    "seen": 1791744723.924465,
-    "ast_hash": "dc69b78d3d241c8da5100b9d3010d64c",
+    "mtime": 1791751108.8779628,
+    "seen": 1791752150.585474,
+    "ast_hash": "2c83ece4dc6c2cb446cf8230ea1fbd8c",
     "semantic_hash": ""
   },
   "backend/tests/test_agent_nginx_contract.py": {
@@ -2118,9 +2118,9 @@
     "semantic_hash": ""
   },
   "frontend/e2e/phase4.spec.ts": {
-    "mtime": 1791744074.8104808,
-    "seen": 1791744723.9245102,
-    "ast_hash": "48ba45fd3b8dfcc9da175fd49932b1bd",
+    "mtime": 1791744829.761439,
+    "seen": 1791752150.5855439,
+    "ast_hash": "4cf7d46685ec4fec17dc988970db555a",
     "semantic_hash": ""
   },
   "frontend/src/pages/DomainDetailPage.tsx": {

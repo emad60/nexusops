@@ -1464,9 +1464,9 @@
     "semantic_hash": "82efb97a359f5c7290bf2513d14686be"
   },
   "README.md": {
-    "mtime": 1791663699.177334,
-    "seen": 1791670460.0656612,
-    "ast_hash": "46a91bb3fc615803d32b37c897f4bd61",
+    "mtime": 1791754655.1977668,
+    "seen": 1791755738.2246509,
+    "ast_hash": "1032bae29dda333882f6be2328f4a3c3",
     "semantic_hash": ""
   },
   "docker-compose.dev.yml": {
@@ -1500,9 +1500,9 @@
     "semantic_hash": ""
   },
   "docs/architecture.md": {
-    "mtime": 1791663692.473648,
-    "seen": 1791670460.065674,
-    "ast_hash": "18d109d66e9bacee8dad95738c05f96c",
+    "mtime": 1791754668.509766,
+    "seen": 1791755738.224659,
+    "ast_hash": "754abba05e19f05923c059b1c7196e45",
     "semantic_hash": ""
   },
   "docs/deployment.md": {
@@ -1566,9 +1566,9 @@
     "semantic_hash": ""
   },
   "docs/certificate-management.md": {
-    "mtime": 1791329178.7225838,
-    "seen": 1791502365.9987452,
-    "ast_hash": "8d006e03b1779ac1e44d885ee2ed4242",
+    "mtime": 1791755605.2903113,
+    "seen": 1791755738.2246609,
+    "ast_hash": "7bd3be3ef40fc8825561b415e577437e",
     "semantic_hash": ""
   },
   "docs/deployment-architecture.md": {
@@ -1584,9 +1584,9 @@
     "semantic_hash": ""
   },
   "docs/domain-routing.md": {
-    "mtime": 1791752067.73891,
-    "seen": 1791752150.5857143,
-    "ast_hash": "463fde5769bdd7119d78adfd15a89ac1",
+    "mtime": 1791755632.4617126,
+    "seen": 1791755738.2246664,
+    "ast_hash": "779b60fba789b31557259602096ab40c",
     "semantic_hash": ""
   },
   "docs/multi-tenancy.md": {
@@ -1596,21 +1596,21 @@
     "semantic_hash": ""
   },
   "docs/node-agent-architecture.md": {
-    "mtime": 1791661180.5614734,
-    "seen": 1791661929.3423324,
-    "ast_hash": "6d17676549dbbb64124b206cb178a779",
+    "mtime": 1791754549.9967725,
+    "seen": 1791755738.2246697,
+    "ast_hash": "b59b96ea9fcf3a073b46898db2872320",
     "semantic_hash": ""
   },
   "docs/platform-security-model.md": {
-    "mtime": 1791752081.7239091,
-    "seen": 1791752150.5857224,
-    "ast_hash": "30e065f851a3a2c4a48abf39f325756c",
+    "mtime": 1791755614.0357137,
+    "seen": 1791755738.2246735,
+    "ast_hash": "1bf55ebab5e5bc64dccf455ccaac31ba",
     "semantic_hash": ""
   },
   "docs/platform-vision.md": {
-    "mtime": 1790274434.33003,
-    "seen": 1790274598.396481,
-    "ast_hash": "be9449ca4810cefad9e66c932b1cc577",
+    "mtime": 1791754766.926273,
+    "seen": 1791755738.2246745,
+    "ast_hash": "3f4f19a20482d04179f23fa6650b1d81",
     "semantic_hash": ""
   },
   "docs/product-roadmap.md": {
@@ -1620,9 +1620,9 @@
     "semantic_hash": ""
   },
   "docs/secrets-architecture.md": {
-    "mtime": 1791505765.3154812,
-    "seen": 1791506551.670413,
-    "ast_hash": "4297deb18da27d203fc1a810fcd49053",
+    "mtime": 1791754646.3927672,
+    "seen": 1791755738.2246764,
+    "ast_hash": "166338c8baf35c178261f9f7144cf97f",
     "semantic_hash": ""
   },
   ".claude/workflows/nexusops-challenge.mjs": {
@@ -2157,6 +2157,12 @@
     "mtime": 1791671218.875208,
     "seen": 1791674448.167294,
     "ast_hash": "cfc5e2d84b55bf0543e7c77b323f70a6",
+    "semantic_hash": ""
+  },
+  "docs/phase5-design.md": {
+    "mtime": 1791755668.4503133,
+    "seen": 1791755738.2246726,
+    "ast_hash": "759775d7372309bc25ead54d6f184e68",
     "semantic_hash": ""
   }
 }

@@ -73,15 +73,17 @@ compatibility alias.
 `deployment.build` (Phase 6b git builds — DevOps holds it via the `deployment.*`
 wildcard, Developer explicitly; 6b ships only after this codename exists).
 
-**Certificate permissions — matrix decided (Phase 5.0.1).** Phase 5.1 registers
-`certificate.read` / `certificate.manage` and seeds them against the **stored role
-names as they are today** (the `Operator` → `DevOps` rename below is *not* part of
-Phase 5): **Owner** via the `*` wildcard, **Admin** and **Operator** hold both,
+**Certificate permissions — matrix implemented (decided Phase 5.0.1, shipped Phase
+5.1).** `certificate.read` / `certificate.manage` are registered in
+`backend/app/core/permissions.py` and seeded by migration `c8d9e0f1a2b3` against the
+**stored role names as they are today** (the `Operator` → `DevOps` rename below is *not*
+part of Phase 5): **Owner** via the `*` wildcard, **Admin** and **Operator** hold both,
 **Developer** and **Viewer** hold `certificate.read` only. Both codenames are
 organization-scoped (resolved from the active membership like every Phase 1 codename),
 and certificate reads are **metadata-only** — neither codename exposes a private key,
-plaintext certificate material, or ciphertext. This closes the Phase 5 design's open
-item O3 (phase5-design.md §4.1).
+plaintext certificate material, or ciphertext; the Phase 5.1 response schemas have no
+field that could carry one. This closes and implements the Phase 5 design's open item O3
+(phase5-design.md §4.1, §10.1.1).
 
 **Deliberately NOT added: `node.execute`.** There is no remote shell. Operations are
 whitelisted types, each mapping to an existing or new codename (container lifecycle

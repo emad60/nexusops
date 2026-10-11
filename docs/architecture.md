@@ -65,10 +65,12 @@ rename and the `Server` → `Node` surface naming (API paths `/nodes`, with a
 schema-hidden `/servers` alias); the `Server` → `Node` vocabulary; the Phase 2
 delivery promotion (project-scoped environments, config layering, secret version
 history); and the Phase 4 domains/routes surface with the nginx apply pipeline
-(HTTP only — see [domain-routing.md](domain-routing.md)). **Not yet shipped:** certificates (TLS — domains and routes are HTTP-only
-until Phase 5), real node operations beyond the container and nginx subsets,
-backups, teams/grants and billing — every later-phase entity in the companion
-specs.
+(HTTP only — see [domain-routing.md](domain-routing.md)). **Partly shipped since:** the
+Phase 5.1 certificate *metadata* tables and metadata-only API (2026-10-12, `37b7211` —
+identity and pre-issuance lifecycle only; no key material, no issuance).
+**Not yet shipped:** certificate issuance and TLS (domains and routes stay HTTP-only),
+real node operations beyond the container and nginx subsets, backups, teams/grants and
+billing — every later-phase entity in the companion specs.
 
 **Naming.** The existing `Server` entity is exposed as **Node** (API paths
 `/nodes`, codenames `node.*`); the `servers` table keeps its name

@@ -1,16 +1,20 @@
 # Certificate Management — NexusOps
 
-**Status:** Subsystem overview. **No certificate issuance, TLS listener or HTTPS
-redirect is implemented** — the schema has no `certificate_id` column and
-`routes.scheme` is a closed CHECK of `'http'` (`backend/app/models/routing.py`). Everything
-below is **Phase 5 design**, not shipped behavior. The authoritative Phase 5 design
-(architecture, threat model, key hierarchy, delivery mechanism, slices and acceptance
-criteria) is [phase5-design.md](phase5-design.md); this document is the subsystem
-overview and defers to it on every decision where the two differ. The **HTTP half**
-of the surrounding subsystem — domains, routes, TXT verification, the nginx renderer
-and the `nginx.*` operations — **shipped in Phase 4** and is described in
+**Status:** Subsystem overview. **Phase 5.1 shipped** — the `certificates` and
+`certificate_generations` tables, the pre-issuance lifecycle, the two permission
+codenames with their role matrix, and the metadata-only certificate API (commit
+`37b7211`, migration `c8d9e0f1a2b3`). **No certificate has ever been issued**: there is
+no ACME client, no key envelope, no TLS listener and no HTTPS redirect — the schema has
+no `certificate_id` column on `routes` and `routes.scheme` is a closed CHECK of `'http'`
+(`backend/app/models/routing.py`). Every remaining shape below is **Phase 5 design**, not
+shipped behavior. The authoritative Phase 5 design (architecture, threat model, key
+hierarchy, delivery mechanism, slices and acceptance criteria) is
+[phase5-design.md](phase5-design.md); this document is the subsystem overview and defers
+to it on every decision where the two differ. The **HTTP half** of the surrounding
+subsystem — domains, routes, TXT verification, the nginx renderer and the `nginx.*`
+operations — **shipped in Phase 4** and is described in
 [domain-routing.md](domain-routing.md).
-**Date:** 2026-09-21 (status updated 2026-10-12)
+**Date:** 2026-09-21 (status updated 2026-10-12: Phase 5.1 shipped)
 **Companions:** [phase5-design.md](phase5-design.md) · [domain-routing.md](domain-routing.md) · [domain-model.md](domain-model.md) · [multi-tenancy.md](multi-tenancy.md) · [authorization.md](authorization.md) · [node-agent-architecture.md](node-agent-architecture.md) · [secrets-architecture.md](secrets-architecture.md)
 
 ## 1. Scope and current state
@@ -21,13 +25,28 @@ STALE → UNVERIFIED grace lifecycle and its sweeps, the nginx renderer, the thr
 `nginx.*` operations, and the agent-side nginx provider with atomic apply and
 rollback — **HTTP only**. See domain-routing.md §1.
 
-**Not shipped (this document):** every certificate/TLS shape below — no
-`certificates` table, no ACME client, no DNS provider credential store, no TLS
-listener, no HTTPS redirect, and no certificate delivery. `routes.scheme` cannot be
-set to `https` and there is no `certificate_id` column, so an HTTPS route is not
-merely unwired — it is unrepresentable until Phase 5 adds it by migration. The only
-TLS anywhere today is the dashboard edge documented in docs/deployment.md, which
-terminates the *dashboard's* own TLS, not customer traffic (domain-routing.md §1).
+**Shipped (Phase 5.1, 2026-10-12):** certificate *identity and lifecycle metadata* —
+the `certificates` table (domain association, canonical primary CN, SANs, challenge
+type, renewal preference, key algorithm, expiry and last-error fields), the
+`certificate_generations` table limited to the pre-issuance states, the derived
+certificate status, organization-scoped RLS on both tables, the
+`certificate.read`/`certificate.manage` codenames with the role matrix in §3, and the
+metadata-only API (request, list, inspect, update the renewal preference, delete an
+unissued request). Creating a certificate records a request and its first generation;
+it issues nothing, delivers nothing and activates nothing, and the API says so
+(`issued: false`, `current_generation_id: null`, `expires_at: null`). See
+phase5-design.md §1.1 and §10.1.1.
+
+**Not shipped (the rest of this document):** the key envelope (org DEK + KEK provider),
+`dns_providers` and its credential storage, `acme_accounts`, and therefore **any** ACME
+issuance, DNS-01 publication, private-key delivery, installation, HTTPS activation,
+renewal, expiry monitoring or revocation. `routes.scheme` cannot be set to `https` and
+there is no `certificate_id` column, so an HTTPS route is not merely unwired — it is
+unrepresentable until Phase 5.5 adds it by migration. No certificate key, chain or
+ciphertext column exists anywhere in the schema, which is why an `ISSUED` generation
+cannot be written: its state is not in the database's vocabulary. The only TLS anywhere
+today is the dashboard edge documented in docs/deployment.md, which terminates the
+*dashboard's* own TLS, not customer traffic (domain-routing.md §1).
 
 **v1 constraint, stated where HTTPS is promised:** issuance is DNS-01 only, and v1's
 DNSProvider implementation is **Cloudflare only** — v1 HTTPS requires the domain's
@@ -52,14 +71,18 @@ What exists and is reused:
 
 Honesty labels: the operations framework this document leans on **is real and shipped**
 (Phase 1/3, node-agent-architecture.md §5) — it is not a spec. The certificate
-subsystem itself is **not built**: no `certificates` table, no ACME client. Earlier
-drafts' `Connection`/`Integration` entity for DNS credentials does not exist in the
-tree; [phase5-design.md](phase5-design.md) §3.4/§5.3 decides a dedicated
-`dns_providers` table instead.
+subsystem's *issuance* half is **not built**: no ACME client, no key envelope, no key or
+chain column. The certificate *record* shipped in Phase 5.1 (`certificates` and
+`certificate_generations`, metadata only — §1). Earlier drafts' `Connection`/`Integration`
+entity for DNS credentials does not exist in the tree; [phase5-design.md](phase5-design.md)
+§3.4/§5.3 decides a dedicated `dns_providers` table instead, and no provider table or
+row exists yet.
 
 ## 2. Certificate entity
 
-**Not in the schema.** The shipped Route table has no `certificate_id` column and
+**Partly in the schema (Phase 5.1: identity and pre-issuance lifecycle only; every
+material/issuance column below is still design).** The shipped Route table has no
+`certificate_id` column and
 `scheme` is a closed CHECK of `'http'` (`backend/app/models/routing.py`); Phase 5 adds
 the column and widens the CHECK by migration. The design is that a Route carries an
 optional `certificate_id`, so one certificate may serve many routes while a route
@@ -127,9 +150,9 @@ policy as roles); delete is allowed only when orphaned.
 
 ## 3. API surface and permissions
 
-Codenames per authorization.md §2: `certificate.read`, `certificate.manage` — **not yet
-registered**; they are added to `backend/app/core/permissions.py` by the Phase 5 slice.
-Today only `domain.read` / `domain.manage` exist. **Role matrix (decided):** with the
+Codenames per authorization.md §2: `certificate.read`, `certificate.manage` —
+**registered in Phase 5.1** (`backend/app/core/permissions.py`, seeded into the stored
+roles by migration `c8d9e0f1a2b3`). **Role matrix (implemented):** with the
 current stored role names (the `Operator` → `DevOps` rename is *not* shipped),
 Owner/Admin/**Operator** hold `certificate.read` + `certificate.manage`, and
 Developer/Viewer hold `certificate.read` only. Both are organization-scoped, and reads

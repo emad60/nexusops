@@ -1,13 +1,22 @@
 # Phase 5 — HTTPS, Certificates and Private-Key Delivery — Design
 
-**Status:** Authoritative Phase 5 design. **Nothing in Phase 5 is implemented.** Every
-schema, endpoint, operation type and agent behavior described here is a *design*,
-labelled as such, until its slice ships. The document that describes the shipped
-subsystems — domains/routes/nginx (Phase 4) and the operation control plane
-(Phase 1/3) — is [domain-routing.md](domain-routing.md) and
+**Status:** Authoritative Phase 5 design. **Phase 5.1 is shipped; everything else in
+Phase 5 is design only.** Shipped (2026-10-12, `37b7211`): the `certificates` and
+`certificate_generations` tables, the pre-issuance generation lifecycle, the
+`certificate.read`/`certificate.manage` codenames with the role matrix, both tables'
+RLS policies and grants, and the metadata-only certificate API — see §1.1 for the
+verified inventory. **Not shipped:** the organization DEK envelope and its KEK
+provider, DNS-provider credentials, ACME accounts and issuance, private-key delivery,
+HTTPS activation, renewal, expiry monitoring and revocation (§6, §7, §8, §9, §10.1).
+Every schema, endpoint, operation type and agent behavior below outside the §1.1
+Phase 5.1 block is labelled *design* and is not implemented; the documents that
+describe the other shipped subsystems — domains/routes/nginx (Phase 4) and the
+operation control plane (Phase 1/3) — are [domain-routing.md](domain-routing.md) and
 [node-agent-architecture.md](node-agent-architecture.md).
-**Date:** 2026-10-12
-**Baseline:** `ddd9727` (Phase 4.4 — single-writer `proxy_state`, recursive redaction).
+**Date:** 2026-10-12 (implementation status reconciled with the shipped tree)
+**Baseline:** Phase 4.4 `ddd9727` (the Phase 4 starting point recorded in §1.1) +
+**Phase 5.1 `37b7211`** (certificate metadata, pre-issuance lifecycle, org-scoped
+metadata API — the current baseline for every later slice).
 **Companions:** [certificate-management.md](certificate-management.md) ·
 [domain-routing.md](domain-routing.md) · [node-agent-architecture.md](node-agent-architecture.md) ·
 [secrets-architecture.md](secrets-architecture.md) · [platform-security-model.md](platform-security-model.md) ·
@@ -17,17 +26,24 @@ certificate-management.md (ACME client, per-org account, wildcard bind error sha
 renewal window) are resolved here; that document remains the subsystem overview and
 is corrected to agree with the shipped tree in the same change.
 
-This document is **design only**. It introduces no migration, no endpoint, no
-dependency and no agent protocol change. Where it says "add", it means "the slice
-that implements Phase 5 will add", not "this change adds".
+This document introduces no migration, no endpoint, no dependency and no agent protocol
+change of its own — including in this reconciliation. Where it says "add", it means "the
+slice that implements that part of Phase 5 will add", not "this change adds". The one
+slice that has shipped (5.1) is recorded by reference to its own commit and migration in
+§1.1; its schema is described here as *as built*, and every other description below is
+*design*, labelled as such.
 
 ---
 
 ## 1. Architecture and trust boundaries
 
-### 1.1 What Phase 4 actually shipped (the starting point)
+### 1.1 What actually shipped (the starting point)
 
-Verified against the current tree at `ddd9727`:
+Two baselines matter to this document: the Phase 4 HTTP half (where the design
+started, verified at `ddd9727`) and the shipped Phase 5.1 slice (the current starting
+point for 5.2, verified at `37b7211`).
+
+**Phase 4 (HTTP half) — verified at `ddd9727`:**
 
 | Fact | Ground |
 |---|---|
@@ -44,8 +60,21 @@ Verified against the current tree at `ddd9727`:
 | `proxy_state` has **one writer per transaction**, behind `SELECT … FOR UPDATE` taken before the read; lock order `servers → routes → monitors` | `backend/app/services/proxy_service.py` (Phase 4.4) |
 | Redaction recurses dicts/lists/tuples at any depth **and** matches PEM armored content; it runs on every structlog record | `backend/app/core/logging.py` (Phase 4.4, S8) |
 | There is a single platform-wide Fernet key, `ENCRYPTION_KEY`; decrypt fails closed on mismatch | `backend/app/core/security.py` (`_fernet`, `encrypt_str`, `decrypt_str`) |
-| `certificate.read` / `certificate.manage` are **not** in the permission registry; only `domain.read` / `domain.manage` exist | `backend/app/core/permissions.py` |
-| There is no ACME client, no `certificates` table, no `dns_providers` table, and the agent registry has no `certificate.*` handler | `agent/nexusops_agent.py` (`OPERATION_REGISTRY`) |
+| `certificate.read` / `certificate.manage` are **not** in the permission registry; only `domain.read` / `domain.manage` exist *(the Phase 4 baseline — both codenames are registered in 5.1, below)* | `backend/app/core/permissions.py` |
+| There is no ACME client, no `dns_providers` table, and the agent registry has no `certificate.*` handler | `agent/nexusops_agent.py` (`OPERATION_REGISTRY`) |
+
+**Phase 5.1 (certificate metadata and pre-issuance lifecycle) — shipped, verified at
+`37b7211`:**
+
+| Fact | Ground |
+|---|---|
+| `certificates` and `certificate_generations` exist as tenant tables (`OrgScoped` → session guard + RLS) with the `certificates_tenant`/`certificates_system` and `certificate_generations_tenant`/`certificate_generations_system` policies and app-role grants | `backend/alembic/versions/20261012_1200-c8d9e0f1a2b3_phase5_certificate_metadata.py`; `backend/app/models/certificate.py` |
+| The generation `state` CHECK is limited to `PENDING`/`ORDERING`/`CHALLENGE_PUBLISHED`/`VALIDATING`/`FAILED`, so a material-less `ISSUED` generation is refused by the database | same migration (`ck_certificate_generations_state_valid`, asserted by `backend/tests/integration/test_migration_drift.py`) |
+| The one-live-generation partial unique index exists over exactly those four mutable states | `uq_cert_generations_one_live`; `backend/tests/unit/test_certificate_lifecycle.py` |
+| Certificate status is **derived** on read from the newest generation; `current_generation_id` is NULL until an issuance exists, and the read model reports `issued: false` | `backend/app/services/certificate_lifecycle.py`, `backend/app/services/certificate_service.py` |
+| `certificate.read` / `certificate.manage` are registered with the approved role matrix (Owner wildcard, Admin/Operator read+manage, Developer/Viewer read) | `backend/app/core/permissions.py`; `test_the_registry_and_the_committed_role_matrix_agree` |
+| The metadata API exists: `POST`/`GET`/`GET {id}`/`PATCH`/`DELETE /certificates`, metadata-only, no material fields in any response schema | `backend/app/api/v1/certificates.py`, `backend/app/schemas/certificate.py`, [api.md](api.md) |
+| **Not** shipped in 5.1: `organizations.dek_ciphertext`/`dek_generation`, the KEK provider, `dns_providers`, `acme_accounts`, `certificates.dns_provider_id`, the generation material columns and `deke_id`, the widened `state` vocabulary, the material guard CHECK, `routes.certificate_id`, the agent `certificate.*` handlers, and every worker/beat task | verified by `backend/tests/integration/test_migration_phase5.py` (`test_the_slice_boundary_is_not_forward_referenced`) |
 
 ### 1.2 Phase 5 in one sentence
 
@@ -294,7 +323,7 @@ or an envelope is introduced in the same slice that creates it.
 | `domain_id` | 5.1 | UUID FK → `domains.id`, NOT NULL; the verified name this certificate is for; `ON DELETE RESTRICT` while any generation is live |
 | `primary_cn` | 5.1 | String(253); canonical (same form as `domains.name`) |
 | `sans` | 5.1 | JSONB list; additional identifiers on the order (apex + wildcard share one generation) |
-| `status` | 5.1 | String(16) + CHECK; certificate-level view: `PENDING`/`ISSUED`/`FAILED`/`EXPIRED`/`SUSPENDED`/`REVOCATION_PENDING`/`REVOKED`/`REVOKED_LOCAL_ONLY`. **Derived** from the current generation by the service; the *enforceable* material constraint lives on `certificate_generations` (§3.2/§3.7) |
+| `status` | 5.1 | String(**24**) + CHECK; certificate-level view: `PENDING`/`ISSUED`/`FAILED`/`EXPIRED`/`SUSPENDED`/`REVOCATION_PENDING`/`REVOKED`/`REVOKED_LOCAL_ONLY`. Widened from the design's original String(16) before 5.1 shipped, because `REVOCATION_PENDING` is 18 characters — the column the design specified could not have held its own vocabulary. **Derived** on read by the service: from the *current* generation once one is issued, otherwise from the newest generation (which is what Phase 5.1 can have); the *enforceable* material constraint lives on `certificate_generations` (§3.2/§3.7) |
 | `current_generation_id` | 5.1 | UUID FK → `certificate_generations.id`, nullable; the generation a *new* bind should reference. NULL before the first `ISSUED`. |
 | `challenge_type` | 5.1 | String(8) + CHECK; `dns-01` only in v1 (`http-01` is rejected at create for wildcards and not offered in the UI) |
 | `auto_renew` | 5.1 | Boolean, default true; the renewal sweep skips `false` |
@@ -304,16 +333,29 @@ or an envelope is introduced in the same slice that creates it.
 | `dns_provider_id` | **5.2** | UUID FK → `dns_providers.id`, nullable; overrides the Domain's provider. Added **with** `dns_providers` — no forward reference, no placeholder provider row |
 | `suspended_at`, `suspension_reason` | **5.2** | DateTime / String(64); set on ownership loss (`domain_ownership_lost`) or an operator suspension; cleared when the certificate is rebound or revoked |
 
-Indexes / constraints:
+Indexes / constraints (**as built in 5.1**, migration `c8d9e0f1a2b3`):
 
 - `uq_certificates_org_cn` UNIQUE `(org_id, primary_cn)` — one certificate row per
   name per org; renewal reuses it with a new generation.
 - `ix_certificates_org_status` `(org_id, status)`.
 - `ix_certificates_expiry_sweep` `(status, expires_at)` — the renewal sweep.
-- CHECK `sans` is a JSON array of canonical identifiers, ≤ 100 entries.
+- `ck_certificates_status_valid`, `ck_certificates_challenge_type_valid`,
+  `ck_certificates_key_algorithm_valid` — the closed vocabularies, by literal (a new
+  value is a new migration).
+- `ck_certificates_primary_cn_length` (`char_length(primary_cn) BETWEEN 4 AND 253`) and
+  `ck_certificates_sans_shape` (`jsonb_typeof(sans) = 'array' AND
+  jsonb_array_length(sans) <= 100`). The array constraint checks shape only; element
+  canonicality (lowercase, punycode, no IP literal) is enforced on every write through
+  `canonicalize_name` in `backend/app/core/dnsname.py`, because SQL cannot run IDNA —
+  a constraint that pretended to would be worse than one that states its limit.
+- The `OrgScoped`/`TimestampMixin` conventions add `ix_certificates_org_id` and
+  `ix_certificates_created_at`; the same two exist on `certificate_generations`.
 - A certificate row is **never hard-deleted while `routes.certificate_id` references
   it** (RESTRICT). Deletion is allowed only when orphaned *and* no generation is
-  `ISSUED`.
+  `ISSUED`: 5.1 implements the second half through `current_generation_id` (non-NULL ⇒
+  material exists ⇒ 409 `CERTIFICATE_HAS_ISSUED_GENERATION`), and the first half
+  arrives with its column in 5.5 — the FK there is RESTRICT, so the database refuses a
+  delete a bound route makes invalid rather than the service guessing.
 
 ### 3.2 `certificate_generations` — one ACME order + one key pair
 
@@ -342,6 +384,13 @@ Indexes / constraints:
   `CREATE UNIQUE INDEX uq_cert_generations_one_live ON certificate_generations
   (certificate_id) WHERE state IN ('PENDING','ORDERING','CHALLENGE_PUBLISHED','VALIDATING')`.
   A second concurrent issuance is therefore a database error, not two racing orders.
+  As built, the predicate is generated from
+  `CertificateGenerationState.live_pre_issuance()` in `backend/app/models/certificate.py`,
+  so widening the live set cannot silently leave the index behind; `FAILED` is
+  deliberately outside it, so a retry can insert its own row.
+- `ck_certificate_generations_generation_positive` (`generation >= 1`) and
+  `ck_certificate_generations_attempt_count_non_negative` (`attempt_count >= 0`) —
+  the counters this table's cursors depend on cannot go negative (5.1).
 - **Material guard CHECK (added in 5.2, with the columns and the envelope).** A
   generation in any post-issuance state must carry its material *and* the DEK generation
   that encrypted it:
@@ -445,7 +494,7 @@ references — no forward reference, no placeholder DEK id, no artificial provid
 
 | Migration | Creates | Alters | Why this boundary |
 |---|---|---|---|
-| **5.1** — certificate metadata & lifecycle foundations | `certificates` (identity + lifecycle metadata, **including `domain_id`, `status`, `current_generation_id`, `challenge_type`, `auto_renew`, `key_algorithm`, `expires_at`**), `certificate_generations` (pre-issuance states + cursors) | — | 5.1 performs **no issuance**, so it needs no providers, no ACME account and no key material. The generation `state` CHECK is deliberately limited to pre-issuance states, so a material-less `ISSUED` generation is unrepresentable rather than merely discouraged. |
+| **5.1** — certificate metadata & lifecycle foundations — **SHIPPED 2026-10-12 (`37b7211`, migration `c8d9e0f1a2b3`)** | `certificates` (identity + lifecycle metadata, **including `domain_id`, `status`, `current_generation_id`, `challenge_type`, `auto_renew`, `key_algorithm`, `expires_at`**), `certificate_generations` (pre-issuance states + cursors), RLS policies + grants, the two codenames and their role grants | — | 5.1 performs **no issuance**, so it needs no providers, no ACME account and no key material. The generation `state` CHECK is deliberately limited to pre-issuance states, so a material-less `ISSUED` generation is unrepresentable rather than merely discouraged. |
 | **5.2** — key envelope, providers, ACME accounts, material | `dns_providers`, `acme_accounts`; `organizations.dek_ciphertext` / `organizations.dek_generation` | `certificates`: `+dns_provider_id` (FK → `dns_providers`), `+suspended_at`, `+suspension_reason`. `certificate_generations`: `+key_ciphertext`, `+chain_ciphertext`, `+fingerprint`, `+not_before`, `+not_after`, `+deke_id`, `+issued_at`, `+revoked_at`, `+revocation_state`, `+suspended_at`, `+suspension_reason`; **widen `state`** to the full vocabulary; **add the material guard CHECK** | The FK target, the envelope and the material columns land together, so the reference is always satisfiable and the guard CHECK can be written once. |
 | 5.4 / 5.5 / 5.6 | `certificate_deliveries` (5.4); `routes.certificate_id` + widened `scheme` (5.5); `monitors.target_type` + `CERTIFICATE` (5.6) | as scoped in §10.1 | Each consumes the 5.1/5.2 foundations; none introduces an earlier dependency. |
 
@@ -460,6 +509,28 @@ Domain's provider), and its FK is created with its target table.
 **No placeholder identifiers.** `deke_id` is never seeded with a dummy generation, and
 no provider row is invented to satisfy the FK; if issuance is attempted before 5.2,
 the generation `state` CHECK rejects it because `ISSUED` is not in the 5.1 vocabulary.
+
+**Intra-5.2 order (added 2026-10-12, after 5.1 shipped).** One migration is correct,
+but the *work inside it* has an order, and the first step is external:
+
+| # | Step | Depends on |
+|---|---|---|
+| 1 | **KEK provider decision + adapter** behind the seam in §6.7 (`wrap_dek`/`unwrap_dek`) | The vendor approval in §6.8. **Blocks steps 2–6**: without it there is no key the org DEK may be wrapped under, and an env-var fallback is exactly the unsafe source §6.7 forbids |
+| 2 | `organizations.dek_ciphertext` / `dek_generation` + org-DEK creation, unwrap and the per-process LRU — the **only** place a DEK is wrapped or unwrapped | Step 1 |
+| 3 | `dns_providers` table + its metadata-only API, then credential *acceptance* (`credentials_ciphertext`, `credential_fingerprint`) | Step 2 — the credential blob is wrapped under the org DEK, so accepting one without the envelope would be a partially working store |
+| 4 | `acme_accounts` + per-org account-key protection | Step 2 (same envelope); independent of step 3 |
+| 5 | `certificates.dns_provider_id` FK (lands **with** its target table), generation material columns, widened `state`, the material guard CHECK, `deke_id` | Steps 2–4 |
+| 6 | *Issuance itself* (5.3): the maintained ACME client, the order/challenge flow, `verify_creds`/`zone_allowlist` enforcement | Steps 1–5 |
+
+**What cannot be implemented safely before the KMS choice is approved:** steps 1–6 as
+listed — that is the org-DEK envelope, everything wrapped under it (DNS credentials,
+ACME account keys, certificate key/chain), and therefore any issuance, delivery or
+verification path. What *can* proceed without it: the non-credential half of step 3
+(the `dns_providers` row, its metadata read model, and zone-allowlist validation as a
+pure function) and the widened `state` vocabulary *if* it ships with the material
+columns — no placeholder keys, no placeholder provider rows, no credential storage
+without an envelope, no partially working issuance path (§3.7's no-placeholder rule
+applies to the whole slice, not just 5.1).
 
 ---
 
@@ -792,7 +863,7 @@ runbook.
 
 | # | Requirement | Why / mechanism |
 |---|---|---|
-| C1 | **Preferred external KMS / secret manager for the KEK** | The KEK (and ideally the unwrap operation) should live in an external KMS or secret manager (e.g. a cloud KMS/HSM-backed key, or Vault) so the root never sits in a plaintext env var or the application filesystem. The `unwrap` call in §6.2 is the integration seam; until it is swapped, `ENCRYPTION_KEY` from env is the v1 source *and its blast radius is total* (§6.1). |
+| C1 | **Preferred external KMS / secret manager for the KEK** | The KEK (and ideally the unwrap operation) should live in an external KMS or secret manager (e.g. a cloud KMS/HSM-backed key, or Vault) so the root never sits in a plaintext env var or the application filesystem. The decision is **made**: §6.7 selects Vault Transit by default and the deployment cloud's managed KMS as the first-class alternative, behind one provider interface; §6.8 lists the vendor approval still outstanding. Until an adapter exists, `ENCRYPTION_KEY` from env remains the only source *and its blast radius is total* (§6.1). |
 | C2 | **Access restrictions** | The KEK/DEK material and the unwrap path are reachable only from the API/worker runtime, never from the SPA, the agent, or a public endpoint. Unwrap happens only in the control-plane code path that needs the material (§6.2 “access boundary”). No human-facing endpoint decrypts. Host access to the env/file holding `ENCRYPTION_KEY` is restricted to the control-plane service account; containers run non-root (platform-security-model.md §7). |
 | C3 | **Rotation is exercised, not just designed** | The KEK re-wrap (§6.3) and the org-DEK rotation must be **tested in a non-production environment** before production. “Write-once with no path” (S5) is the status quo this design replaces for the Phase-5 scope; a rotation that has never been run is not a rotation. |
 | C4 | **Backup / recovery is rehearsed** | The KEK is in break-glass storage **separate** from DB backups with two-person access (§6.5), and an emergency recovery drill has been run: restore KEK + DB, unwrap DEKs, re-issue any unreadable generation. |
@@ -801,6 +872,118 @@ runbook.
 
 Until C1–C6 are met, centralized custody is an **accepted risk for non-production**
 and a **blocker for production**.
+
+### 6.7 KEK provider decision (2026-10-12)
+
+**Status: decided direction, one vendor approval outstanding (§6.8).** This section adds
+no dependency, no adapter, no credential and no configuration key — a design document
+cannot approve a vendor. It exists because the production unwrap path (Phase 5.2,
+step 1 of §3.7) must not be written before the key it unwraps under is chosen; until
+then the org-DEK envelope would inevitably be built against a plaintext env key that
+§6.1 calls a total-compromise source.
+
+**What a KEK provider must do.** Hold one root key the application can never read;
+wrap and unwrap a 32-byte organization DEK on demand; let the wrapped value live in the
+database while the plaintext DEK lives only in process memory; rotate the root key
+without touching a single ciphertext row (§6.3); be reachable only from the API/worker
+runtime (C2); and fail closed when it is unreachable — never decrypt from a weaker
+source to keep serving.
+
+**Options.** (List prices are anchors, not quotes; re-check before contracting.)
+
+| Option | Where the root key lives | Rotation | Access control | Recovery / availability | Operational cost | Notes |
+|---|---|---|---|---|---|---|
+| **Managed cloud KMS** (AWS KMS / GCP KMS / Azure Key Vault) | Vendor HSM-backed key that never leaves the boundary | Versioned key versions; re-wrap DEKs in place | IAM on the key plus a per-call audit log | Managed SLA; unavailability means no unwrap | ~$1 per key-month and ~$0.03 per 10k key-use operations at AWS/GCP list prices — negligible at one wrap/unwrap per org-DEK lifecycle | The right answer *when* the control plane already lives in that cloud; otherwise it pins the deployment to one vendor |
+| **HashiCorp Vault Transit** (self-hosted or HCP) | Inside Vault's barrier; never returned | `transit/keys/<k>/rotate` plus `rewrap` of stored ciphertexts — built for exactly this envelope | Vault policies + an AppRole token scoped to one transit key, with an audit device | Auto-unseal (cloud KMS/HSM) or Shamir shares in break-glass custody; Vault down means no unwrap | One more stateful service **and its unseal custody**; OSS free, enterprise optional | Cloud-agnostic, and it fits the shipped docker-compose deployment model and on-prem/VPS installs |
+| **KEK in the environment** (`ENCRYPTION_KEY` today) | Plaintext in the process env / compose file | Not possible without re-encrypting every ciphertext | Anyone who can read the env or `exec` into the container | Trivial | None | **Status quo — not acceptable for production custody (C1)**; this is the source §6.1 measures as total blast radius |
+| **Sealed file (SOPS/age) on the host** | A file the service account can read | Rotate the file, then re-wrap DEKs | Filesystem permissions; no per-call audit, no independent boundary | File must be kept separate from DB backups | Low | Fine for **dev/test** and single-operator installs; not custody for a multi-tenant production platform |
+| **HSM / PKCS#11 appliance** | A hardware appliance | Vendor-specific | PKCS#11 + appliance ACLs | Appliance availability plus key escrow | High (hardware, skills, cost) | Only worth it for a compliance requirement that names it; cloud KMS and Vault already give HSM-backed keys |
+
+**Recommendation — the default production approach.** **One external KEK provider behind
+the interface below, with HashiCorp Vault Transit as the default for self-hosted
+deployments and the deployment cloud's managed KMS (AWS KMS / GCP KMS / Azure Key Vault)
+as a first-class alternative when the control plane already runs there.** The platform
+ships and supports a self-hosted docker-compose deployment, so the default must not
+require a specific cloud; Vault Transit provides the wrap/unwrap and rotation semantics
+this envelope needs, a per-call audit trail, and token-scoped access narrowed to the
+one transit key, and its cost is one more service in a stack that already runs several.
+Where the control plane *is* inside a cloud, the managed KMS is cheaper to operate and
+keeps the root inside that provider's HSM boundary — the seam exists so that this is a
+configuration choice rather than a rewrite.
+
+**The honest costs of that recommendation.**
+
+- Vault does not remove the root-of-trust problem, it **relocates** it: the unseal
+  material (Shamir shares or the auto-unseal key) becomes the top secret and belongs in
+  break-glass custody separate from DB backups (C4, §6.5). Auto-unseal via a cloud KMS
+  is the lowest-friction arrangement and reintroduces a cloud dependency.
+- Every unwrap becomes a network call. The per-process LRU keyed by
+  `(org_id, generation)` (§6.2) absorbs it — **the DEK is cached, never the KEK**, and a
+  cache miss is a provider round-trip, not a fallback.
+- Provider unavailability **fails closed**: no issuance, no delivery, no DNS-credential
+  read. That is the correct direction, and it must surface as a named operator-visible
+  error rather than a retry storm.
+
+**Provider interface (normative — one seam).** The envelope talks to exactly this, and
+no other module may touch the KEK:
+
+```python
+class KEKProvider(Protocol):
+    name: str  # "vault-transit" | "aws-kms" | "gcp-kms" | "azure-kv" | "test"
+
+    async def wrap_dek(self, dek: bytes, ctx: EncryptionContext) -> WrappedKey: ...
+    async def unwrap_dek(self, wrapped: WrappedKey, ctx: EncryptionContext) -> bytes: ...
+    async def rewrap_dek(self, wrapped: WrappedKey, ctx: EncryptionContext) -> WrappedKey: ...
+    async def health(self) -> KEKProviderStatus: ...
+```
+
+with two value objects it exchanges:
+
+- `EncryptionContext(org_id, purpose, dek_generation)` — bound into the wrap as
+  associated data wherever the provider supports it (Vault transit `context`, AWS KMS
+  `EncryptionContext`, GCP KMS AAD), so a wrapped DEK cannot be replayed under a
+  different organization or generation. Providers without an AAD concept (Azure Key
+  Vault's wrap operations) document that limit explicitly instead of pretending
+  otherwise.
+- `WrappedKey(provider, key_id, key_version, ciphertext)` — recorded next to the
+  ciphertext so a rotation can decide what to re-wrap without guessing who wrapped it.
+
+Rules that make the seam real rather than decorative:
+
+1. **`organizations.dek_ciphertext` stores a self-describing envelope**
+   (`provider:key_id:key_version:<base64 ciphertext>`, versioned). It is one Text
+   column in 5.2, so adding a provider must not require a migration, and a row always
+   says which provider can unwrap it. *(Decided here; implemented in 5.2.)*
+2. **`rewrap_dek` is a provider operation**, so §6.3's "KEK rotation = re-wrap every org
+   DEK" never decrypts a DEK into application memory to re-encrypt it.
+3. **No provider may return the root key**, and no application code path reads, logs or
+   serializes one; `unwrap_dek` is the only way material becomes readable.
+4. **No fallback chain.** One configured provider; if it is unavailable or misconfigured,
+   the operation fails closed with a named error. There is no "if the KMS is down, use
+   the env key" path — that path is the vulnerability, not the recovery.
+
+**Development and tests: a deterministic provider, and no way to reach it in production.**
+
+| Requirement | How it is satisfied |
+|---|---|
+| Deterministic wrap/unwrap for tests and fixtures | `DeterministicKEKProvider` (provider name `test`): a fixed test root key, deterministic ciphertext, so a fixture's wrapped DEK is reproducible run to run. It implements the same interface and nothing else — no vendor SDK, no network. |
+| Explicit selection only | A single settings field names the provider. There is no environment sniffing and no auto-detection; dev/test set it to `test`, non-production deployments that want fidelity set the real provider. |
+| Production cannot select it | Startup validation **aborts at import** if the provider is unset, unknown, or `test` in a production configuration — the same fail-fast path `ENCRYPTION_KEY` uses today (`backend/app/core/config.py`, exit 2). An unsafe key source is therefore unreachable *by configuration*, not by convention. |
+| No silent degradation | A provider error is raised, never converted into a different key source, and never into a plaintext-or-nothing decision. |
+| Real-provider coverage without production secrets | CI may run a Vault transit instance (or a cloud KMS emulator) against the same interface; the production key and the production ACME directory are never contacted (§10.2). |
+
+### 6.8 Remaining approval decisions (KEK/KMS)
+
+| # | Decision | Owner | Blocks |
+|---|---|---|---|
+| K1 | **Which provider the first production deployment uses** — Vault Transit (self-hosted) or the deployment cloud's managed KMS | Infra / operator | §3.7 step 1, and therefore all of 5.2 and 5.3 |
+| K2 | **Root/unseal custody** — auto-unseal through a cloud KMS (recommended) or Shamir shares in break-glass storage with two-person access (C4) | Security / infra | Production readiness (C1–C6); not 5.2's dev path |
+| K3 | **Audit retention** — whether the provider's per-call audit log must be exported and retained for compliance | Security / compliance | Detail of K1; both recommended providers can supply it |
+| K4 | **Caching policy** — confirm the per-process DEK LRU is acceptable rather than a per-call unwrap (the DEK is cached, never the KEK) | Platform | 5.2 step 2 implementation |
+| K5 | **Cost envelope** — expected provider spend (~$1 per cloud KMS key-month plus ~$0.03 per 10k key-use operations at list price; Vault OSS is free but needs a host) | Product / infra | Production budget sign-off, not the design |
+
+Until **K1** is approved, step 1 of §3.7 must not be written; until **K2–K4** are settled,
+no production deployment may claim C1–C6 compliance.
 
 ---
 
@@ -1154,13 +1337,37 @@ so an operator is never told a certificate is revoked when it is not.
 
 | Slice | Scope | Ships | Acceptance criteria |
 |---|---|---|---|
-| **5.1 — Certificate metadata & lifecycle foundations** | `certificates` + `certificate_generations` **first** migration (identity + pre-issuance lifecycle only — **no `dns_provider_id`, no material columns, no `deke_id`**), `certificate.read`/`certificate.manage` codenames **+ the role matrix (§4.1, O3 resolved)**, RLS/grant pattern from the Phase 4 migration, metadata-only CRUD (no issuance) | Migration + API + IDOR cases | A `certificates` row is org-scoped; a foreign id is 404; `GET` returns no ciphertext field; the one-live-generation unique index rejects a second concurrent issuance; **the generation `state` CHECK is limited to pre-issuance states, so an `ISSUED` row is rejected** (no forward dependency on 5.2); no `dns_providers` table exists yet and nothing references one; no `deke_id` column exists, so no placeholder can be written; role matrix matches §4.1; drift test green. |
-| **5.2 — Key envelope, providers & issuance foundations** | `dns_providers`, `acme_accounts`, `organizations.dek_ciphertext`/`dek_generation`, the generation material columns + `deke_id`, `certificates.dns_provider_id` **FK added with its target table**, widened `state` vocabulary, **material guard CHECK**; org-DEK wrap/unwrap + LRU, `verify_creds` + zone allowlist | Migration + service + write-only API | **An issued (or superseded/suspended/expired/revoked) generation cannot exist without `key_ciphertext`, `chain_ciphertext`, `deke_id`, `issued_at` and `not_after`** (guard CHECK rejects it); `dns_provider_id` FK resolves to a real row (no artificial provider); DNS credential never returned by any endpoint; a challenge outside `zone_allowlist` is refused; DEK rotation re-encrypts only Phase-5 rows; no existing secret re-encrypted; a `decrypt_str` mismatch fails closed |
+| **5.1 — Certificate metadata & lifecycle foundations — SHIPPED 2026-10-12 (`37b7211`)** | `certificates` + `certificate_generations` **first** migration (identity + pre-issuance lifecycle only — **no `dns_provider_id`, no material columns, no `deke_id`**), `certificate.read`/`certificate.manage` codenames **+ the role matrix (§4.1, O3 resolved)**, RLS/grant pattern from the Phase 4 migration, metadata-only CRUD (no issuance) | Migration + API + IDOR cases | A `certificates` row is org-scoped; a foreign id is 404; `GET` returns no ciphertext field; the one-live-generation unique index rejects a second concurrent issuance; **the generation `state` CHECK is limited to pre-issuance states, so an `ISSUED` row is rejected** (no forward dependency on 5.2); no `dns_providers` table exists yet and nothing references one; no `deke_id` column exists, so no placeholder can be written; role matrix matches §4.1; drift test green. |
+| **5.2 — Key envelope, providers & issuance foundations** — *next; starts with the KMS provider (K1, §6.8) and follows the intra-slice order in §3.7* | `dns_providers`, `acme_accounts`, `organizations.dek_ciphertext`/`dek_generation`, the generation material columns + `deke_id`, `certificates.dns_provider_id` **FK added with its target table**, widened `state` vocabulary, **material guard CHECK**; org-DEK wrap/unwrap + LRU, `verify_creds` + zone allowlist | Migration + service + write-only API | **An issued (or superseded/suspended/expired/revoked) generation cannot exist without `key_ciphertext`, `chain_ciphertext`, `deke_id`, `issued_at` and `not_after`** (guard CHECK rejects it); `dns_provider_id` FK resolves to a real row (no artificial provider); DNS credential never returned by any endpoint; a challenge outside `zone_allowlist` is refused; DEK rotation re-encrypts only Phase-5 rows; no existing secret re-encrypted; a `decrypt_str` mismatch fails closed |
 | **5.3 — ACME issuance (staging + pebble)** | `acme`/`josepy` dependency behind `AcmeProvider`; per-org account; DNS-01 order → publish → propagate → validate → finalize → store; state machine; backoff | Worker task + tests against pebble | Issue a certificate for a name whose TXT record the test publishes; generation reaches `ISSUED` with `not_after` set; retry/backoff and stuck-state sweep pinned; **no production CA traffic in tests** |
 | **5.4 — Secure delivery** | `certificate_deliveries`, `POST /agent/certificates/{id}/material`, `certificate.install`/`.remove` op types + agent handlers, content-addressed paths, fingerprint check, no-store response policy | Endpoint + op types + agent + contract tests | **No certificate private key or chain appears in operation params, results, audit metadata, events or logs** (asserted by tests over each path, §7.6); a foreign node's delivery is 404; a superseded generation is refused; a duplicate claim is idempotent; interrupted delivery recovers within the window and not after. **Non-production only until C1–C6 (§6.6) are met.** |
 | **5.5 — HTTPS activation & verification** | Renderer TLS block, allowlisted `tls` paths, `routes.certificate_id` + widen `scheme`, `proxy_state.tls`, activation endpoint, control-plane HTTPS probe | Migration + renderer + API | HTTP keeps serving until the probe succeeds; a bad cert path fails `nginx -t` and rolls back to the HTTP tree; `scheme` flips to `https` only after `VERIFIED_ACTIVE`; content-addressed path change ⇒ different `bundle_id` ⇒ drift detected |
 | **5.6 — Renewal, expiry monitor, removal, revocation** | Hourly sweep, `CERTIFICATE` monitor target, removal/`REMOVED` state, suspension on ownership loss, automated revocation with the impact safeguard, replace/split for shared certs, `REVOKED_LOCAL_ONLY` + retry | Beat schedule + monitors + API | Renewal produces a new generation and supersedes the old; an offline node stays `PENDING` without a false success; expiry monitor pages independently of uptime; ownership loss suspends + re-renders + removes-on-confirm; a shared multi-identifier cert is **never** auto-revoked while a retained identifier still serves — it is replaced/split first; removal is **never** gated on CA revocation; revoked vs local-only vs suspended are distinct |
 | **5.7 — Hardening pass** | Redaction extended to cert material (already PEM-aware), rate-limit/CAA handling, operational runbooks, backfill of docs | Docs + tests | Redaction tests cover chain+key; the platform-security-model threat rows are updated; no key material in any asserted path |
+
+#### 10.1.1 Phase 5.1 acceptance criteria — met, with the evidence
+
+Each criterion from the 5.1 row above, and the test that substantiates it. Nothing
+here is claimed on the strength of the migration alone.
+
+| 5.1 acceptance criterion | Evidence |
+|---|---|
+| A `certificates` row is organization-scoped | `tests/integration/test_certificates.py::test_a_certificate_is_tenant_owned_and_unreachable_without_a_scope`; `::test_both_new_tables_carry_a_tenant_and_a_system_policy` |
+| A foreign id is 404 (no existence oracle, no 403) | `::test_a_foreign_certificate_id_is_the_same_404_as_a_random_one`; `::test_listing_and_filtering_never_cross_tenants`; `::test_rls_blocks_cross_tenant_certificate_reads_without_the_orm` |
+| `GET` returns no ciphertext field (nor key material, nor an internal cursor) | `tests/unit/test_certificate_lifecycle.py::test_the_response_models_expose_exactly_the_approved_fields`; `::test_no_response_field_can_hold_key_material`; `::test_the_request_body_rejects_fields_this_phase_does_not_have` |
+| The one-live-generation unique index rejects a second concurrent issuance | `tests/integration/test_certificates.py::test_a_second_in_flight_generation_is_refused_but_a_failed_one_is_not`; `::test_duplicate_requests_are_refused`; `tests/unit/test_certificate_lifecycle.py::test_the_one_live_generation_index_covers_exactly_the_live_states` |
+| The generation `state` CHECK is limited to pre-issuance states, so an `ISSUED` row is rejected | `tests/integration/test_migration_phase5.py::test_an_issued_generation_is_rejected_and_a_pre_issuance_one_is_not`; `tests/integration/test_certificates.py::test_an_issued_generation_is_unrepresentable`; `tests/unit/test_certificate_lifecycle.py::test_issued_is_not_a_generation_state`; `::test_handing_a_material_state_to_the_lifecycle_is_refused_loudly` |
+| No `dns_providers` table exists and nothing references one; no `deke_id` column exists, so no placeholder can be written | `tests/integration/test_migration_phase5.py::test_the_slice_boundary_is_not_forward_referenced`; `::test_the_two_tables_carry_the_specified_columns` |
+| The role matrix matches §4.1, and `certificate.read` alone grants nothing else | `tests/unit/test_certificate_lifecycle.py::test_the_registry_and_the_committed_role_matrix_agree`; `::test_certificate_read_does_not_carry_management_authority`; `::test_the_registry_adds_exactly_the_two_certificate_codenames`; `tests/integration/test_migration_phase5.py::test_the_codenames_and_their_grants_land_with_the_migration`; `tests/integration/test_certificates.py::test_certificate_read_alone_does_not_authorize_management` |
+| Migration upgrade/downgrade on a populated instance, and a single Alembic head | `tests/integration/test_migration_phase5.py::test_a_populated_instance_migrates_without_losing_anything`; `::test_the_migration_is_reversible_and_reappliable`; `::test_the_phase5_revision_extends_the_phase4_chain` |
+| Drift test green (models and migrations agree) | `tests/integration/test_migration_drift.py::test_models_and_migrations_do_not_drift`; `::test_the_certificate_vocabularies_match_the_enums` |
+
+Two design statements were **corrected by what 5.1 actually built** and are recorded above
+rather than quietly left inconsistent: `certificates.status` is String(24) (String(16)
+cannot hold `REVOCATION_PENDING`), and status derivation falls back to the *newest*
+generation until a *current* one exists (§3.1). Everything else in §3.1/§3.2 that is
+marked 5.1 is present in migration `c8d9e0f1a2b3`; everything marked 5.2 is absent from
+it.
 
 ### 10.2 Test requirements (what "done" means per slice)
 
@@ -1207,26 +1414,29 @@ so an operator is never told a certificate is revoked when it is not.
 | L7 | Delivery (5.4) must not ship before the leak-path tests for the paths it introduces exist. | Sequencing constraint, not a separate task. |
 | L8 | Node-side key generation / CSR. | Out of scope for v1; the structural answer to D1's concentration. |
 
-#### 10.3.3 Open items and whether they block Phase 5.1
+#### 10.3.3 Open items and what they block now
 
-Phase 5.1 is the data model and read API only — **no key material, no CA, no delivery**.
-The following are genuinely unresolved and are **not** invented away; each is labeled
-with whether it blocks 5.1.
+Phase 5.1 — the data model and read API only, **no key material, no CA, no delivery** —
+**shipped 2026-10-12** (§1.1, §10.1.1). The table below is therefore about 5.2 and
+later; each item is genuinely unresolved and is **not** invented away.
 
-| # | Open item | Blocks 5.1? |
+| # | Open item | Blocks what? |
 |---|---|---|
-| O1 | **KMS / secret-manager vendor** for the KEK (C1). An external dependency choice; the `unwrap` seam and `deke_id` are already designed. | **No** — but blocks production (C1) and Phase 5.2's unwrap path. Decide before 5.2 lands. |
+| O1 | **KMS / secret-manager vendor for the KEK (C1).** *Direction decided in §6.7* — Vault Transit as the self-hosted default, the deployment cloud's managed KMS as the alternative, both behind one `KEKProvider` seam, with a deterministic test provider that production cannot select. The outstanding item is the vendor approval (K1) and the custody/audit/caching decisions K2–K4 (§6.8). | **Blocks 5.2 step 1** (the provider adapter) and therefore the org-DEK envelope, everything wrapped under it (DNS credentials, ACME account keys, certificate key/chain) and all of 5.3 issuance. Blocks production (C1). Does **not** block the non-credential half of the `dns_providers` slice or this document's corrections. |
 | O2 | **Exact `acme`/`josepy` versions and pin policy**, and whether to use `acme`'s `ClientNetwork` or its higher-level message helpers. | **No** — needed at 5.3. |
 | O4 | **`REVOCATION_FAILED` → operator action vs extended automatic retry budget.** The bounded-budget default is designed (§9.5); the exact budget/threshold is a tuning decision. | **No** — 5.6. |
 | O5 | **Expiry-monitor thresholds** (warn/critical days) — defaults proposed (30/7) but org-configurability is undecided. | **No** — 5.6. |
 | O6 | **Whether the multi-identifier split is automatic or operator-confirmed** when the replacement issuance itself needs DNS credentials for a still-owned zone. | **No** — 5.6; the safeguard (never revoke a still-serving shared cert) holds either way. |
 | O7 | **CAA record handling** — honor/refuse at issuance. Not designed here. | **No** — 5.3/5.7 hardening. |
 
-**Bottom line for 5.1:** **O3 is resolved (D4, §4.1)** — Phase 5.1 registers the two
-codenames with the matrix Owner/Admin/Operator = read+manage, Developer/Viewer = read,
-using the current stored role name. Every remaining open item is bounded to a later
-slice or to production readiness, and **none blocks starting 5.1**. This task does not
-begin 5.1.
+**Bottom line after 5.1 shipped:** **O3 is resolved (D4, §4.1)** and is implemented —
+the two codenames are registered with the matrix Owner/Admin/Operator = read+manage,
+Developer/Viewer = read, using the current stored role name, and the tests in §10.1.1
+prove it. **O1 is the one item that gates a slice rather than a feature**: 5.2 step 1 is
+the KEK provider, and it needs the K1 approval in §6.8 before it is written. O2 is
+bounded to 5.3, O4–O7 to 5.6/5.7, and none of them changes the 5.1 schema that is now in
+the database. No item on this list is a reason to write a placeholder key, a placeholder
+provider row or a partially working issuance path.
 
 ### 10.4 Reserved-operation-type lists — one source of truth (required consolidation)
 
@@ -1293,3 +1503,16 @@ type. **This task adds no operation type.**
 
 These supersede the corresponding “needs human approval” items in earlier revisions of
 this document. The remaining open items for Phase 5.1 and beyond are listed in §10.3.3.
+
+### Approved and recorded in the Phase 5.1 closeout (2026-10-12)
+
+| Decision | Where |
+|---|---|
+| Phase 5.1 implementation status — what shipped, what did not, and the evidence for each acceptance criterion | §1.1, §10.1, §10.1.1 |
+| KEK provider direction (C1): Vault Transit as the self-hosted default, the deployment cloud's managed KMS as the alternative, one provider interface, a deterministic test provider that production cannot select — with the vendor/custody/audit/caching approvals still outstanding | §6.7, §6.8 |
+| Intra-5.2 implementation order, with the KEK provider first, and the explicit statement of what may not be built before the KMS choice | §3.7 |
+| `certificates.status` widened String(16) → String(24) and status derived from the newest generation until a current one exists | §3.1 |
+
+No application behavior is changed by these notes: they record what 5.1 built, and set
+the order and the gates for 5.2. No dependency, adapter, credential or configuration key
+is added — the KEK vendor is explicitly still an approval (§6.8, K1).

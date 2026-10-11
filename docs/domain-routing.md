@@ -3,11 +3,14 @@
 **Status:** Implemented for HTTP routing (Phase 4, 2026-10-10; revocation and
 reconciliation hardened 2026-10-10; reconciliation candidate discovery and
 result handling hardened 2026-10-11). **No certificate issuance, no TLS listener and
-no HTTPS redirect exist yet** — every certificate-related shape in this document is
-**Phase 5 target design**, labelled as such below (authoritative spec:
-[phase5-design.md](phase5-design.md)), and post-deploy route sync remains Phase 6
-target design.
-**Date:** 2026-09-21 (status updated 2026-10-10)
+no HTTPS redirect exist yet.** Certificate *metadata* shipped in Phase 5.1
+(`certificates`/`certificate_generations`, request/list/inspect API —
+[phase5-design.md](phase5-design.md) §1.1), so certificate rows now exist, but nothing
+serves TLS: a route still cannot reference a certificate. Every remaining
+certificate-related shape in this document is **Phase 5 target design**, labelled as
+such below (authoritative spec: [phase5-design.md](phase5-design.md)), and post-deploy
+route sync remains Phase 6 target design.
+**Date:** 2026-09-21 (status updated 2026-10-12: Phase 5.1 metadata shipped)
 **Companions:** [platform-vision.md](platform-vision.md) · [domain-model.md](domain-model.md) · [multi-tenancy.md](multi-tenancy.md) · [authorization.md](authorization.md) · [node-agent-architecture.md](node-agent-architecture.md) · [certificate-management.md](certificate-management.md) · [phase5-design.md](phase5-design.md)
 
 ## 1. Scope and current state
@@ -80,8 +83,9 @@ schema yet**.
 > **Phase 5 target design (not shipped):** Route optionally carrying a
 > **Certificate** (`Route |o--o| Certificate` — authoritative spec:
 > [phase5-design.md](phase5-design.md) §3; overview: certificate-management.md §2).
-> No `certificates` table exists; `routes.scheme` is a closed CHECK of `'http'` and
-> there is no `certificate_id` column, so a TLS listener and an HTTPS redirect are not
+> The `certificates` table exists (Phase 5.1 metadata), but `routes.scheme` is a closed
+> CHECK of `'http'`, there is no `certificate_id` column, and no route can reference a
+> certificate, so a TLS listener and an HTTPS redirect are not
 > merely unwired — they are unrepresentable. Phase 5 adds them by migration, with
 > certificate material content-addressed by fingerprint so replacing it changes the
 > rendered `bundle_id` and drift stays detectable (phase5-design.md §8.3).
@@ -433,9 +437,10 @@ unreachable upstream.
 
 ### 8.2 Certificate selection rule (this doc owns it) — **Phase 5 target design**
 
-> Nothing below is implemented: there are no certificate rows, no coverage check at
-> bind time and no `scheme=https` to bind to. It is recorded here because this doc
-owns the rule, and certificate-management.md §8 implements it.
+> Nothing below is implemented: certificate rows exist since Phase 5.1, but there is no
+> coverage check at bind time, no `certificate_id` column on `routes`, and no
+> `scheme=https` to bind to. It is recorded here because this doc owns the rule, and
+> certificate-management.md §8 implements it in Phase 5.5.
 
 A route's HTTPS certificate must cover the hostname: exact CN/SAN preferred,
 otherwise a wildcard SAN one label deep (`*.example.com` covers `api.example.com`,

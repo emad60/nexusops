@@ -31,8 +31,11 @@ notification, and deploy → step logs → rollback.
   missing proof record, or another organization proving control) pulls the routes
   from every node that was serving it; a node that is offline keeps its state
   visibly unresolved and is retried by a bounded reconciler rather than reported as
-  fixed. **There is no TLS yet**: Phase 4 renders plain HTTP only — no certificate
-  issuance, no `listen 443`, no HTTPS redirect — and the schema cannot express one.
+  fixed. **There is no TLS yet**: routes render plain HTTP only — no certificate
+  issuance, no `listen 443`, no HTTPS redirect — and `routes.scheme` cannot express
+  `https`. Phase 5.1 shipped the certificate *record* (identity, lifecycle metadata and
+  an org-scoped metadata API); none of its columns can hold key material, and no
+  certificate has ever been issued.
   The control plane is never in the customer traffic path: it renders configuration
   and ships it as an operation, so customer requests go browser → node nginx →
   container (uptime checks, by contrast, do probe from the control plane, and the
@@ -212,7 +215,8 @@ tenancy model as built — org resolution, the session guard, PostgreSQL RLS and
   (Phase 4)**: the domains/routes model as built, DNS ownership verification and its
   sweeps, the nginx renderer and the apply pipeline, ownership revocation across
   nodes, and the drift reconciler. Everything certificate- or TLS-shaped in it is
-  **Phase 5 target design** and labelled as such.
+  **Phase 5 target design** and labelled as such (Phase 5.1 shipped the certificate
+  *record*; nothing serves TLS and no route can reference a certificate).
 - [docs/platform-vision.md](docs/platform-vision.md) — platform-evolution direction,
   target domain model, authorization, phased roadmap (the tenant foundation in it is
   now shipped; the later-phase entities are still design). Companion specs:
@@ -220,9 +224,10 @@ tenancy model as built — org resolution, the session guard, PostgreSQL RLS and
   [authorization.md](docs/authorization.md), [product-roadmap.md](docs/product-roadmap.md),
   [node-agent-architecture.md](docs/node-agent-architecture.md),
   [domain-routing.md](docs/domain-routing.md) (its HTTP half is now shipped),
-  [certificate-management.md](docs/certificate-management.md),
+  [certificate-management.md](docs/certificate-management.md) (5.1 metadata shipped;
+  issuance/TLS still design),
   [phase5-design.md](docs/phase5-design.md) (authoritative Phase 5 HTTPS/certificate
-  design — not implemented),
+  design — **5.1 shipped, the rest is design**),
   [deployment-architecture.md](docs/deployment-architecture.md),
   [secrets-architecture.md](docs/secrets-architecture.md),
   [platform-security-model.md](docs/platform-security-model.md).

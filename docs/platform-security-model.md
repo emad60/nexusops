@@ -37,8 +37,9 @@ landed and the current code matches (authorization.md §2). There is deliberatel
 | Deployments | **Simulated.** `SimulatedDeploymentRunner` renders 7 docker-style steps, performs no real work | backend/app/providers/deployment_runner.py:107 |
 | Docker provider for demo/CI | **Simulated.** `docker_sim` provider + global `SIMULATION_MODE` flip every host's provider fleet-wide; sim tick writes into the same tables as real heartbeats | backend/app/providers/docker_sim.py:39-100; backend/app/providers/docker_factory.py:31-32 |
 | Monitor transports | **Simulated for `sim://` URLs** (deterministic sha256 outcomes; `always-down`, `flaky`, …). Real httpx probes are real | backend/app/providers/monitor_transport.py:204-242 |
-| Domains / routes / nginx reverse proxy | **Shipped (Phase 4), HTTP only.** `domains`/`routes` are RLS-backed tenant tables, TXT ownership verification and the `nginx.*` ops are real; **no certificate, no TLS listener and no HTTPS redirect exist** | domain-routing.md §1; `backend/app/models/routing.py` |
-| Certificates, TLS, private-key delivery | **Does not exist.** Phase 5 target design; §5 rows for these are threat *designs* | phase5-design.md |
+| Domains / routes / nginx reverse proxy | **Shipped (Phase 4), HTTP only.** `domains`/`routes` are RLS-backed tenant tables, TXT ownership verification and the `nginx.*` ops are real; **no TLS listener and no HTTPS redirect exist** | domain-routing.md §1; `backend/app/models/routing.py` |
+| Certificate metadata (identity + pre-issuance lifecycle) | **Shipped (Phase 5.1, 2026-10-12).** `certificates`/`certificate_generations` are RLS-backed tenant tables with an org-scoped metadata API; the generation `state` CHECK cannot express an issued generation, and no key, chain or ciphertext column exists | phase5-design.md §1.1, §10.1.1; `backend/app/models/certificate.py` |
+| Certificate issuance, TLS, private-key delivery | **Does not exist.** Phase 5 target design (5.2–5.6); the §5 rows for these are threat *designs*. The KEK/KMS decision is made (phase5-design.md §6.7) with the vendor approval outstanding (§6.8, K1) | phase5-design.md §1.1, §6.7 |
 | Multi-tenancy (organizations, memberships, `org_id`, RLS) | **Real**, shipped in Phase 1. Organizations + memberships exist, every tenant table carries `org_id`, and PostgreSQL RLS binds behind the `nexusops_app` role | backend/app/core/tenancy.py; backend/alembic/versions/20260922_1000-a3f1c8d24b6e_add_tenancy_foundation.py; multi-tenancy.md §0 |
 
 ## 2. Assets
@@ -198,7 +199,10 @@ accepted for v1:
   conditions are the production-readiness requirements C1–C6 in phase5-design.md §6.6
   — preferred external KMS/secret-manager for the KEK, access restrictions, exercised
   rotation, rehearsed backup/recovery, operable revocation, and a documented limit on
-  what the envelope protects. Node-side keygen/CSR is a later-phase option, deliberately
+  what the envelope protects. The provider direction is decided (phase5-design.md §6.7:
+  Vault Transit by default, the deployment cloud's managed KMS as the alternative,
+  behind one interface, with a deterministic test provider production cannot select);
+  the vendor approval is K1 in §6.8. Node-side keygen/CSR is a later-phase option, deliberately
   not built now. A per-organization DEK envelope (phase5-design.md §6) improves the
   DB-only case and enables per-org rotation/recovery, but it **does not** bound a
   compromise of `ENCRYPTION_KEY` (the KEK) or of the application runtime — the KEK

@@ -4,11 +4,14 @@
 `org_id` ownership, RLS) shipped with Phase 1, and **Phase 2 shipped the delivery
 promotion**: `Environment` is project-scoped, `Project.config` exists,
 configuration layers project ⊕ environment, and `Secret`/`SecretVersion` carry
-org/project/environment scope with append-only history. The later-phase entities
-in this document (Domains, Certificates, Backups, Grants, Teams, Plan) remain
-design.
+org/project/environment scope with append-only history. Phase 4 shipped Domains and
+Routes (HTTP only), and **Phase 5.1 shipped the Certificate *record*** — identity,
+domain association and the pre-issuance lifecycle, with no key material and no
+issuance. The remaining entities in this document (Backups, Grants, Teams, Plan) and
+the rest of Certificates (material, issuance, delivery, HTTPS) remain design.
 **Date:** 2026-09-20 (tenant layer implemented 2026-09-24; delivery promotion
-implemented 2026-10-08, migration `b2c3d4e5f6a7`)
+implemented 2026-10-08, migration `b2c3d4e5f6a7`; domains/routes 2026-10-10;
+certificate metadata 2026-10-12)
 **Companions:** [platform-vision.md](platform-vision.md) · [multi-tenancy.md](multi-tenancy.md) · [authorization.md](authorization.md)
 
 ## 0. Design stance
@@ -262,7 +265,7 @@ overlap — Operation is not renamed to Task (collides with Celery tasks) or Act
 |---|---|---|---|
 | **Domain** | `domains` | org_id, project_id?, name (uq per org), status, verified_at, verification token, dns_provider_id? | Ownership proven via DNS TXT record before routes go live (anti-takeover). |
 | **Route** | `routes` | org_id, domain_id, hostname, path, node_id, container_id?, port, scheme, certificate_id?, headers/rate-limit JSONB, enabled | hostname+path → upstream. A route's upstream may be a container (usual case) or an external upstream. |
-| **Certificate** | `certificates` | org_id, primary CN, SANs, status, issued_at, expires_at, challenge type, auto_renew, encrypted key+chain (ciphertext columns) | Issued via ACME (DNS-01 first). Private keys never leave the control plane except encrypted delivery to the serving node. Spec: [certificate-management.md](certificate-management.md). |
+| **Certificate** | `certificates` + `certificate_generations` | **shipped for metadata (Phase 5.1)**: org_id, domain_id, primary CN, SANs, derived status, challenge type, auto_renew, expires_at, plus one row per generation (`generation`, pre-issuance `state`, backoff cursors). **Still design:** the ciphertext key+chain columns, `deke_id`, `issued_at`/`not_after`, `dns_provider_id`, `suspended_at` and the whole issuance path | Issued via ACME (DNS-01 first) in Phase 5.3+; until then nothing is issued and no material column exists. Private keys will never leave the control plane except as encrypted delivery to the serving node. Spec: [certificate-management.md](certificate-management.md), authoritative [phase5-design.md](phase5-design.md) §1.1/§3.1. |
 | **ProxyProvider** | — | **shipped for HTTP** (Phase 4) | Nginx first: renders config, ships via agent operation, validates (`nginx -t`), applies atomically with rollback. TLS is Phase 5. Spec: [domain-routing.md](domain-routing.md). |
 
 ### 2.5 Secrets (re-scoped — **shipped in Phase 2**)

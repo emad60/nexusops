@@ -16,11 +16,13 @@ Two things are mocked, both outside the control plane's own logic:
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import json
 import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from app.core.tenancy import apply_scope_to_session, system_scope
+from app.core.tenancy import apply_scope_to_session, org_scope, system_scope
 from app.models import AuditLog, Container, Domain, Monitor, Operation, Server, SystemEvent
 from app.models.enums import (
     ContainerStatus,
@@ -31,6 +33,8 @@ from app.models.enums import (
 from app.services import dns_verifier
 from app.services.dns_verifier import STATUS_NO_TXT, STATUS_OK, STATUS_TIMEOUT, TxtObservation
 from sqlalchemy import select
+
+from tests.conftest import FAKE_PRIVATE_KEY_PEM
 
 from .helpers import API, assert_error_code, bearer, unique_email
 
@@ -2414,3 +2418,380 @@ async def test_a_converged_node_is_polled_on_an_interval_not_every_tick(client, 
     counts = await asyncio.to_thread(sweep_routes)
     assert counts.get(proxy_service.RECONCILE_STATUS_REQUESTED, 0) == 0
     assert counts.get(proxy_service.RECONCILE_IN_SYNC, 0) == 1
+
+
+# --- 10. proxy state is one row with one writer --------------------------------
+#
+# The defect this section pins: ``servers.proxy_state`` is a single JSONB column,
+# and an ORM flush writes the whole column from whatever the session holds. Two
+# writers that each read it, change one key and flush do not merge — the second
+# flush replaces the first writer's keys with the snapshot it read. The casualty is
+# ``reconcile_required``: a route mutation commits the marker, a reconciliation
+# that read the state beforehand flushes its snapshot over it, and the node drops
+# out of the reconcile sweep with a revoked hostname still live on it.
+#
+# Each test below holds a reconciliation at the one point that matters — after it
+# has read the state it is about to write — and runs a competing writer in the
+# meantime. Under the writer protocol the competitor waits on the node's row lock
+# and commits afterwards, so its key survives; without it the competitor commits
+# first and the reconciler's flush erases it.
+
+REDACTED = "[REDACTED]"
+
+#: The armored fixture's body — the part that must never survive anywhere.
+KEY_BODY = FAKE_PRIVATE_KEY_PEM.splitlines()[1]
+
+
+@contextlib.asynccontextmanager
+async def _node_session(org_id: str, node_id: str):
+    """One worker unit of work: a fresh session, its org scope, and its node."""
+    from app.core.db import get_sessionmaker
+
+    async with get_sessionmaker()() as session:
+        with org_scope(uuid.UUID(org_id)):
+            await apply_scope_to_session(session)
+            node = await session.get(Server, uuid.UUID(node_id))
+            assert node is not None, f"node {node_id} is gone"
+            yield session, node
+
+
+async def _mark_reconcile_required_elsewhere(org_id: str, node_id: str) -> None:
+    """A second proxy-state writer, exactly as a route mutation calls it."""
+    from app.services import proxy_service
+
+    async with _node_session(org_id, node_id) as (session, node):
+        await proxy_service.mark_reconcile_required(session, node=node)
+        await session.commit()
+
+
+async def _hello_elsewhere(org_id: str, node_id: str) -> None:
+    """The other routine writer of this column: an agent's hello."""
+    from app.services import proxy_service
+
+    async with _node_session(org_id, node_id) as (session, node):
+        await proxy_service.after_hello(session, node=node)
+        await session.commit()
+
+
+def _pause_render(monkeypatch: pytest.MonkeyPatch, *, refuse: bool = False):
+    """Hold the reconciler's ``render_for_node`` until released — mid-decision.
+
+    ``reconcile_node`` reads the state it will write *before* rendering, so a pause
+    here is precisely the window in which a competing writer used to be able to
+    commit a key that the reconciler's own flush then wrote over.
+
+    Only the **first** call is held: that is the reconciler's (the test waits for it
+    to arrive before starting a competitor), and a later call — a competing route
+    mutation rendering the bundle for its own apply — must not be gated here, or the
+    test would be measuring this hook instead of the writer protocol.
+    """
+    from app.core.errors import Conflict
+    from app.services import proxy_service
+
+    entered, release = asyncio.Event(), asyncio.Event()
+    real = proxy_service.render_for_node
+
+    async def gated(db, *, node):
+        if not entered.is_set():
+            entered.set()
+            await release.wait()
+            if refuse:
+                raise Conflict(
+                    "The desired configuration could not be rendered", code="ROUTE_RENDER_FAILED"
+                )
+        return await real(db, node=node)
+
+    monkeypatch.setattr(proxy_service, "render_for_node", gated)
+    return entered, release
+
+
+async def _converged_node_with_a_route(client, owner, name: str) -> tuple[dict, str, dict]:
+    """A node serving one route, with the node's state reconciled and applied."""
+    node, agent_token, container_id = await _proxy_ready_node(client, owner)
+    domain = await _verified_domain(client, owner, name)
+    created = await _create_route(
+        client, owner, domain=domain, node_id=node["id"], container_id=container_id, enabled=True
+    )
+    assert created.status_code == 201, created.text
+    await _drain(client, agent_token)
+    assert "reconcile_required" not in await _node_proxy_state(node["id"])
+    return node, agent_token, created.json()
+
+
+async def test_a_route_mutations_marker_survives_a_concurrent_reconciliation(
+    client, owner, monkeypatch
+):
+    """A live reconciliation must not write over a marker committed meanwhile.
+
+    The node is offline, so the mutation's apply is deferred and no apply is in
+    flight to make the reconciler stand down: it goes on to write the state it read
+    *before* the marker existed. That write is what used to erase the marker and
+    drop the node out of the sweep, leaving the withdrawn hostname serving.
+    """
+    from app.services import proxy_service
+
+    node, _agent_token, route = await _converged_node_with_a_route(
+        client, owner, "concurrentmark.example.com"
+    )
+    await _mutate_in_system_scope(Server, node["id"], status=ServerStatus.OFFLINE)
+
+    entered, release = _pause_render(monkeypatch)
+    org_id = owner["active_organization_id"]
+    async with _node_session(org_id, node["id"]) as (reconciler, locked_node):
+        task = asyncio.create_task(proxy_service.reconcile_node(reconciler, node=locked_node))
+        await entered.wait()
+        # A real route mutation, through the surface an operator uses, in its own
+        # connection and transaction.
+        mutation = asyncio.create_task(
+            client.post(f"{API}/routes/{route['id']}/disable", headers=owner["headers"])
+        )
+        # Give the mutation every chance to commit first: under the writer protocol
+        # it is waiting on the node's row lock, and cannot.
+        await asyncio.sleep(0.25)
+        release.set()
+        outcome = await task
+        assert outcome in (
+            proxy_service.RECONCILE_IN_SYNC,
+            proxy_service.RECONCILE_STATUS_REQUESTED,
+            proxy_service.RECONCILE_DEFERRED,
+        )
+        await reconciler.commit()
+        disabled = await mutation
+
+    assert disabled.status_code == 200, disabled.text
+    assert disabled.json()["enabled"] is False
+    state = await _node_proxy_state(node["id"])
+    # Both writers' effects are present: the reconciler wrote, and the marker it did
+    # not know about is still there.
+    assert state["drift"] is False
+    assert state.get("reconcile_required") is True, (
+        "the reconciler erased the marker the mutation had committed"
+    )
+
+
+async def test_a_refused_render_cannot_erase_a_concurrent_marker(client, owner, monkeypatch):
+    """The degraded path writes state too, so it follows the same protocol.
+
+    A render that cannot be computed is a conflict the reconciler *handles* — it
+    records the reason on the node and marks the routes stale — and that write is
+    the one that used to land on top of a concurrently committed marker.
+    """
+    from app.services import proxy_service
+
+    node, _agent_token, _route = await _converged_node_with_a_route(
+        client, owner, "concurrentrefused.example.com"
+    )
+
+    entered, release = _pause_render(monkeypatch, refuse=True)
+    org_id = owner["active_organization_id"]
+    async with _node_session(org_id, node["id"]) as (reconciler, locked_node):
+        task = asyncio.create_task(proxy_service.reconcile_node(reconciler, node=locked_node))
+        await entered.wait()
+        writer = asyncio.create_task(_mark_reconcile_required_elsewhere(org_id, node["id"]))
+        await asyncio.sleep(0.25)
+        release.set()
+        assert await task == proxy_service.RECONCILE_BLOCKED
+        await reconciler.commit()
+        await writer
+
+    state = await _node_proxy_state(node["id"])
+    assert state["reconcile_error"], "the refusal is still recorded"
+    assert state.get("reconcile_required") is True, (
+        "the reconciler's failure write erased a marker committed meanwhile"
+    )
+
+
+async def test_concurrent_proxy_state_writers_preserve_every_key(client, owner, monkeypatch):
+    """The protocol protects the whole state, not one key.
+
+    Three writers in flight over one column — a reconciler repairing a difference,
+    an agent hello and a route mutation's marker — and every one of their keys has
+    to survive.
+    """
+    from app.services import proxy_service
+
+    node, _agent_token, _route = await _converged_node_with_a_route(
+        client, owner, "concurrentkeys.example.com"
+    )
+    # Stage a real difference first. A reconciler that finds the node already
+    # converged writes the value it just read, which is not a write at all — the
+    # clobbering write is the one that carries new state (here: the queued recovery
+    # that moves the retry window).
+    booked = await _node_proxy_state(node["id"])
+    await _mutate_in_system_scope(
+        Server,
+        node["id"],
+        proxy_state={**booked, "applied_bundle_id": "0" * 64, "live_bundle_id": "0" * 64},
+    )
+
+    entered, release = _pause_render(monkeypatch)
+    org_id = owner["active_organization_id"]
+    async with _node_session(org_id, node["id"]) as (reconciler, locked_node):
+        task = asyncio.create_task(proxy_service.reconcile_node(reconciler, node=locked_node))
+        await entered.wait()
+        hello = asyncio.create_task(_hello_elsewhere(org_id, node["id"]))
+        marker = asyncio.create_task(_mark_reconcile_required_elsewhere(org_id, node["id"]))
+        await asyncio.sleep(0.25)
+        release.set()
+        await task
+        await reconciler.commit()
+        await asyncio.gather(hello, marker)
+
+    state = await _node_proxy_state(node["id"])
+    assert state.get("reconcile_required") is True, "the marker was erased"
+    assert state["recovery_pending"] is True, "the reconciler's own write was erased"
+    assert state["last_hello_at"] and state["last_hello_at"] != booked.get("last_hello_at"), (
+        "the hello writer's key was erased"
+    )
+
+
+async def test_a_competing_writer_waits_for_the_node_proxy_state_lock(client, owner, monkeypatch):
+    """The serialization itself: a second writer cannot slip into the window."""
+    from app.services import proxy_service
+
+    node, _agent_token, _route = await _converged_node_with_a_route(
+        client, owner, "concurrentwaits.example.com"
+    )
+
+    entered, release = _pause_render(monkeypatch)
+    org_id = owner["active_organization_id"]
+    async with _node_session(org_id, node["id"]) as (reconciler, locked_node):
+        task = asyncio.create_task(proxy_service.reconcile_node(reconciler, node=locked_node))
+        await entered.wait()
+        writer = asyncio.create_task(_mark_reconcile_required_elsewhere(org_id, node["id"]))
+        await asyncio.sleep(0.25)
+        assert not writer.done(), (
+            "a writer that could commit here is a writer whose key the reconciler is about to erase"
+        )
+        release.set()
+        await task
+        await reconciler.commit()
+        await writer
+
+    assert (await _node_proxy_state(node["id"]))["reconcile_required"] is True
+
+
+# --- 11. key material cannot reach a sink --------------------------------------
+#
+# The defect this section pins: redaction recursed into dictionaries but returned a
+# list untouched, whatever it held, and matched on key names alone. An agent's
+# operation result is arbitrary JSON the platform does not control, so a private
+# key parked under a benign key or inside a list was stored verbatim — and then
+# replayed by the operations API, by the route's own error text, and by the audit
+# trail. These tests drive the report through the real endpoints and inspect the
+# real artifacts: response bodies, stored columns and audit rows.
+
+
+def _report_with_key_material(claimed: dict) -> dict:
+    """A failing apply whose free text and nested output carry private key material."""
+    bundle = (claimed.get("params") or {}).get("bundle") or {}
+    explanation = "nginx: [emerg] could not load the certificate key"
+    return {
+        "ok": False,
+        "output": {
+            "outcome": "failed",
+            "bundle_id": bundle.get("bundle_id"),
+            "manifest": bundle.get("manifest", []),
+            "error": f"{explanation}\n{FAKE_PRIVATE_KEY_PEM}\nline 42",
+            "logs": [
+                {"stream": "stderr", "chunks": [{"text": FAKE_PRIVATE_KEY_PEM}]},
+                {"stream": "stdout", "chunks": [{"text": "listening on :8000"}]},
+            ],
+        },
+        "error_code": "NGINX_CONFIG_INVALID",
+        "error_message": f"{explanation}\n{FAKE_PRIVATE_KEY_PEM}\nline 42",
+    }
+
+
+async def test_a_private_key_in_an_agent_report_never_reaches_a_sink(client, owner, org_db):
+    """One report, four sinks: the result, the error text, the audit row, the event."""
+    node, agent_token, container_id = await _proxy_ready_node(client, owner)
+    domain = await _verified_domain(client, owner, "keymaterial.example.com")
+    created = await _create_route(
+        client, owner, domain=domain, node_id=node["id"], container_id=container_id, enabled=True
+    )
+    route_id = created.json()["id"]
+
+    # Answer every operation the way the agent would, except the apply: that one
+    # reports a failure whose text carries a private key.
+    apply_op: dict | None = None
+    for _ in range(6):
+        beat = await _heartbeat(client, agent_token)
+        for operation_id in beat.get("pending_operations") or []:
+            claimed = await _claim(client, agent_token, operation_id)
+            if claimed["type"] != "nginx.apply":
+                await _report(client, agent_token, operation_id, _agent_result_body(claimed))
+                continue
+            apply_op = claimed
+        if apply_op is not None:
+            break
+    assert apply_op is not None, "enabling a route queues an apply"
+    reported = await _report(
+        client, agent_token, apply_op["id"], _report_with_key_material(apply_op)
+    )
+    assert reported["status"] == "FAILED"
+
+    # 1. The operation as the operations API serves it to an operator.
+    detail = (
+        await client.get(f"{API}/operations/{apply_op['id']}", headers=owner["headers"])
+    ).json()
+    assert KEY_BODY not in json.dumps(detail)
+    assert detail["error_message"].count(REDACTED) == 1
+    # The reason the operation failed survives, in full: only the key is gone.
+    assert detail["error_message"].startswith("nginx: [emerg] could not load the certificate key")
+    assert detail["error_message"].endswith("line 42")
+    assert detail["result"]["error"].count(REDACTED) == 1
+    assert detail["result"]["logs"][0]["chunks"][0]["text"] == REDACTED
+    assert detail["result"]["logs"][1]["chunks"][0]["text"] == "listening on :8000"
+    assert detail["result"]["outcome"] == "failed"
+
+    # 2. The route's own error text, which the platform copies from the report.
+    route = (await client.get(f"{API}/routes/{route_id}", headers=owner["headers"])).json()
+    assert KEY_BODY not in json.dumps(route)
+    assert "could not load the certificate key" in route["last_apply_error"]
+
+    # 3. The audit trail, read from the stored rows rather than a serializer.
+    failed_audits = await _audits(org_db, "route.apply_failed")
+    assert failed_audits, "a failed apply is audited"
+    assert KEY_BODY not in json.dumps([row.metadata_ for row in failed_audits])
+    assert "could not load the certificate key" in failed_audits[0].metadata_["error"]
+
+    # 4. The events the UI reads.
+    events = await _event_types(client, owner, "ROUTE_APPLY_FAILED")
+    assert events
+    assert KEY_BODY not in json.dumps(events)
+
+
+async def test_the_audit_writer_scrubs_key_material_at_any_depth(client, owner, org_db):
+    """The audit writer's own path, whatever shape the caller hands it."""
+    from app.core.db import get_sessionmaker
+    from app.services import audit_service
+
+    org_id = uuid.UUID(owner["active_organization_id"])
+    async with get_sessionmaker()() as session:
+        with org_scope(org_id):
+            await apply_scope_to_session(session)
+            await audit_service.record(
+                session,
+                None,
+                action="test.key_material",
+                org_id=org_id,
+                metadata={
+                    "payload": {
+                        "lines": [
+                            {"stream": "stderr", "text": FAKE_PRIVATE_KEY_PEM},
+                            {"stream": "stdout", "text": "listening on :8000"},
+                        ]
+                    },
+                    "token": "nxo_notarealkey",
+                },
+            )
+            await session.commit()
+
+    rows = await _audits(org_db, "test.key_material")
+    assert len(rows) == 1
+    metadata = rows[0].metadata_
+    assert metadata["payload"]["lines"][0]["text"] == REDACTED
+    assert metadata["payload"]["lines"][1]["text"] == "listening on :8000"
+    assert metadata["token"] == REDACTED
+    assert KEY_BODY not in json.dumps(metadata)

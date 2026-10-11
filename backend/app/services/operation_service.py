@@ -490,6 +490,12 @@ async def record_result(
     """
     now = _utcnow()
     target = OperationStatus.SUCCEEDED if ok else OperationStatus.FAILED
+    # ``output`` is redacted by :func:`_bounded`; ``error_message`` is a separate
+    # column returned verbatim by the operations API, so it is scrubbed for the
+    # same reason — an agent's free text is not a trusted place for key material.
+    from app.core.logging import redact_text
+
+    sanitized_message = redact_text(error_message) if error_message else error_message
     result = await db.execute(
         update(Operation)
         .where(
@@ -503,7 +509,7 @@ async def record_result(
             status=target,
             result=_bounded(output),
             error_code=error_code,
-            error_message=error_message,
+            error_message=sanitized_message,
             updated_at=now,
         )
         .returning(Operation.id)

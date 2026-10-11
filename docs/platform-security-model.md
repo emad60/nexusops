@@ -235,7 +235,7 @@ lists synchronized when either changes.
 | S5 | ENCRYPTION_KEY effectively write-once; no rotation/re-encryption path; loss makes all ciphertexts permanently undecryptable | backend/app/core/security.py:135-142 |
 | S6 | Audit rows ride the caller's transaction — a rollback erases the audit of the attempted action together with its effect | backend/app/services/audit_service.py:31-57 |
 | S7 | Audit append-only trigger blocks UPDATE/DELETE per-row but **not TRUNCATE** — SQL-level attacker (or bug) can truncate the trail | backend/alembic/versions/20260823_2225-b5866787bde4_initial_schema.py:622-623 |
-| S8 | Redaction recurses dicts only — sensitive values nested inside lists pass through to audit metadata/logs | backend/app/core/logging.py:46-60 |
+| S8 ✅ **FIXED (Phase 4.4)** | ~~Redaction recurses dicts only — sensitive values nested inside lists pass through to audit metadata/logs~~ — **fixed:** the walk covers dicts, lists and tuples at any depth *and* checks value content, so a PEM private-key block is scrubbed whatever field it arrived in; the same walk runs as the final structlog processor (`redact_log_event`) on every record, structlog's own chain and the stdlib `foreign_pre_chain` alike | was: backend/app/core/logging.py:46-60 |
 | S9 | Placeholder `CHANGE_ME` secrets pass validation (JWT placeholder ≥32 chars) — careless deploys run on known secrets | .env.example:30,42; backend/app/core/config.py:127-134 |
 | S10 | Docker `tcp://` dials skip TLS verification for self-managed daemons | backend/app/providers/docker_real.py:87-89 |
 | S11 | Alerts are a single global feed; `POST /alerts/read-all` mutates every user's feed — becomes cross-tenant mutation under orgs | backend/app/api/v1/alerts.py:52-56 |
@@ -259,7 +259,7 @@ noted addition). The security model *builds on* them rather than re-designing th
 | Append-only audit via DB trigger | backend/alembic/versions/20260823_2225-b5866787bde4_initial_schema.py:622-623 | Survives API-level attackers; TRUNCATE gap = S7 |
 | Fail-fast config validation (exit 2 on bad/missing secrets) | backend/app/core/config.py | Extend to reject S9 placeholders in production |
 | Error envelope + `hide_parameters` engine | backend/app/core/errors.py:151-166 | Unchanged |
-| Redaction of sensitive keys before persistence/log sinks | backend/app/core/logging.py:19-60 | Extend vocabulary + list recursion (S8) |
+| Redaction of sensitive keys before persistence/log sinks | backend/app/core/logging.py:19-90 | Recursive (dicts/lists/tuples, any depth) and content-aware (PEM private keys); runs on every log record and before operation results and audit metadata are written — closes S8 |
 | Secret values never returned — metadata-only reads | backend/app/services/secret_service.py:49-62 | Unchanged; shown-once semantics for agent/API-key tokens likewise |
 | WS auth (first frame) + per-subscribe permission re-check | backend/app/ws/hub.py:127-150,347-361 | Gains org check (multi-tenancy.md §5) |
 | SSRF guard + monitor execution-time re-validation | backend/app/core/ssrf.py; backend/app/services/monitor_service.py:348-356 | Gains webhook send-time re-check (S3); prod default flip (S1) |

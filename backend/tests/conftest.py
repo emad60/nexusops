@@ -103,3 +103,16 @@ def configure_test_env() -> None:
 
 
 configure_test_env()
+
+#: A **deliberately invalid** PEM private-key block, shared by the unit and
+#: integration redaction tests.
+#:
+#: It exists to prove that redaction recognises the *format*. It is not a key: the
+#: body is valid base64 that decodes to a plain disclaimer rather than to key
+#: material, so it cannot be used as a credential and nothing real enters a test
+#: or a log. Anything that tried to parse it as a key would fail loudly.
+FAKE_PRIVATE_KEY_PEM = (
+    "-----BEGIN PRIVATE KEY-----\n"
+    "dGhpcyBpcyBub3QgYSByZWFsIHByaXZhdGUga2V5OyBpdCBpcyBhIHJlZGFjdGlvbiB0ZXN0IGZpeHR1cmU=\n"
+    "-----END PRIVATE KEY-----"
+)

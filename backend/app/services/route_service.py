@@ -300,6 +300,14 @@ async def create_route(
     # enabled, and the refusal is far more useful at the moment of creation.
     # ``enable_route`` runs the same gate again, because node state moves.
     await proxy_service.require_eligible(node)
+    if payload.enabled:
+        # The node's proxy-state lock is taken **before** this transaction writes
+        # any route row, because the platform's lock order is ``servers`` →
+        # ``routes``: a reconciler holding ``servers`` and waiting on ``routes``
+        # must never be able to deadlock against a route mutation holding
+        # ``routes`` and waiting on ``servers``
+        # (see ``proxy_service.lock_node_proxy_state``).
+        await proxy_service.lock_node_proxy_state(db, node=node)
 
     route = Route(
         domain_id=domain.id,
@@ -374,6 +382,10 @@ async def update_route(
 
     domain = await _resolve_domain(db, route.domain_id)
     node = await _resolve_node(db, data.get("node_id") or route.node_id)
+    if route.enabled:
+        # Lock order: the node's proxy-state lock precedes every route row this
+        # transaction writes (``proxy_service.lock_node_proxy_state``).
+        await proxy_service.lock_node_proxy_state(db, node=node)
     # ``container_id`` is nullable on the row (SET NULL when a container is
     # deleted), so an update of a route whose upstream was removed must say so
     # rather than passing ``None`` where a UUID is required.
@@ -470,6 +482,11 @@ async def enable_route(
             code="DOMAIN_NOT_VERIFIED",
         )
     node = await _resolve_node(db, route.node_id)
+    # Lock order: the node's proxy-state lock precedes every route row this
+    # transaction writes (``proxy_service.lock_node_proxy_state``). This is also
+    # what makes the eligibility verdict below and the state write that follows
+    # the apply describe one locked row.
+    await proxy_service.lock_node_proxy_state(db, node=node)
     await proxy_service.require_eligible(node)
     if route.container_id is None:
         raise Conflict(
@@ -574,6 +591,12 @@ async def disable_route(
     route = await get_route(db, route_id)
     node = await _resolve_node(db, route.node_id)
     was_enabled = route.enabled
+    if was_enabled:
+        # Lock order: the node's proxy-state lock precedes every route row this
+        # transaction writes (``proxy_service.lock_node_proxy_state``). The
+        # withdrawal below is recorded whether or not an apply can be dispatched,
+        # so the lock is taken here — before the route is even marked disabled.
+        await proxy_service.lock_node_proxy_state(db, node=node)
     route.enabled = False
     route.last_apply_error = ""
     if route.monitor_id is not None:
@@ -624,6 +647,11 @@ async def delete_route(
     route = await get_route(db, route_id)
     node = await _resolve_node(db, route.node_id)
     hostname, path, was_enabled = route.hostname, route.path, route.enabled
+    if was_enabled:
+        # Lock order: the node's proxy-state lock precedes every route row this
+        # transaction writes (``proxy_service.lock_node_proxy_state``) — here,
+        # before the DELETE that removes the row the marker has to outlive.
+        await proxy_service.lock_node_proxy_state(db, node=node)
     route.enabled = False
     await db.flush()
     await db.delete(route)

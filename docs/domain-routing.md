@@ -494,6 +494,39 @@ before.
 The database is the only source of truth for desired state; out-of-band node edits
 are corrected by step 2 rather than tolerated.
 
+#### `proxy_state` is one column with one writer
+
+`servers.proxy_state` is a single JSONB column, and an ORM flush writes the whole
+column from whatever the session holds — it is not a merge. Two writers that each
+read it, change one key and flush therefore do not compose: the second flush
+replaces the first writer's keys with the snapshot it read. The marker above is
+the concrete casualty — a route mutation commits `reconcile_required` while a
+reconciliation is mid-flight with a state it read a moment earlier, the
+reconciliation flushes that stale snapshot, and the node drops out of the sweep
+while nginx keeps serving a name the platform already withdrew.
+
+Every writer therefore takes one row lock, **before it reads the state**.
+`proxy_service.lock_node_proxy_state` issues `SELECT … FOR UPDATE` on the node's
+row and returns the committed value, so the read-modify-write is atomic as a unit
+and a competing writer waits its turn instead of racing. The protocol is:
+
+- the lock is taken **before the state is read** and held to the end of the
+  transaction, by `enqueue_apply`, `after_hello`, `mark_reconcile_required`,
+  `reconcile_node` and every `nginx.*` result handler;
+- it is taken **before this transaction writes any other row**, which gives the
+  platform one lock order — `servers` → `routes` → `monitors` — so a reconciler
+  holding the node and writing a route cannot deadlock against a route mutation
+  holding the route and asking for the node (`route_service` locks the node first
+  for exactly this reason);
+- it is an explicit select rather than the session's identity map, so a node
+  object loaded earlier in a long transaction cannot supply a stale snapshot;
+- a reader that only *reports* state (`node_proxy_status`, `expected_bundle_id`)
+  takes no lock: a read that writes nothing cannot lose a write.
+
+§10 of `tests/integration/test_phase4_routing.py` pins it: a paused reconciliation
+runs against a real route mutation, a refused render, and two further writers, and
+every writer's key has to survive.
+
 #### Requested is not confirmed
 
 A removal has two halves, and only one of them is something the control plane can

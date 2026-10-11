@@ -17,6 +17,14 @@ responsibilities are kept apart on purpose:
   the route ids in the bundle manifest, and it only ever moves ``config_state``
   and the node's bounded ``proxy_state``.
 
+``proxy_state`` is a single JSONB column, and an ORM flush writes the whole
+column from whatever the session holds — so every writer reads it through one
+row lock (:func:`lock_node_proxy_state`, see the protocol note below) instead of
+read-modify-writing a snapshot it may have loaded before another writer
+committed. Without that, a reconciliation that read the state early could flush
+its stale copy over a ``reconcile_required`` marker a route mutation had just
+committed, and the node would silently drop out of the sweep.
+
 Nothing here writes configuration text anywhere except into operation params
 (and never into audit metadata or event payloads).
 """
@@ -672,6 +680,62 @@ async def _has_enabled_routes(db: AsyncSession, *, node_id: uuid.UUID) -> bool:
     return found is not None
 
 
+# --- proxy state: the one-writer protocol -------------------------------------
+#
+# ``servers.proxy_state`` is one JSONB column, and an ORM flush writes the **whole**
+# column from whatever the session holds. Two writers that each read the column,
+# change one key and flush therefore do not merge: the second flush replaces the
+# first writer's keys with the snapshot it read. The concrete casualty is
+# ``reconcile_required`` — a route mutation commits the marker, an in-flight
+# reconciliation that read the state beforehand flushes its snapshot over it, and
+# the node drops out of the reconcile sweep with a revoked hostname still live on
+# it.
+#
+# The protocol that closes this is one row lock, taken by every writer before it
+# reads the state:
+#
+# * :func:`lock_node_proxy_state` is the **only** way state is read for the purpose
+#   of writing it. It issues ``SELECT ... FOR UPDATE``, so the value it returns
+#   cannot change until this transaction commits and the read-modify-write is
+#   atomic as a unit.
+# * It reads the column with an explicit select rather than from the session's
+#   identity map, so a node object loaded earlier in a long transaction cannot
+#   supply a stale snapshot.
+# * Every writer takes the lock **before it writes any other row**. That gives the
+#   platform one global lock order — ``servers`` then ``routes`` then
+#   ``monitors`` — which is why ``route_service`` locks the node before mutating a
+#   route. Without it a reconciler holding ``servers`` and waiting on ``routes``
+#   could deadlock against a route mutation holding ``routes`` and waiting on
+#   ``servers``.
+#
+# A reader that only *reports* state (``node_proxy_status``, ``expected_bundle_id``)
+# takes no lock: it cannot lose a write it does not make.
+
+
+async def lock_node_proxy_state(db: AsyncSession, *, node: Server) -> dict[str, Any]:
+    """Lock *node*'s proxy state and return its committed value.
+
+    Call this **before** mutating the node, before writing any route row, and use
+    the returned dict as the base for the update — then assign it back to
+    ``node.proxy_state``, which is the shape every writer here already has.
+
+    Raises :class:`~app.core.errors.NotFound` when the row is gone (a node deleted
+    under a worker) instead of returning an empty state that the caller would then
+    write over a row someone else owns.
+    """
+    with db.no_autoflush:
+        row = (
+            await db.execute(
+                select(Server.proxy_state)
+                .where(Server.id == node.id, Server.org_id == node.org_id)
+                .with_for_update()
+            )
+        ).first()
+    if row is None:
+        raise NotFound("Node not found", code="NODE_NOT_FOUND")
+    return dict(row[0] or {})
+
+
 # --- apply dispatch -----------------------------------------------------------
 
 
@@ -692,9 +756,13 @@ async def enqueue_apply(
     Raises the same named conflicts as :func:`require_eligible`, so an operator
     sees *why* a route could not be applied rather than a silent no-op.
     """
+    # The lock comes first — before the eligibility verdict is trusted, before
+    # anything is rendered and before any route row is written — so the snapshot
+    # below and the write at the end of this function describe one row no other
+    # proxy-state writer can have moved in between.
+    state = await lock_node_proxy_state(db, node=node)
     await require_eligible(node)
     bundle, included = await render_for_node(db, node=node)
-    state = dict(node.proxy_state or {})
     applied = state.get("applied_bundle_id")
     if bundle.bundle_id == applied and not force:
         log.info(
@@ -789,7 +857,7 @@ async def after_hello(db: AsyncSession, *, node: Server) -> None:
     that stays a customer-side prerequisite, and the pre-flight is what reports
     whether it is satisfied.
     """
-    state = dict(node.proxy_state or {})
+    state = await lock_node_proxy_state(db, node=node)
     state["last_hello_at"] = _utcnow().isoformat()
     node.proxy_state = state
     await db.flush()
@@ -850,7 +918,7 @@ async def mark_reconcile_required(db: AsyncSession, *, node: Server) -> None:
     unbounded retry loop: at most one apply is in flight and the sweep's own
     backoff and de-duplication still bound the attempts.
     """
-    state = dict(node.proxy_state or {})
+    state = await lock_node_proxy_state(db, node=node)
     if state.get(RECONCILE_REQUIRED_KEY) is True:
         return
     state[RECONCILE_REQUIRED_KEY] = True
@@ -889,7 +957,11 @@ async def reconcile_node(db: AsyncSession, *, node: Server) -> str:
     transaction and the tenancy scope: this is per-node work and runs inside the
     node's own organization.
     """
-    state = dict(node.proxy_state or {})
+    # The whole render → decide → write sequence below is serialized against every
+    # other proxy-state writer by this lock, which is what makes a concurrently
+    # committed key impossible to lose: the state is read *under* the lock, so
+    # nothing can commit between the read and the write.
+    state = await lock_node_proxy_state(db, node=node)
     applied = str(state.get("applied_bundle_id") or "")
     live = str(state.get("live_bundle_id") or "")
     confirmed = applied or live
@@ -962,7 +1034,7 @@ async def reconcile_node(db: AsyncSession, *, node: Server) -> str:
     if operation is None:
         return RECONCILE_NO_CHANGE
 
-    state = dict(node.proxy_state or {})
+    state = await lock_node_proxy_state(db, node=node)
     state["recovery_pending"] = True
     state["recovery_queued_at"] = _utcnow().isoformat()
     state["reconcile_error"] = ""
@@ -1008,6 +1080,10 @@ async def handle_operation_result(db: AsyncSession, operation: Operation) -> Non
     node = await db.get(Server, operation.node_id)
     if node is None:  # the node was deleted between apply and result
         return
+    # One lock for every ``nginx.*`` result, taken before a handler reads state or
+    # writes a route, so all three handlers follow the same protocol (see
+    # :func:`lock_node_proxy_state`).
+    await lock_node_proxy_state(db, node=node)
     # ``type`` is a plain String column, so a row loaded from the DB hands back a
     # ``str``; ``==`` (StrEnum equality) is required — ``is`` silently falls
     # through to the bootstrap branch for every apply.
@@ -1081,7 +1157,7 @@ async def _handle_apply_result(db: AsyncSession, *, node: Server, operation: Ope
         outcome = ProxyApplyOutcome.FAILED
 
     detail = "" if outcome is ProxyApplyOutcome.APPLIED else _sanitized_error(operation)
-    state = dict(node.proxy_state or {})
+    state = await lock_node_proxy_state(db, node=node)
     now = _utcnow()
     # Whether the reconciler queued this apply: only then is an applied bundle a
     # *recovery* worth announcing as one.
@@ -1271,7 +1347,7 @@ async def _handle_apply_result(db: AsyncSession, *, node: Server, operation: Ope
 
 async def _handle_status_result(db: AsyncSession, *, node: Server, operation: Operation) -> None:
     """Record what the node says it has live, and detect drift."""
-    state = dict(node.proxy_state or {})
+    state = await lock_node_proxy_state(db, node=node)
     output = operation.result or {}
     now = _utcnow()
     state["last_status_at"] = now.isoformat()
@@ -1343,7 +1419,7 @@ async def _handle_status_result(db: AsyncSession, *, node: Server, operation: Op
 
 async def _handle_bootstrap_result(db: AsyncSession, *, node: Server, operation: Operation) -> None:
     """Record a bootstrap outcome. Bootstrap never carries configuration text."""
-    state = dict(node.proxy_state or {})
+    state = await lock_node_proxy_state(db, node=node)
     if operation.ok:
         state["bootstrapped_at"] = _utcnow().isoformat()
         state["bootstrap_error"] = ""
@@ -1472,6 +1548,7 @@ __all__ = [
     "expected_bundle_id",
     "get_route_or_404",
     "handle_operation_result",
+    "lock_node_proxy_state",
     "mark_reconcile_required",
     "mark_removal_requested",
     "node_proxy_status",

@@ -8,12 +8,17 @@ RLS policies and grants, and the metadata-only certificate API — see §1.1 for
 verified inventory. **Not shipped:** the organization DEK envelope and its KEK
 provider, DNS-provider credentials, ACME accounts and issuance, private-key delivery,
 HTTPS activation, renewal, expiry monitoring and revocation (§6, §7, §8, §9, §10.1).
+**Key-management gate closed 2026-10-12:** the KEK provider direction is approved (§6.7)
+and its operational custody specified (§6.9), which unblocks 5.2.1 — the provider adapter
+and the organization DEK envelope, planned in §10.5. Approved is not implemented: no
+provider, adapter, key or envelope column exists in the tree.
 Every schema, endpoint, operation type and agent behavior below outside the §1.1
 Phase 5.1 block is labelled *design* and is not implemented; the documents that
 describe the other shipped subsystems — domains/routes/nginx (Phase 4) and the
 operation control plane (Phase 1/3) — are [domain-routing.md](domain-routing.md) and
 [node-agent-architecture.md](node-agent-architecture.md).
-**Date:** 2026-10-12 (implementation status reconciled with the shipped tree)
+**Date:** 2026-10-12 (implementation status reconciled with the shipped tree; KEK
+key-management decision approved)
 **Baseline:** Phase 4.4 `ddd9727` (the Phase 4 starting point recorded in §1.1) +
 **Phase 5.1 `37b7211`** (certificate metadata, pre-issuance lifecycle, org-scoped
 metadata API — the current baseline for every later slice).
@@ -515,8 +520,8 @@ but the *work inside it* has an order, and the first step is external:
 
 | # | Step | Depends on |
 |---|---|---|
-| 1 | **KEK provider decision + adapter** behind the seam in §6.7 (`wrap_dek`/`unwrap_dek`) | The vendor approval in §6.8. **Blocks steps 2–6**: without it there is no key the org DEK may be wrapped under, and an env-var fallback is exactly the unsafe source §6.7 forbids |
-| 2 | `organizations.dek_ciphertext` / `dek_generation` + org-DEK creation, unwrap and the per-process LRU — the **only** place a DEK is wrapped or unwrapped | Step 1 |
+| 1 | **KEK provider adapter** behind the seam in §6.7 (`wrap_dek`/`unwrap_dek`/`rewrap_dek`), first implementation **Vault Transit** (approved; §10.5 is its plan) | Nothing — the decision is in. **Blocks steps 2–6**: without it there is no key the org DEK may be wrapped under, and an env-var fallback is exactly the unsafe source §6.7 forbids |
+| 2 | `organizations.dek_ciphertext` / `dek_generation` + org-DEK creation and **operation-scoped unwrap** (no long-lived plaintext-DEK cache) — the **only** place a DEK is wrapped or unwrapped | Step 1 |
 | 3 | `dns_providers` table + its metadata-only API, then credential *acceptance* (`credentials_ciphertext`, `credential_fingerprint`) | Step 2 — the credential blob is wrapped under the org DEK, so accepting one without the envelope would be a partially working store |
 | 4 | `acme_accounts` + per-org account-key protection | Step 2 (same envelope); independent of step 3 |
 | 5 | `certificates.dns_provider_id` FK (lands **with** its target table), generation material columns, widened `state`, the material guard CHECK, `deke_id` | Steps 2–4 |
@@ -806,9 +811,12 @@ flowchart LR
   the single seam that swap replaces (§6.6).
 - **DEK:** one Fernet key per organization, generated lazily at the first Phase-5 write
   and stored **wrapped** on the organization row (`organizations.dek_ciphertext`),
-  with a `dek_generation` integer. Plaintext DEKs exist in process memory only, held in
-  a small per-process LRU keyed by `(org_id, generation)` — replacing the current
-  module-global `_fernet_cache` for certificate/DNS material only.
+  with a `dek_generation` integer. A plaintext DEK exists only for the operation that
+  unwrapped it and is dropped when that operation ends: **operation-scoped unwrap, no
+  long-lived plaintext-DEK cache** (§6.7 approved point 5, §6.9). This is deliberately
+  *not* the module-global `_fernet_cache` pattern the secret store uses, and it applies
+  to certificate/DNS material only — the existing store keeps its current key path
+  (§6.4).
 - **Scope of the envelope in v1:** certificate `key_ciphertext`/`chain_ciphertext`,
   `dns_providers.credentials_ciphertext`, and `acme_accounts.key_ciphertext`. Existing
   `secrets`, `secret_versions`, `server_credentials` and channel configs keep the
@@ -873,14 +881,33 @@ runbook.
 Until C1–C6 are met, centralized custody is an **accepted risk for non-production**
 and a **blocker for production**.
 
-### 6.7 KEK provider decision (2026-10-12)
+### 6.7 KEK provider decision — **approved 2026-10-12**
 
-**Status: decided direction, one vendor approval outstanding (§6.8).** This section adds
-no dependency, no adapter, no credential and no configuration key — a design document
-cannot approve a vendor. It exists because the production unwrap path (Phase 5.2,
-step 1 of §3.7) must not be written before the key it unwraps under is chosen; until
-then the org-DEK envelope would inevitably be built against a plaintext env key that
-§6.1 calls a total-compromise source.
+**Status: approved.** The direction below was approved explicitly before any provider
+adapter or envelope code is written. This document still adds no dependency, no adapter,
+no credential and no configuration key: approval settles *what* to build, not that this
+change built it.
+
+The approved decision, in the words it was approved in:
+
+1. **Vault Transit is the first production `KEKProvider` implementation** for
+   self-hosted deployments.
+2. **Managed cloud KMS providers remain possible future adapters behind the same
+   interface.** They are **not** implemented in v1 without a concrete deployment
+   requirement — the seam exists so that decision stays cheap, not so that every vendor
+   is built speculatively.
+3. **Test and development providers are explicitly selected and cannot serve as
+   production fallbacks.**
+4. **The root KEK never enters NexusOps application code or the database in plaintext.**
+5. **DEK unwrapping is operation-scoped initially; no long-lived plaintext-DEK LRU cache
+   until measurements justify one.**
+6. **Rewrapping is delegated to the provider where supported, with no plaintext DEK
+   returned to the application during KEK-only rotation.**
+
+It exists because the production unwrap path (Phase 5.2.1, §10.5) must not be written
+before the key it unwraps under is chosen; until then the org-DEK envelope would
+inevitably be built against a plaintext env key that §6.1 calls a total-compromise
+source.
 
 **What a KEK provider must do.** Hold one root key the application can never read;
 wrap and unwrap a 32-byte organization DEK on demand; let the wrapped value live in the
@@ -899,27 +926,26 @@ source to keep serving.
 | **Sealed file (SOPS/age) on the host** | A file the service account can read | Rotate the file, then re-wrap DEKs | Filesystem permissions; no per-call audit, no independent boundary | File must be kept separate from DB backups | Low | Fine for **dev/test** and single-operator installs; not custody for a multi-tenant production platform |
 | **HSM / PKCS#11 appliance** | A hardware appliance | Vendor-specific | PKCS#11 + appliance ACLs | Appliance availability plus key escrow | High (hardware, skills, cost) | Only worth it for a compliance requirement that names it; cloud KMS and Vault already give HSM-backed keys |
 
-**Recommendation — the default production approach.** **One external KEK provider behind
-the interface below, with HashiCorp Vault Transit as the default for self-hosted
-deployments and the deployment cloud's managed KMS (AWS KMS / GCP KMS / Azure Key Vault)
-as a first-class alternative when the control plane already runs there.** The platform
-ships and supports a self-hosted docker-compose deployment, so the default must not
-require a specific cloud; Vault Transit provides the wrap/unwrap and rotation semantics
-this envelope needs, a per-call audit trail, and token-scoped access narrowed to the
-one transit key, and its cost is one more service in a stack that already runs several.
-Where the control plane *is* inside a cloud, the managed KMS is cheaper to operate and
-keeps the root inside that provider's HSM boundary — the seam exists so that this is a
-configuration choice rather than a rewrite.
+**The approved approach.** **One external KEK provider behind the interface below, whose
+first production implementation is HashiCorp Vault Transit** — the deployment that
+matters is the self-hosted docker-compose install the platform ships and supports, so the
+choice must not require a specific cloud. Vault Transit provides the wrap/unwrap and
+rotation semantics this envelope needs, a per-call audit trail, and token-scoped access
+narrowed to the one transit key, and its cost is one more service in a stack that already
+runs several. **Managed cloud KMS adapters (AWS KMS / GCP KMS / Azure Key Vault) are
+follow-ups behind the same seam**, built when a deployment actually requires one — the
+interface is what keeps that cheap, not a speculative multi-cloud adapter matrix.
 
-**The honest costs of that recommendation.**
+**The honest costs of that decision.**
 
 - Vault does not remove the root-of-trust problem, it **relocates** it: the unseal
-  material (Shamir shares or the auto-unseal key) becomes the top secret and belongs in
-  break-glass custody separate from DB backups (C4, §6.5). Auto-unseal via a cloud KMS
-  is the lowest-friction arrangement and reintroduces a cloud dependency.
-- Every unwrap becomes a network call. The per-process LRU keyed by
-  `(org_id, generation)` (§6.2) absorbs it — **the DEK is cached, never the KEK**, and a
-  cache miss is a provider round-trip, not a fallback.
+  material becomes the top secret. The approved arrangement is **auto-unseal through a
+  cloud KMS** (§6.9), which is the lowest-friction operation and makes that cloud KMS a
+  documented availability dependency for Vault start-up (C4, §6.5).
+- Every unwrap is a network call. The approved policy is **operation-scoped unwrap with
+  no long-lived plaintext-DEK cache** (§6.9): a request that needs a DEK unwraps it,
+  uses it, and drops it. If measurements show that cost matters, a short-lived cache is a
+  *measured* follow-up, not a default — and it would still never cache the KEK.
 - Provider unavailability **fails closed**: no issuance, no delivery, no DNS-credential
   read. That is the correct direction, and it must surface as a named operator-visible
   error rather than a retry storm.
@@ -961,6 +987,16 @@ Rules that make the seam real rather than decorative:
 4. **No fallback chain.** One configured provider; if it is unavailable or misconfigured,
    the operation fails closed with a named error. There is no "if the KMS is down, use
    the env key" path — that path is the vulnerability, not the recovery.
+5. **Unwrap is operation-scoped** (approved point 5): the adapter returns a plaintext DEK
+   to its caller and holds it nowhere. No module keeps a plaintext DEK in a process-wide
+   cache, keyed by org or otherwise; the LRU that §6.2 originally sketched is **not** part
+   of 5.2.1 and needs a measurement before it is reconsidered.
+6. **Rewrap delegates to the provider** (approved point 6), which is the only way
+   `rewrap_dek` can honour "no plaintext DEK during KEK-only rotation": for Vault that is
+   `transit/rewrap` against the stored ciphertext, so the DEK never becomes visible to
+   NexusOps code. A provider without a rewrap primitive must implement the operation
+   provider-side (bring-your-own-key import or an equivalent) rather than decrypting into
+   the application.
 
 **Development and tests: a deterministic provider, and no way to reach it in production.**
 
@@ -972,18 +1008,87 @@ Rules that make the seam real rather than decorative:
 | No silent degradation | A provider error is raised, never converted into a different key source, and never into a plaintext-or-nothing decision. |
 | Real-provider coverage without production secrets | CI may run a Vault transit instance (or a cloud KMS emulator) against the same interface; the production key and the production ACME directory are never contacted (§10.2). |
 
-### 6.8 Remaining approval decisions (KEK/KMS)
+### 6.8 Decisions closed here, and what remains an operator choice
 
-| # | Decision | Owner | Blocks |
-|---|---|---|---|
-| K1 | **Which provider the first production deployment uses** — Vault Transit (self-hosted) or the deployment cloud's managed KMS | Infra / operator | §3.7 step 1, and therefore all of 5.2 and 5.3 |
-| K2 | **Root/unseal custody** — auto-unseal through a cloud KMS (recommended) or Shamir shares in break-glass storage with two-person access (C4) | Security / infra | Production readiness (C1–C6); not 5.2's dev path |
-| K3 | **Audit retention** — whether the provider's per-call audit log must be exported and retained for compliance | Security / compliance | Detail of K1; both recommended providers can supply it |
-| K4 | **Caching policy** — confirm the per-process DEK LRU is acceptable rather than a per-call unwrap (the DEK is cached, never the KEK) | Platform | 5.2 step 2 implementation |
-| K5 | **Cost envelope** — expected provider spend (~$1 per cloud KMS key-month plus ~$0.03 per 10k key-use operations at list price; Vault OSS is free but needs a host) | Product / infra | Production budget sign-off, not the design |
+Settled on 2026-10-12, so §3.7 step 1 and §10.5 are unblocked:
 
-Until **K1** is approved, step 1 of §3.7 must not be written; until **K2–K4** are settled,
-no production deployment may claim C1–C6 compliance.
+| # | Decision | Outcome |
+|---|---|---|
+| K1 | Which provider the first production deployment uses | **Vault Transit** (approved). Cloud KMS adapters are future work behind the same interface, not part of 5.2.1 |
+| K2 | Root/unseal custody | **Auto-unseal through a cloud KMS**, with the unseal material itself in break-glass custody separate from DB backups (C4). The Vault data at rest is protected by Vault's storage plus that KMS; the residual choice is *which* cloud KMS provides auto-unseal (§6.9) |
+| K3 | Audit retention | **Specified** in §6.9: the transit audit trail is enabled, exported off the Vault host, and retained ≥ 13 months with a quarterly access review |
+| K4 | Caching policy | **Decided against caching**: operation-scoped unwrap, no long-lived plaintext-DEK cache until a measurement justifies one (approved point 5). This supersedes the LRU sketch in §6.2 |
+| K5 | Cost envelope | Recorded, not a blocker: Vault OSS is free but needs a host and its unseal KMS (~$1 per cloud KMS key-month plus ~$0.03 per 10k key-use operations at list price) |
+
+**Still an operator decision inside the approved direction** (each is recorded in the
+deployment runbook, and none reopens the six approved points): which cloud KMS provides
+Vault auto-unseal; the exact `transit` key name and mount path per environment; the
+audit log destination; and the named holders of break-glass material. None of these
+blocks writing 5.2.1 — the adapter takes them from configuration.
+
+### 6.9 Operational key-custody requirements (approved with §6.7)
+
+These are requirements on the *deployment*, not code to write: they are what makes C1–C6
+provable rather than asserted. They are written down here, next to the decision they
+implement, because an approved KMS direction without them is a plan to have a KMS
+somewhere.
+
+**Vault authentication, TLS and least privilege.**
+
+| Requirement | Specification |
+|---|---|
+| Auth method | **AppRole** (approved): the API/worker receives a `role-id` and a wrapped/response-limited `secret-id` through the environment; no root token, ever, on an application host. The token TTL is short (hours) with renewal, so a leaked token expires without human action |
+| Policy scope | One policy per environment, granting `update` on `transit/rewrap/<k>`, `update` on `transit/encrypt/<k>` and `update` on `transit/decrypt/<k>` for **one** key name, plus `read` of that key's metadata. No `sys/*`, no `transit/keys/*` create/rotate in the application policy — those are operator actions |
+| TLS | Vault speaks TLS with a verified certificate (no `-tls-skip-verify`), reached over a private network path where the topology allows; the client validates the CA explicitly and the configuration names it |
+| Separation | The application's policy cannot rotate keys, cannot list other mounts, and cannot read the unseal material; rotation is an operator/runbook action that the application only *observes* (`key_version` changes) |
+| No bypass | The KEK never lands in application code, the database, a log, an event, an audit row, or an API response (approved point 4). The adapter holds no root key and no unwrap path outside `unwrap_dek` |
+
+**Storage protection, availability, recovery.**
+
+| Requirement | Specification |
+|---|---|
+| Storage at rest | Vault's own storage backend is encrypted (integrated storage with auto-unseal, or a storage backend whose encryption key is KMS-managed); the snapshot/backup of that storage is exactly as sensitive as the KEK it holds |
+| Availability | Vault is a **hard dependency of issuance, delivery and DNS-credential reads** — it is not on the request path of anything else. An outage degrades those features and nothing more; the API must stay up and report the provider as unavailable rather than fail requests it can serve |
+| Recovery | Restore = Vault storage restore + auto-unseal KMS availability, then verify a known-wrapped DEK unwraps. The recovery target is recorded (RTO/RPO) and the drill in the row below measures it |
+| Key-loss consequence | Losing the Vault KEK (and its unseal KMS key) makes every wrapped DEK permanently unreadable: all certificate material, DNS credentials and ACME account keys are unrecoverable and must be re-created. Certificate material is **reproducible** (re-issue, §6.5); DNS credentials are re-enterable; ACME account keys require re-registration. Losing one org's wrapped DEK is bounded to that org |
+
+**Root/unseal custody and the auto-unseal dependency.**
+
+- **Approved: auto-unseal via a cloud KMS.** Its cost is stated where it belongs: Vault cannot start without that cloud KMS being reachable and authorized, so the KMS becomes a documented availability dependency of the certificate subsystem. The KMS key's own policy grants decrypt/unwrap to **Vault's identity only**, never to the application.
+- Break-glass material — the auto-unseal KMS credentials *and* the recovery keys/snapshots needed to rebuild Vault — is stored **separately from DB backups**, with two-person access (C4). If the same compromise window reaches the DB backup and the break-glass store, the envelope has bought nothing.
+- Rekeying/recovery of Vault itself (root token regeneration, rekey) is an operator ceremony with its own runbook; the application has no path to perform it.
+
+**Backup and restore exercises.**
+
+- A **non-production drill** is part of the exit criteria for 5.2.1's production readiness: restore Vault storage, confirm a wrapped DEK from a snapshot unwraps, then run the org-DEK rotation path (§6.3) end to end.
+- A **DB-restore drill** additionally proves the pairing: database restored from backup + Vault restored ⇒ material readable; either one alone ⇒ nothing readable (this is the property §6.1 claims for the DB-only case, and the drill is what makes it evidence rather than a claim).
+- Drills are recorded in the runbook with dates and the operator who ran them; C4 is not satisfied by a written procedure alone.
+
+**Audit logging, retention and access review.**
+
+- Vault's **audit device is enabled on every path** (file/syslog to an off-host sink) so every encrypt/decrypt/rewrap is attributable to a role and a time; the application additionally records *its own* one-line audit for the operation it performed, without the DEK or ciphertext.
+- Retention: **≥ 13 months**, long enough to cover a full annual cycle plus the investigation window; a compliance regime that demands longer raises this and nothing else (§6.8 K3).
+- **Quarterly access review**: who holds the AppRole `secret-id`s, who can read the audit sink, who holds break-glass material. A review that has not run is a finding against C5.
+
+**DEK generation, wrapping, rotation, recovery.**
+
+| Stage | Requirement |
+|---|---|
+| Generation | The DEK is generated **in the application** with a CSPRNG (Fernet-compatible key), then wrapped by the provider. The DEK is never *derived* from anything, never reused across organizations, and never re-wrapped twice with the same `dek_generation` recorded |
+| Wrapping | `wrap_dek` with the `EncryptionContext` bound (§6.7). The stored value is the self-describing envelope, so the row states which provider, key and version can unwrap it |
+| Rotation (KEK-only) | **`rewrap_dek` provider-side** (approved point 6): Vault `transit/rewrap` rewrites each stored ciphertext under the new key version with no plaintext DEK returned to the application. It is idempotent per row and resumable |
+| Rotation (org DEK) | New DEK generation → wrapped → `organizations.dek_generation` bumped → the org's Phase-5 rows re-encrypted in background batches, each row's `deke_id` updated as it is re-encrypted. A half-rotated org is visible (mixed `deke_id`), never silently half-readable |
+| Recovery | A generation whose ciphertext cannot be unwrapped is **not** served and **not** guessed at: it is marked failed with a reason and re-issued (§6.5), matching the fail-closed behaviour of `decrypt_str` today |
+| Key loss | Stated above, and stated in the UI/docs (C6): per-org DEKs do **not** bound a KEK compromise or an application-runtime compromise (§6.1). Nothing in this section changes that, and no document or interface may imply it does |
+
+**Startup behaviour.**
+
+| Configuration | Behaviour |
+|---|---|
+| Provider unset, unknown, or `test` in a production configuration | **Abort at import** (exit 2), the same fail-fast path `ENCRYPTION_KEY` uses today |
+| Provider configured but unreachable (Vault down, KMS unreachable, AppRole secret expired) | The API **starts** and serves everything that does not need a DEK; certificate issuance, material delivery and DNS-credential reads fail closed with a named error, are visible to the operator (health reporting), and are **not** retried into a storm. No fallback to an env key, ever |
+| Provider reachable but the role lacks the policy | Fail closed with the provider's own denial surfaced, and a health check that distinguishes "unreachable" from "unauthorized" — the two need different operator actions |
+| Non-production implementation (`test`) in a non-production environment | Allowed, loudly: it is logged at startup and reported in health, so an environment can never be *mistaken* for production custody |
 
 ---
 
@@ -1338,7 +1443,8 @@ so an operator is never told a certificate is revoked when it is not.
 | Slice | Scope | Ships | Acceptance criteria |
 |---|---|---|---|
 | **5.1 — Certificate metadata & lifecycle foundations — SHIPPED 2026-10-12 (`37b7211`)** | `certificates` + `certificate_generations` **first** migration (identity + pre-issuance lifecycle only — **no `dns_provider_id`, no material columns, no `deke_id`**), `certificate.read`/`certificate.manage` codenames **+ the role matrix (§4.1, O3 resolved)**, RLS/grant pattern from the Phase 4 migration, metadata-only CRUD (no issuance) | Migration + API + IDOR cases | A `certificates` row is org-scoped; a foreign id is 404; `GET` returns no ciphertext field; the one-live-generation unique index rejects a second concurrent issuance; **the generation `state` CHECK is limited to pre-issuance states, so an `ISSUED` row is rejected** (no forward dependency on 5.2); no `dns_providers` table exists yet and nothing references one; no `deke_id` column exists, so no placeholder can be written; role matrix matches §4.1; drift test green. |
-| **5.2 — Key envelope, providers & issuance foundations** — *next; starts with the KMS provider (K1, §6.8) and follows the intra-slice order in §3.7* | `dns_providers`, `acme_accounts`, `organizations.dek_ciphertext`/`dek_generation`, the generation material columns + `deke_id`, `certificates.dns_provider_id` **FK added with its target table**, widened `state` vocabulary, **material guard CHECK**; org-DEK wrap/unwrap + LRU, `verify_creds` + zone allowlist | Migration + service + write-only API | **An issued (or superseded/suspended/expired/revoked) generation cannot exist without `key_ciphertext`, `chain_ciphertext`, `deke_id`, `issued_at` and `not_after`** (guard CHECK rejects it); `dns_provider_id` FK resolves to a real row (no artificial provider); DNS credential never returned by any endpoint; a challenge outside `zone_allowlist` is refused; DEK rotation re-encrypts only Phase-5 rows; no existing secret re-encrypted; a `decrypt_str` mismatch fails closed |
+| **5.2.1 — KEK provider and organization DEK envelope** — *next; the approved direction is §6.7, the plan is §10.5* | The `KEKProvider` seam with the **Vault Transit** adapter and the deterministic test provider; `organizations.dek_ciphertext` / `dek_generation`; org-DEK create/wrap/unwrap/rewrap; provider configuration + fail-fast startup validation; operation-scoped unwrap (no LRU) | Migration (`organizations`) + provider module + envelope service + config + tests | A production configuration cannot select or fall back to a non-production provider (abort at import); the KEK never reaches application code, the DB plaintext, logs or responses; a wrap/unwrap round-trip is bound to `(org_id, purpose, dek_generation)` so a moved ciphertext is rejected; `rewrap_dek` leaves no plaintext DEK in the application; provider outage fails closed with a named error while the API stays up; **no certificate/DNS material column exists yet, so nothing can be written with a placeholder key** |
+| **5.2.2 — Providers, ACME accounts and material columns** — *after 5.2.1* | `dns_providers` + its metadata-only API and credential storage, `acme_accounts`, the generation material columns + `deke_id`, `certificates.dns_provider_id` **FK added with its target table**, widened `state` vocabulary, **material guard CHECK**; `verify_creds` + zone allowlist | Migration + service + write-only API | **An issued (or superseded/suspended/expired/revoked) generation cannot exist without `key_ciphertext`, `chain_ciphertext`, `deke_id`, `issued_at` and `not_after`** (guard CHECK rejects it); `dns_provider_id` FK resolves to a real row (no artificial provider); DNS credential never returned by any endpoint; a challenge outside `zone_allowlist` is refused; DEK rotation re-encrypts only Phase-5 rows; no existing secret re-encrypted; a `decrypt_str` mismatch fails closed |
 | **5.3 — ACME issuance (staging + pebble)** | `acme`/`josepy` dependency behind `AcmeProvider`; per-org account; DNS-01 order → publish → propagate → validate → finalize → store; state machine; backoff | Worker task + tests against pebble | Issue a certificate for a name whose TXT record the test publishes; generation reaches `ISSUED` with `not_after` set; retry/backoff and stuck-state sweep pinned; **no production CA traffic in tests** |
 | **5.4 — Secure delivery** | `certificate_deliveries`, `POST /agent/certificates/{id}/material`, `certificate.install`/`.remove` op types + agent handlers, content-addressed paths, fingerprint check, no-store response policy | Endpoint + op types + agent + contract tests | **No certificate private key or chain appears in operation params, results, audit metadata, events or logs** (asserted by tests over each path, §7.6); a foreign node's delivery is 404; a superseded generation is refused; a duplicate claim is idempotent; interrupted delivery recovers within the window and not after. **Non-production only until C1–C6 (§6.6) are met.** |
 | **5.5 — HTTPS activation & verification** | Renderer TLS block, allowlisted `tls` paths, `routes.certificate_id` + widen `scheme`, `proxy_state.tls`, activation endpoint, control-plane HTTPS probe | Migration + renderer + API | HTTP keeps serving until the probe succeeds; a bad cert path fails `nginx -t` and rolls back to the HTTP tree; `scheme` flips to `https` only after `VERIFIED_ACTIVE`; content-addressed path change ⇒ different `bundle_id` ⇒ drift detected |
@@ -1422,7 +1528,7 @@ later; each item is genuinely unresolved and is **not** invented away.
 
 | # | Open item | Blocks what? |
 |---|---|---|
-| O1 | **KMS / secret-manager vendor for the KEK (C1).** *Direction decided in §6.7* — Vault Transit as the self-hosted default, the deployment cloud's managed KMS as the alternative, both behind one `KEKProvider` seam, with a deterministic test provider that production cannot select. The outstanding item is the vendor approval (K1) and the custody/audit/caching decisions K2–K4 (§6.8). | **Blocks 5.2 step 1** (the provider adapter) and therefore the org-DEK envelope, everything wrapped under it (DNS credentials, ACME account keys, certificate key/chain) and all of 5.3 issuance. Blocks production (C1). Does **not** block the non-credential half of the `dns_providers` slice or this document's corrections. |
+| O1 | **KMS / secret-manager vendor for the KEK (C1).** **Closed 2026-10-12**: approved in §6.7 (Vault Transit first; cloud KMS adapters later behind the same interface; test providers never a production fallback; no plaintext KEK in code or DB; operation-scoped unwrap; provider-side rewrap). Operational custody is specified in §6.9. | **No longer blocks anything.** §3.7 step 1 and §10.5 are unblocked; the residual items are operator choices inside the approved direction (auto-unseal KMS vendor, transit key name, audit destination, break-glass holders — §6.8). |
 | O2 | **Exact `acme`/`josepy` versions and pin policy**, and whether to use `acme`'s `ClientNetwork` or its higher-level message helpers. | **No** — needed at 5.3. |
 | O4 | **`REVOCATION_FAILED` → operator action vs extended automatic retry budget.** The bounded-budget default is designed (§9.5); the exact budget/threshold is a tuning decision. | **No** — 5.6. |
 | O5 | **Expiry-monitor thresholds** (warn/critical days) — defaults proposed (30/7) but org-configurability is undecided. | **No** — 5.6. |
@@ -1480,6 +1586,84 @@ in this change. Concretely: collapse the five lists above to a pointer at the en
 registry, and add one assertion that no documented reserved name is also a shipped
 type. **This task adds no operation type.**
 
+### 10.5 Phase 5.2.1 — narrow implementation plan (KEK provider + organization DEK envelope)
+
+**Scope.** Exactly two things: the `KEKProvider` seam with its first production adapter, and
+the organization DEK envelope that uses it. **Out of scope, deliberately:** DNS-provider
+credentials, ACME account storage, certificate material columns, issuance, and agent
+delivery (each named in the last table below). No placeholder key, no placeholder provider
+row, no partially working path — the module ships with nothing that *stores* a certificate
+key, because no column exists to store one in.
+
+**Schema plan, verified against the shipped tree** (checked 2026-10-12 at `307c5e1`):
+
+| Check | Result |
+|---|---|
+| Current Alembic head | `c8d9e0f1a2b3` — **single head**, no branch points (`uv run alembic heads`) |
+| 5.1 revision chain | `c8d9e0f1a2b3` revises `b7c8d9e0f1a2`; the 5.2.1 migration must set `down_revision = "c8d9e0f1a2b3"` |
+| Do the 5.2.1 columns already exist? | **No.** `dek_ciphertext`, `dek_generation`, `dns_providers`, `acme_accounts`, `key_ciphertext` and `deke_id` appear in 5.1 only as prose stating their absence — no column, no table, no index |
+| Does 5.2.1 conflict with 5.1's constraints? | No. It **alters `organizations`** only, and 5.1 touched `certificates`/`certificate_generations` |
+
+#### 10.5.1 Migration (one, additive, `down_revision = c8d9e0f1a2b3`)
+
+| Change | Detail |
+|---|---|
+| `organizations.dek_ciphertext` | `Text`, **nullable** — an organization has no DEK until its first Phase-5 write, and a nullable column here is honest rather than a placeholder value |
+| `organizations.dek_generation` | `Integer`, **NOT NULL, default 0**, CHECK `dek_generation >= 0`. `0` means "no DEK yet"; the first generated DEK is generation `1`. A wrapped ciphertext with generation `0` is therefore contradictory, and a CHECK may enforce the pair: `(dek_ciphertext IS NULL) = (dek_generation = 0)` |
+| Downgrade | Drops both columns. It **must fail loudly** rather than silently discard material that exists: if any row has `dek_ciphertext IS NOT NULL`, the downgrade refuses with a message naming the affected organizations (a downgrade that destroys the only copy of a wrapped DEK is not a routine operation) |
+| Not in this migration | No `dns_providers`, no `acme_accounts`, no material columns, no guard CHECK, no RLS change (an existing tenant column on an existing RLS-governed table needs none) |
+
+#### 10.5.2 Modules, interfaces and configuration
+
+| Artifact | Contents |
+|---|---|
+| `app/services/kek/__init__.py` | The `KEKProvider` protocol, `EncryptionContext`, `WrappedKey`, `KEKProviderStatus`, `KEKError` (named: `KEK_UNAVAILABLE`, `KEK_UNAUTHORIZED`, `KEK_CONFIG_INVALID`), and the envelope codec for the self-describing stored value |
+| `app/services/kek/vault_transit.py` | `VaultTransitKEKProvider` — AppRole login with token renewal, `wrap_dek` → `transit/encrypt`, `unwrap_dek` → `transit/decrypt` (with the `context` derived from `EncryptionContext`), `rewrap_dek` → `transit/rewrap`, `health` → a cheap key-metadata read. Built on the already-present `httpx`; **no new dependency** |
+| `app/services/kek/deterministic.py` | `DeterministicKEKProvider` (provider name `test`) — fixed test root key, deterministic ciphertext, in-process only. Not importable into a production code path by configuration (below) |
+| `app/services/kek/factory.py` | `build_kek_provider(settings) → KEKProvider`, the **only** construction site. Explicit selection, no detection, no fallback chain |
+| `app/services/dek_envelope.py` | `org_dek(db, org_id, purpose)` context manager: read `dek_ciphertext`/`dek_generation`, unwrap through the provider, yield the Fernet key for the duration of **one operation**, drop it on exit (approved point 5). Lazily generates + wraps on first use; serializes concurrent first-use with a row-level lock so two requests cannot create two DEKs for one organization |
+| `app/services/kek/rewrap.py` (or a function on the envelope) | `rewrap_org_deks(db, batch)`: the KEK-rotation path through `rewrap_dek`, resumable, per-row idempotent, **never** returning a DEK to its caller. An operator-invoked script/CLI entry, not a beat task in this slice |
+| `app/core/config.py` | `kek_provider` (unset by default), `kek_vault_addr`, `kek_vault_namespace` (optional), `kek_vault_role_id`, `kek_vault_secret_id`, `kek_vault_transit_key`, `kek_vault_ca_bundle`, `kek_vault_timeout_seconds`. Validation: production **aborts** on unset/unknown/`test`; the `test` provider is accepted only outside production |
+| `app/api/v1/health.py` (or the existing health surface) | Report provider name + reachability, distinguishing unreachable from unauthorized, so the §6.9 startup table is observable rather than theoretical |
+
+**Interface decisions fixed here, so the adapter cannot drift:**
+
+- The stored value is exactly `provider:key_id:key_version:base64(ciphertext)` — one `Text` column, self-describing, versioned by a leading format tag so a future change is parseable rather than guessed at. Adding a provider is not a migration.
+- `EncryptionContext(org_id, purpose, dek_generation)` is bound as provider associated data wherever supported; the adapter **refuses** to operate if the provider cannot bind it (rather than silently dropping the binding).
+- `unwrap_dek` is the only function that returns key material; it is called from the envelope context manager only. No module-level cache, no `lru_cache`, no module global — grep-able and asserted by a test.
+- A provider error is raised as a `KEKError` with a named code; nothing downgrades it to a warning or retries it into another source.
+
+#### 10.5.3 Tests (planned, in `backend/tests/`)
+
+| Area | What is asserted |
+|---|---|
+| Envelope codec | Round-trip of the stored value; unknown format tag, missing fields and trailing garbage are refused with a named error rather than parsed optimistically |
+| Deterministic provider | Deterministic ciphertext across runs (fixtures stay stable); implements the same interface; performs no network I/O |
+| Configuration | Production + unset/unknown/`test` ⇒ startup abort (the same fail-fast test shape `ENCRYPTION_KEY` already has in `tests/unit/test_security.py`); non-production + `test` ⇒ allowed and reported |
+| No-fallback property | With the provider configured to fail, the code path raises `KEK_UNAVAILABLE` — it never falls back to `ENCRYPTION_KEY`, never returns a default, and never caches a DEK across operations |
+| Operation scope | Two sequential envelope operations on the same org unwrap twice (no cross-operation cache), and no plaintext DEK survives the context manager (assert by inspecting the object graph / provider call count) |
+| Context binding | A ciphertext wrapped for org A is rejected when presented with org B's context; a generation mismatch is rejected |
+| Migration | Upgrade adds both columns with the documented nullability/CHECK; the populated-instance downgrade refuses while wrapped DEKs exist and succeeds after they are cleared; single head preserved; model↔migration drift stays green |
+| Tenancy | `dek_ciphertext` is not reachable through any API read model — asserted by the same response-allowlist style used for the certificate models, so the column cannot leak by default |
+| Vault adapter (integration, non-production) | Against a real Vault transit instance in CI: login, wrap, unwrap, rewrap, key rotation observed via `key_version`, denied policy ⇒ `KEK_UNAUTHORIZED`. Runs only where Vault is available; the production key and CA directory are never contacted |
+
+#### 10.5.4 What each later step adds (and where it stays out of scope)
+
+| Step | Adds | Explicitly not in this plan |
+|---|---|---|
+| 5.2.2 | `dns_providers` table, its metadata-only API, credential storage under the org DEK, `verify_creds` + `zone_allowlist`; `acme_accounts`; `certificates.dns_provider_id` FK; generation material columns + `deke_id`; widened `state`; material guard CHECK | No issuance logic, no CA contact |
+| 5.3 | The `acme`/`josepy` dependency behind an ACME-provider seam, the order/challenge/validate/finalize flow, key pair generation, encrypt-and-store, issuance task + backoff | No delivery, no activation |
+| 5.4 | `certificate_deliveries`, the material endpoint, `certificate.install`/`certificate.remove` op types and agent handlers | No HTTPS activation |
+| 5.5 | Route binding (`routes.certificate_id`, widened `scheme`), the TLS renderer block, HTTPS activation + probe | No renewal/revocation |
+| 5.6 | Renewal sweep, expiry monitor, removal, revocation (CA axis + `REVOKED_LOCAL_ONLY`) | — |
+
+**Exit condition for 5.2.1:** the migration is applied and reversible (with the refusal above),
+the seam and envelope are covered by the tests in §10.5.3, a production configuration
+cannot select a non-production provider, and the Adapter operates against Vault Transit in
+CI. **No certificate has been issued, no key material exists, and no DNS or ACME record has
+been created** when this slice is done — by construction, since none of those columns exist
+yet.
+
 ---
 
 ## Appendix A — Decisions resolved here (that certificate-management.md left open)
@@ -1512,6 +1696,21 @@ this document. The remaining open items for Phase 5.1 and beyond are listed in �
 | KEK provider direction (C1): Vault Transit as the self-hosted default, the deployment cloud's managed KMS as the alternative, one provider interface, a deterministic test provider that production cannot select — with the vendor/custody/audit/caching approvals still outstanding | §6.7, §6.8 |
 | Intra-5.2 implementation order, with the KEK provider first, and the explicit statement of what may not be built before the KMS choice | §3.7 |
 | `certificates.status` widened String(16) → String(24) and status derived from the newest generation until a current one exists | §3.1 |
+
+### Approved in the Phase 5.2 key-management decision gate (2026-10-12)
+
+| Decision | Where |
+|---|---|
+| The six-point KEK direction: Vault Transit as the first production `KEKProvider`; cloud KMS as possible future adapters behind the same interface, **not** built in v1 without a concrete deployment requirement; test/dev providers explicitly selected and never production fallbacks; the root KEK never in application code or the database in plaintext; **operation-scoped DEK unwrap with no long-lived plaintext-DEK LRU until measurements justify one**; rewrap delegated to the provider with no plaintext DEK returned during KEK-only rotation | §6.7 |
+| Vault root/unseal custody: **auto-unseal through a cloud KMS**, with break-glass material stored separately from DB backups and two-person access | §6.8 K2, §6.9 |
+| Vault application authentication: **AppRole**, one policy per environment scoped to a single transit key, TLS with a verified CA, no root token on an application host | §6.9 |
+| Operational custody requirements written down as requirements rather than intentions: storage protection, availability, recovery, backup/restore drills, audit retention ≥ 13 months with quarterly access review, DEK generation/wrapping/rotation/recovery and key-loss consequences, startup behaviour per misconfiguration | §6.9 |
+| The narrow 5.2.1 implementation plan (migration, modules, interfaces, configuration, tests, later steps) with the schema plan verified against the shipped 5.1 migration and the single Alembic head | §10.5 |
+
+These settle the decision gate. They authorize **5.2.1 only** — the provider adapter and the
+organization DEK envelope. They do not authorize DNS-provider credentials, ACME account
+storage, certificate material columns, issuance or agent delivery, and no key, credential
+or provider row is created by recording them.
 
 No application behavior is changed by these notes: they record what 5.1 built, and set
 the order and the gates for 5.2. No dependency, adapter, credential or configuration key

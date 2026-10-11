@@ -406,10 +406,14 @@ and rotation is impossible (§1.1). Target: **per-org DEK envelope, KMS-ready**.
 
 > **Scope note (Phase 5):** the authoritative decision on the key hierarchy — its
 > threat model, rotation, backup and recovery — is [phase5-design.md](phase5-design.md)
-> §6, and since 2026-10-12 that includes the **KEK provider decision** (§6.7: Vault
-> Transit by default for self-hosted deployments, the deployment cloud's managed KMS as
-> the alternative, one provider interface, a deterministic test provider that production
-> cannot select; the vendor approval is §6.8 K1). Phase 5 applies the org-DEK envelope to
+> §6, and since 2026-10-12 that includes the **approved KEK provider decision** (§6.7:
+> Vault Transit as the first production implementation, cloud KMS as future adapters
+> behind the same interface, one provider seam, a deterministic test provider that
+> production cannot select, operation-scoped unwrap with no long-lived plaintext-DEK
+> cache, provider-side rewrap) and its **operational custody requirements** (§6.9:
+> AppRole + single-key policy, auto-unseal through a cloud KMS, audit retention and
+> access review, rotation and key-loss consequences, startup behaviour). Phase 5 applies
+the org-DEK envelope to
 > **certificate/DNS/ACME material only**; re-encrypting the existing secret store is
 > deliberately a **separate reviewed change** (§6.4 there), not a Phase 5 side effect.
 > In particular the per-org envelope does **not** bound a compromise of the global
@@ -443,9 +447,12 @@ Mechanics:
   DEKs only — fast, touches no data. This is what makes key rotation possible at
   all (today it destroys every ciphertext, `generate_secrets.sh:7-10`).
 - **KMS-ready:** swap the unwrap call for a provider call (`wrap_dek`/`unwrap_dek`,
-  phase5-design.md §6.7); wrapped DEKs never leave the DB; plaintext DEKs live only in
-  memory. The stored value is a self-describing envelope naming the provider, key id and
-  key version, so a rotation knows what to re-wrap.
+  phase5-design.md §6.7 — approved, Vault Transit first); wrapped DEKs never leave the DB;
+  a plaintext DEK exists only for the duration of the operation that unwrapped it, with no
+  long-lived cache (approved point 5). The stored value is a self-describing envelope
+  naming the provider, key id and key version, so a rotation knows what to re-wrap — and
+  that rotation delegates to the provider's rewrap, so the DEK never becomes visible to
+  application code during KEK-only rotation.
 - `digest_of` becomes per-org: derive the HMAC key from the org's DEK instead of
   `ENCRYPTION_KEY` (`security.py:145-158`) — keeps the not-an-offline-oracle
   property and prevents cross-org digest equality comparisons.
@@ -631,7 +638,8 @@ sequenceDiagram
 - Delivery-op params: scrub-and-keep-row-for-audit vs delete the row — deadline
   is decided (terminal state or expires_at, whichever first, §7); open choice is
   keep vs delete. (§7)
-- KEK custody before the KMS phase (env var vs file vs break-glass runbook); multi-person approval for org DEK recovery? (§6) — *partly answered 2026-10-12: the provider direction and the custody/approval decisions are phase5-design.md §6.7/§6.8 (K1–K5); K1's vendor approval and K2's unseal custody are still open.*
+- KEK custody before the KMS phase (env var vs file vs break-glass runbook); multi-person approval for org DEK recovery? (§6) — *answered 2026-10-12 for the Phase-5 scope: the provider is approved and the custody requirements are specified in phase5-design.md §6.7/§6.9 (Vault Transit, AppRole, auto-unseal through a cloud KMS, break-glass material separate from DB backups with two-person access, audit retention ≥ 13 months and quarterly access review). Still an operator choice inside that direction: which cloud KMS provides auto-unseal. The secret store's own migration off `ENCRYPTION_KEY` remains unscheduled (§6.4 there).*
+- When (if ever) the **secret store** moves off the single `ENCRYPTION_KEY` and onto the org-DEK envelope, and whether that reuses the Vault Transit provider approved for Phase 5 or waits for the secret-store migration's own review (§6.4 in phase5-design.md).
 - Resource-level grants (§4): without them, `deployment.create` authorizes a deploy
   into any environment of the organization — the grant-narrowed model is a later
   phase. Is that acceptable for production before grants ship?

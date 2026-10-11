@@ -1,6 +1,7 @@
 """All ORM models. Importing this package registers every table on Base.metadata."""
 
 from app.models.base import Base, OrgScoped
+from app.models.certificate import Certificate, CertificateGeneration
 from app.models.delivery import (
     Application,
     Deployment,
@@ -52,6 +53,8 @@ __all__ = [
     "Application",
     "AuditLog",
     "Base",
+    "Certificate",
+    "CertificateGeneration",
     "Container",
     "ContainerImage",
     "Deployment",

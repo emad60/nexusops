@@ -55,6 +55,11 @@ EVENT_TYPES: dict[str, str] = {
     "ROUTE_REMOVAL_CONFIRMED": "A node applied a configuration without this route, so it is no longer served",
     "NGINX_DRIFT_DETECTED": "Node configuration drifted from the desired bundle",
     "NGINX_DRIFT_RECOVERED": "Node configuration was re-applied after drift",
+    # certificates (Phase 5) — the request is recorded here; issuance, delivery,
+    # installation and activation each get their own event in a later slice, so
+    # this type never stands in for one of them.
+    "CERTIFICATE_REQUESTED": "Certificate requested for a verified domain; nothing has been issued yet",
+    "CERTIFICATE_DELETED": "Certificate request deleted (no certificate had been issued)",
     # secrets & notifications
     "SECRET_UPDATED": "Secret created, rotated or deleted (value never included)",
     "CHANNEL_TESTED": "Notification channel test sent",

@@ -723,6 +723,24 @@ gated live — see [domain-routing.md](domain-routing.md).
 | GET | `/nodes/{server_id}/proxy/status` | `domain.read` | last applied fingerprint, provider, drift state |
 | POST | `/nodes/{server_id}/proxy/status/refresh` · `/proxy/apply` | `domain.manage` | 409 `NGINX_PREFLIGHT_FAILED` / `NODE_CAPABILITY_STALE` when the node cannot serve HTTP right now |
 
+### Certificates — `certificates.py`
+
+Phase 5.1 — **metadata only**. There is no issuance, delivery, installation or
+activation in this phase: a request is recorded, its generation stays in the
+pre-issuance vocabulary, and every response says so (`issued: false`,
+`current_generation_id: null`, `expires_at: null`, and a `status_detail` that
+names what has *not* happened). Reads are metadata-only — no endpoint returns a
+private key, plaintext certificate material or ciphertext — and both codenames
+are organization-scoped. See [phase5-design.md](phase5-design.md) §3.1–§3.2, §4.1.
+
+| Method | Path | Permission | Notes |
+|---|---|---|---|
+| POST | `/certificates` | `certificate.manage` | body `{domain_id, identifiers[], challenge_type?, auto_renew}` — the **first** identifier is the primary common name and the rest are SANs; the domain must be `VERIFIED`, every identifier must be covered by it, and the challenge is `dns-01` only. Writes the certificate and its first `PENDING` generation in one transaction; 409 `CERTIFICATE_EXISTS` on a duplicate name |
+| GET | `/certificates` | `certificate.read` | filters `status`, `domain_id`; each row carries its newest generation and the derived `status`/`status_detail` |
+| GET | `/certificates/{certificate_id}` | `certificate.read` | detail adds the whole generation history, newest first |
+| PATCH | `/certificates/{certificate_id}` | `certificate.manage` | `auto_renew` only — identifiers, status and expiry are not writable in place |
+| DELETE | `/certificates/{certificate_id}` | `certificate.manage` | removes the request and its generations; refused once a generation has been issued. A domain with a certificate cannot be deleted (409 `DOMAIN_HAS_CERTIFICATES`) |
+
 ### Monitoring: monitors, incidents — `monitors.py`, `incidents.py`
 
 | Method | Path | Permission | Notes |

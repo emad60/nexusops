@@ -137,6 +137,7 @@ def _include_routers(application: FastAPI, settings: Settings) -> None:
         apikeys,
         audit,
         auth,
+        certificates,
         channels,
         containers,
         deployments,
@@ -191,6 +192,7 @@ def _include_routers(application: FastAPI, settings: Settings) -> None:
         deployments,
         domains,
         routes,
+        certificates,
         operations,
     ):
         for name in (

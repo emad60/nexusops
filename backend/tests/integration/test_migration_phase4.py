@@ -451,14 +451,21 @@ def test_route_removal_states_upgrade_downgrade_and_return(scratch_database: str
     assert restored == [(None, None)]
 
 
-def test_the_phase42_revision_is_the_head_of_one_chain() -> None:
-    """CI pins the actual head; Phase 4.2 sits directly on the Phase 4 head."""
+def test_the_phase42_revision_does_not_fork_the_chain() -> None:
+    """Phase 4.2 sits directly on the Phase 4 head, in a chain with one head.
+
+    This module pinned ``heads == [PHASE42_REVISION]`` while Phase 4.2 *was* the
+    head. Later phases extend the chain from here (Phase 5.1 does), so what must
+    hold forever is the other half of the claim: one head, 4.2 reachable from it,
+    and 4.2 still built on 4 rather than re-parented.
+    """
     from alembic.script import ScriptDirectory
 
     from .test_migration_phase2 import _alembic_config
 
     script = ScriptDirectory.from_config(_alembic_config("postgres"))
     heads = script.get_heads()
-    assert heads == [PHASE42_REVISION], f"unexpected alembic heads: {heads}"
+    assert len(heads) == 1, f"multiple alembic heads: {heads}"
+    assert any(rev.revision == PHASE42_REVISION for rev in script.walk_revisions("base", "heads"))
     revision = script.get_revision(PHASE42_REVISION)
     assert revision.down_revision == PHASE4_REVISION

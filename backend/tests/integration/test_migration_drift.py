@@ -68,3 +68,65 @@ def test_operations_type_check_matches_the_enum() -> None:
     # Reserved Phase 2 types must not be accepted by the database either.
     for reserved in ("nginx.reload", "certificate.install", "secret.env.apply"):
         assert reserved not in definition
+
+
+def test_the_certificate_vocabularies_match_the_enums() -> None:
+    """The Phase 5.1 closed vocabularies are the sets the code declares.
+
+    ``certificate_generations.state`` is the important one. The migration spells
+    it as a literal *without* the post-issuance states on purpose, so the database
+    refuses a generation that would have to carry a private key — an enum member
+    the CHECK rejects would be a runtime 500, and a value the CHECK accepts that
+    the enum does not know would be a state with no rules at all.
+    """
+    from app.models.enums import (
+        CertificateChallengeType,
+        CertificateGenerationState,
+        CertificateKeyAlgorithm,
+        CertificateStatus,
+    )
+
+    names = {
+        "status": "ck_certificates_status_valid",
+        "challenge_type": "ck_certificates_challenge_type_valid",
+        "key_algorithm": "ck_certificates_key_algorithm_valid",
+        "state": "ck_certificate_generations_state_valid",
+    }
+    engine = create_engine(TEST_OWNER_DATABASE_URL)
+    try:
+        with engine.connect() as conn:
+            definitions = {
+                key: conn.execute(
+                    text(
+                        "SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = :name"
+                    ),
+                    {"name": constraint},
+                ).scalar_one()
+                for key, constraint in names.items()
+            }
+    finally:
+        engine.dispose()
+
+    for member in CertificateStatus:
+        assert f"'{member}'" in definitions["status"], member
+    for member in CertificateGenerationState:
+        assert f"'{member}'" in definitions["state"], member
+    for member in CertificateChallengeType:
+        assert f"'{member}'" in definitions["challenge_type"], member
+    for member in CertificateKeyAlgorithm:
+        assert f"'{member}'" in definitions["key_algorithm"], member
+
+    # Every material-bearing state stays absent: an issued (or superseded,
+    # suspended, expired, revoked) generation cannot be written, so it cannot be
+    # reported, delivered or installed either.
+    for absent in (
+        "ISSUED",
+        "SUPERSEDED",
+        "EXPIRED",
+        "SUSPENDED",
+        "REVOCATION_PENDING",
+        "REVOKED",
+        "REVOCATION_FAILED",
+        "REVOKED_LOCAL_ONLY",
+    ):
+        assert f"'{absent}'" not in definitions["state"], absent

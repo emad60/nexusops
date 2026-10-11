@@ -356,3 +356,81 @@ class AuditResult(StrEnum):
     SUCCESS = "SUCCESS"
     DENIED = "DENIED"
     ERROR = "ERROR"
+
+
+# --- certificates (Phase 5) --------------------------------------------------
+
+
+class CertificateStatus(StrEnum):
+    """Certificate-level view of the *current* generation, derived, never stored raw.
+
+    The service computes this from the certificate's current generation (or, before
+    the first issuance, from its newest generation), so the row can never claim a
+    state its material does not support. Phase 5.1 can only produce ``PENDING`` and
+    ``FAILED``: every other member names a material-bearing state whose columns
+    arrive in Phase 5.2, and
+    :func:`app.services.certificate_lifecycle.certificate_status_for` refuses to
+    return one. ``REVOKED`` and ``REVOKED_LOCAL_ONLY`` are deliberately distinct —
+    the CA acknowledged the revocation in the first case and never answered in the
+    second.
+    """
+
+    PENDING = "PENDING"
+    ISSUED = "ISSUED"
+    FAILED = "FAILED"
+    EXPIRED = "EXPIRED"
+    SUSPENDED = "SUSPENDED"
+    REVOCATION_PENDING = "REVOCATION_PENDING"
+    REVOKED = "REVOKED"
+    REVOKED_LOCAL_ONLY = "REVOKED_LOCAL_ONLY"
+
+
+class CertificateChallengeType(StrEnum):
+    """How ownership of an identifier is proved to the CA.
+
+    DNS-01 only in v1: it is the only challenge that works for NAT-ed servers
+    and for wildcards, and it needs no inbound connectivity to the node. An
+    ``http-01`` value is therefore not a member — the API refuses the request
+    with a named error instead of persisting a challenge nobody can serve.
+    """
+
+    DNS_01 = "dns-01"
+
+
+class CertificateKeyAlgorithm(StrEnum):
+    """The key type generated for a generation. Fixed in v1; never client-chosen."""
+
+    ECDSA_P256 = "ecdsa-p256"
+
+
+class CertificateGenerationState(StrEnum):
+    """Pre-issuance lifecycle of one ACME order + key pair.
+
+    **The vocabulary is deliberately truncated in Phase 5.1.** Only the states a
+    generation can occupy *before* any material exists are members, so a
+    material-less ``ISSUED`` generation is unrepresentable — at the enum, at the
+    database CHECK and at the API — rather than merely discouraged. The mutable
+    states (:meth:`live_pre_issuance`) are also the predicate of the partial
+    unique index that allows at most one in-flight generation per certificate, so
+    a second concurrent issuance is a database error and not two racing orders.
+
+    Phase 5.2 widens this to the full vocabulary (``ISSUED``, ``SUPERSEDED``,
+    ``EXPIRED``, ``SUSPENDED``, the revocation states) in the same migration that
+    adds the key envelope the material-bearing states require.
+    """
+
+    PENDING = "PENDING"
+    ORDERING = "ORDERING"
+    CHALLENGE_PUBLISHED = "CHALLENGE_PUBLISHED"
+    VALIDATING = "VALIDATING"
+    FAILED = "FAILED"
+
+    @classmethod
+    def live_pre_issuance(cls) -> tuple[CertificateGenerationState, ...]:
+        """The states in which a generation is still being worked on.
+
+        At most one of these may exist per certificate at a time. ``FAILED`` is
+        deliberately **not** one of them: a spent attempt may be retried, and a
+        retry must not be blocked by the failed row it replaces.
+        """
+        return (cls.PENDING, cls.ORDERING, cls.CHALLENGE_PUBLISHED, cls.VALIDATING)

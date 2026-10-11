@@ -262,7 +262,17 @@ async def delete_domain(
         )
     name = domain.name
     await db.delete(domain)
-    await db.flush()
+    try:
+        await db.flush()
+    except IntegrityError as exc:
+        # ``certificates.domain_id`` is ON DELETE RESTRICT: the name is what a
+        # certificate was issued for, so removing it would leave material the CA
+        # still honors pointing at a domain nobody can explain. The operator has
+        # to withdraw the certificate first.
+        raise Conflict(
+            "A certificate still references this domain; revoke or delete it first",
+            code="DOMAIN_HAS_CERTIFICATES",
+        ) from exc
     await event_bus.publish(
         db,
         type="DOMAIN_DELETED",

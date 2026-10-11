@@ -74,6 +74,21 @@ PERMISSIONS: tuple[PermissionSpec, ...] = (
         "Domains",
         "Add / verify domains, manage routes and apply proxy configuration",
     ),
+    # certificates (Phase 5.1). Both are organization-scoped, and both are
+    # metadata-only: `certificate.read` never exposes a private key, plaintext
+    # certificate material or ciphertext, and `certificate.manage` is
+    # create/renew/revoke/bind — not read — so no endpoint returns key material
+    # under either codename (phase5-design.md §4.1).
+    PermissionSpec(
+        "certificate.read",
+        "Certificates",
+        "View certificates and their issuance/lifecycle metadata",
+    ),
+    PermissionSpec(
+        "certificate.manage",
+        "Certificates",
+        "Request, renew, revoke and bind certificates; manage DNS credentials",
+    ),
 )
 
 ALL_CODENAMES: frozenset[str] = frozenset(p.codename for p in PERMISSIONS)
@@ -118,6 +133,8 @@ ROLE_MATRIX: dict[str, list[str]] = {
         "secret.write",
         "domain.read",
         "domain.manage",
+        "certificate.read",
+        "certificate.manage",
     ),
     "Operator": _perms(
         "user.read",
@@ -147,6 +164,8 @@ ROLE_MATRIX: dict[str, list[str]] = {
         "secret.read",
         "domain.read",
         "domain.manage",
+        "certificate.read",
+        "certificate.manage",
     ),
     "Developer": _perms(
         "node.read",
@@ -165,6 +184,7 @@ ROLE_MATRIX: dict[str, list[str]] = {
         "event.read",
         "secret.read",
         "domain.read",
+        "certificate.read",
     ),
     "Viewer": _perms(
         "node.read",
@@ -178,6 +198,7 @@ ROLE_MATRIX: dict[str, list[str]] = {
         "log.read",
         "event.read",
         "domain.read",
+        "certificate.read",
     ),
 }
 

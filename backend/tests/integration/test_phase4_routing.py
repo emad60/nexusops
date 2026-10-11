@@ -21,8 +21,13 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from app.core.tenancy import apply_scope_to_session, system_scope
-from app.models import AuditLog, Domain, Monitor, Server, SystemEvent
-from app.models.enums import DomainStatus, MonitorTargetType, ServerStatus
+from app.models import AuditLog, Container, Domain, Monitor, Operation, Server, SystemEvent
+from app.models.enums import (
+    ContainerStatus,
+    DomainStatus,
+    MonitorTargetType,
+    ServerStatus,
+)
 from app.services import dns_verifier
 from app.services.dns_verifier import STATUS_NO_TXT, STATUS_OK, STATUS_TIMEOUT, TxtObservation
 from sqlalchemy import select
@@ -200,14 +205,55 @@ async def _report(client, agent_token: str, operation_id: str, body: dict) -> di
     return response.json()
 
 
+def _agent_result_body(claimed: dict, *, outcome: str = "applied") -> dict:
+    """The result body the agent sends for one operation it claimed.
+
+    Shared by the drain helper and by the tests that deliberately re-deliver a
+    result, a conflicting one, or a late one — so a duplicate report is the very
+    same delivery the platform already accepted, rather than a differently-shaped
+    request that would not prove anything about duplication.
+
+    ``nginx.apply`` reports *outcome* (``applied`` / ``failed`` / ``rolled_back`` /
+    ``rollback_failed``) using the bundle the control plane actually sent, so
+    attribution is exercised for real.
+    """
+    bundle = (claimed.get("params") or {}).get("bundle") or {}
+    op_type = claimed["type"]
+    if op_type == "nginx.apply":
+        ok = outcome == "applied"
+        output: dict = {
+            "outcome": outcome,
+            "bundle_id": bundle.get("bundle_id"),
+            "live_bundle_id": bundle.get("bundle_id") if ok else None,
+            "manifest": bundle.get("manifest", []),
+            "config_test_ok": True,
+            "nginx_version": "1.27.5",
+        }
+        if not ok:
+            output["error"] = "nginx: [emerg] invalid directive"
+        body: dict = {"ok": ok, "output": output}
+        if not ok:
+            body["error_code"] = "NGINX_CONFIG_INVALID"
+            body["error_message"] = "nginx: [emerg] invalid directive"
+        return body
+    if op_type == "nginx.status":
+        return {
+            "ok": True,
+            "output": {
+                "live_bundle_id": bundle.get("bundle_id") or None,
+                "nginx_version": "1.27.5",
+                "config_test_ok": True,
+            },
+        }
+    return {"ok": True, "output": {"bootstrapped": True}}
+
+
 async def _drain(
     client, agent_token: str, *, outcome: str = "applied"
 ) -> list[tuple[str, dict, dict]]:
     """Claim and answer every pending operation, exactly like the agent would.
 
-    ``bootstrap`` and ``status`` always succeed; ``nginx.apply`` reports *outcome*
-    (``applied`` / ``failed`` / ``rolled_back`` / ``rollback_failed``) using the
-    bundle the control plane actually sent, so attribution is exercised for real.
+    ``bootstrap`` and ``status`` always succeed; ``nginx.apply`` reports *outcome*.
     """
     handled: list[tuple[str, dict, dict]] = []
     for _ in range(6):
@@ -220,38 +266,24 @@ async def _drain(
                 claimed = await _claim(client, agent_token, operation_id)
             except AssertionError:
                 continue  # lost the CAS or expired: not an error
-            op_type = claimed["type"]
-            bundle = (claimed.get("params") or {}).get("bundle") or {}
-            if op_type == "nginx.apply":
-                ok = outcome == "applied"
-                output = {
-                    "outcome": outcome,
-                    "bundle_id": bundle.get("bundle_id"),
-                    "live_bundle_id": bundle.get("bundle_id") if ok else None,
-                    "manifest": bundle.get("manifest", []),
-                    "config_test_ok": True,
-                    "nginx_version": "1.27.5",
-                }
-                if not ok:
-                    output["error"] = "nginx: [emerg] invalid directive"
-                body = {"ok": ok, "output": output}
-                if not ok:
-                    body["error_code"] = "NGINX_CONFIG_INVALID"
-                    body["error_message"] = "nginx: [emerg] invalid directive"
-            elif op_type == "nginx.status":
-                body = {
-                    "ok": True,
-                    "output": {
-                        "live_bundle_id": bundle.get("bundle_id") or None,
-                        "nginx_version": "1.27.5",
-                        "config_test_ok": True,
-                    },
-                }
-            else:
-                body = {"ok": True, "output": {"bootstrapped": True}}
+            body = _agent_result_body(claimed, outcome=outcome)
             reported = await _report(client, agent_token, operation_id, body)
-            handled.append((op_type, claimed, reported))
+            handled.append((claimed["type"], claimed, reported))
     return handled
+
+
+async def _audits(org_db, action: str) -> list[AuditLog]:
+    """Audit rows for one action in the organization being inspected."""
+    return list((await org_db.execute(select(AuditLog).where(AuditLog.action == action))).scalars())
+
+
+async def _event_types(client, owner, *types: str) -> list[dict]:
+    """Events of the given types, read through the API the UI reads."""
+    response = await client.get(
+        f"{API}/events", headers=owner["headers"], params={"types": ",".join(types)}
+    )
+    assert response.status_code == 200, response.text
+    return response.json()["items"]
 
 
 async def _create_domain(client, owner, name: str, **extra) -> dict:
@@ -1952,6 +1984,411 @@ async def test_the_sweep_repairs_drift_and_bounds_a_repeatedly_failing_node(clie
     assert after["recovery_attempts"] == 0
     assert after["next_recovery_at"] is None
     assert after["recovery_pending"] is False
+
+
+# --- 7. a result is a transition, not a delivery -------------------------------
+#
+# The defect this section pins: the result endpoint ran the proxy side effects for
+# *every* report, including one for an operation that had already reached a
+# terminal state. A re-delivered result doubled the route's events and audit rows,
+# and a late report for an expired operation could mark a route that a later
+# successful apply had put back in service as failed.
+
+
+async def test_a_duplicate_applied_result_is_not_processed_again(client, owner, org_db):
+    """The same delivery twice: one apply, one set of events, one audit row."""
+    node, agent_token, container_id = await _proxy_ready_node(client, owner)
+    domain = await _verified_domain(client, owner, "duplicate-result.example.com")
+    created = await _create_route(
+        client, owner, domain=domain, node_id=node["id"], container_id=container_id, enabled=True
+    )
+    assert created.status_code == 201, created.text
+    route_id = created.json()["id"]
+    handled = await _drain(client, agent_token)
+    applies = [claimed for op_type, claimed, _ in handled if op_type == "nginx.apply"]
+    assert applies, "enabling a route queues an apply"
+    claimed = applies[-1]
+
+    before_route = (await client.get(f"{API}/routes/{route_id}", headers=owner["headers"])).json()
+    assert before_route["config_state"] == "IN_SYNC"
+    before_events = len(await _event_types(client, owner, "ROUTE_APPLIED"))
+    before_applied_audits = len(await _audits(org_db, "route.applied"))
+    before_result_audits = len(await _audits(org_db, "operation.result"))
+    assert before_events == 1 and before_applied_audits == 1 and before_result_audits >= 1
+
+    # The agent re-delivers the *same* result — byte for byte, which is what a
+    # retry after an unclear network outcome looks like.
+    again = await _report(client, agent_token, claimed["id"], _agent_result_body(claimed))
+    assert again["status"] == "SUCCEEDED"
+
+    after_route = (await client.get(f"{API}/routes/{route_id}", headers=owner["headers"])).json()
+    assert after_route["config_state"] == "IN_SYNC"
+    assert after_route["last_applied_at"] == before_route["last_applied_at"], (
+        "a duplicate must not re-date the apply it is repeating"
+    )
+    assert after_route["last_apply_error"] == ""
+    assert len(await _event_types(client, owner, "ROUTE_APPLIED")) == before_events
+    assert len(await _audits(org_db, "route.applied")) == before_applied_audits
+    assert len(await _audits(org_db, "operation.result")) == before_result_audits, (
+        "a no-op is not audited as a transition"
+    )
+    detail = (
+        await client.get(f"{API}/operations/{claimed['id']}", headers=owner["headers"])
+    ).json()
+    assert detail["status"] == "SUCCEEDED"
+
+
+async def test_a_conflicting_result_cannot_overwrite_a_terminal_operation(client, owner, org_db):
+    """A report that contradicts what already happened is ignored, not applied."""
+    node, agent_token, container_id = await _proxy_ready_node(client, owner)
+    domain = await _verified_domain(client, owner, "conflicting-result.example.com")
+    created = await _create_route(
+        client, owner, domain=domain, node_id=node["id"], container_id=container_id, enabled=True
+    )
+    route_id = created.json()["id"]
+    handled = await _drain(client, agent_token)
+    claimed = [claimed for op_type, claimed, _ in handled if op_type == "nginx.apply"][-1]
+    before_route = (await client.get(f"{API}/routes/{route_id}", headers=owner["headers"])).json()
+    before_events = len(await _event_types(client, owner, "ROUTE_APPLIED"))
+    before_audits = len(await _audits(org_db, "route.applied"))
+    before_result_audits = len(await _audits(org_db, "operation.result"))
+    before_state = await _node_proxy_state(node["id"])
+
+    # The node now claims the very same apply *failed*. The operation is already
+    # terminal, so this is not a correction of anything — it is a late,
+    # contradicting report, and neither half of it may reach the route: not the
+    # failure it is asserting, and not a re-run of the success it cannot rewrite.
+    conflicted = await _report(
+        client, agent_token, claimed["id"], _agent_result_body(claimed, outcome="failed")
+    )
+    assert conflicted["status"] == "SUCCEEDED", "the terminal state must not be overwritten"
+    detail = (
+        await client.get(f"{API}/operations/{claimed['id']}", headers=owner["headers"])
+    ).json()
+    assert detail["error_code"] is None, "a rejected report writes no error code"
+    assert detail["result"]["outcome"] == "applied"
+
+    state = (await client.get(f"{API}/routes/{route_id}", headers=owner["headers"])).json()
+    assert state["config_state"] == "IN_SYNC"
+    assert state["last_apply_error"] == ""
+    assert state["removal_state"] is None
+    assert state["last_applied_at"] == before_route["last_applied_at"]
+    assert await _event_types(client, owner, "ROUTE_APPLY_FAILED") == []
+    assert len(await _event_types(client, owner, "ROUTE_APPLIED")) == before_events
+    assert await _audits(org_db, "route.apply_failed") == []
+    assert len(await _audits(org_db, "route.applied")) == before_audits
+    assert len(await _audits(org_db, "operation.result")) == before_result_audits
+    after_state = await _node_proxy_state(node["id"])
+    assert after_state["applied_bundle_id"] == before_state["applied_bundle_id"]
+    assert after_state.get("recovery_attempts", 0) == before_state.get("recovery_attempts", 0)
+
+
+async def test_a_late_result_for_an_expired_operation_cannot_fail_a_live_route(
+    client, owner, org_db
+):
+    """A report that arrives after its operation expired changes nothing at all."""
+    from app.tasks.maintenance import expire_operations
+
+    node, agent_token, container_id = await _proxy_ready_node(client, owner)
+    domain = await _verified_domain(client, owner, "late-result.example.com")
+    created = await _create_route(
+        client, owner, domain=domain, node_id=node["id"], container_id=container_id, enabled=True
+    )
+    route_id = created.json()["id"]
+
+    # The agent claims the apply and then goes silent: the operation is left to
+    # expire, which is the architecture's choice over re-running a possibly
+    # already-executed action.
+    beat = await _heartbeat(client, agent_token)
+    stale_claim: dict | None = None
+    for operation_id in beat["pending_operations"]:
+        claimed = await _claim(client, agent_token, operation_id)
+        if claimed["type"] == "nginx.apply":
+            stale_claim = claimed
+        else:
+            await _report(client, agent_token, operation_id, _agent_result_body(claimed))
+    assert stale_claim is not None, "enabling a route queues an apply"
+    await _mutate_in_system_scope(
+        Operation, stale_claim["id"], expires_at=datetime.now(UTC) - timedelta(minutes=1)
+    )
+    expired = await asyncio.to_thread(expire_operations)
+    assert expired["expired"] >= 1
+    assert (
+        await client.get(f"{API}/operations/{stale_claim['id']}", headers=owner["headers"])
+    ).json()["status"] == "EXPIRED"
+
+    # A *later* apply succeeds, so the route is live and confirmed while the old
+    # operation sits expired.
+    applied = await client.post(f"{API}/nodes/{node['id']}/proxy/apply", headers=owner["headers"])
+    assert applied.status_code == 200, applied.text
+    await _drain(client, agent_token)
+    before = (await client.get(f"{API}/routes/{route_id}", headers=owner["headers"])).json()
+    assert before["config_state"] == "IN_SYNC"
+    before_state = await _node_proxy_state(node["id"])
+
+    # The late report finally arrives, claiming failure for the expired operation.
+    late = await _report(
+        client, agent_token, stale_claim["id"], _agent_result_body(stale_claim, outcome="failed")
+    )
+    assert late["status"] == "EXPIRED", "a late report cannot revive an expired operation"
+
+    after = (await client.get(f"{API}/routes/{route_id}", headers=owner["headers"])).json()
+    assert after["config_state"] == "IN_SYNC", "a route applied since must not be marked failed"
+    assert after["last_apply_error"] == ""
+    assert after["last_applied_at"] == before["last_applied_at"]
+    assert await _event_types(client, owner, "ROUTE_APPLY_FAILED") == []
+    assert await _audits(org_db, "route.apply_failed") == []
+    after_state = await _node_proxy_state(node["id"])
+    assert after_state.get("recovery_attempts", 0) == before_state.get("recovery_attempts", 0)
+
+
+# --- 8. a node with no enabled routes is still reconciled -----------------------
+#
+# The defect this section pins: candidate discovery *was* "this node has an enabled
+# route". A node whose last route was disabled or deleted while the node was
+# unreachable therefore dropped out of the sweep for good — the removal was never
+# retried and nginx kept serving a name the platform already believed was gone.
+
+
+async def test_a_disabled_last_route_is_still_reconciled_when_the_node_returns(
+    client, owner, org_db
+):
+    """Disable the last route on an offline node, then let the reconciler converge."""
+    from app.services import proxy_service
+    from app.tasks.domain_routing import sweep_routes
+
+    node, agent_token, container_id = await _proxy_ready_node(client, owner)
+    domain = await _verified_domain(client, owner, "lastdisabled.example.com")
+    created = await _create_route(
+        client, owner, domain=domain, node_id=node["id"], container_id=container_id, enabled=True
+    )
+    route_id = created.json()["id"]
+    await _drain(client, agent_token)
+    live = (
+        await client.get(f"{API}/nodes/{node['id']}/proxy/status", headers=owner["headers"])
+    ).json()
+    assert live["drift"] is False
+
+    # The node goes away: nothing can be applied to it, and nothing is queued.
+    await _mutate_in_system_scope(Server, node["id"], status=ServerStatus.OFFLINE)
+
+    disabled = await client.post(f"{API}/routes/{route_id}/disable", headers=owner["headers"])
+    assert disabled.status_code == 200, disabled.text
+    assert disabled.json()["enabled"] is False
+    # Withdrawing a name must not depend on the node being reachable — and the
+    # route says which half of the removal it is in: requested, never confirmed.
+    assert disabled.json()["config_state"] == "STALE"
+    assert disabled.json()["removal_state"] == "REQUESTED"
+    assert "Removal requested" in disabled.json()["status_detail"]
+    assert "has not confirmed" in disabled.json()["status_detail"]
+    assert await _live_operations(client, owner, node["id"], op_type="nginx.apply") == []
+
+    proxy = (
+        await client.get(f"{API}/nodes/{node['id']}/proxy/status", headers=owner["headers"])
+    ).json()
+    assert proxy["eligible"] is False
+    assert proxy["drift"] is True
+    assert proxy["expected_bundle_id"] != proxy["live_bundle_id"]
+    assert proxy["route_enabled"] == 0
+    assert proxy["route_removal_pending"] == 1
+    assert await _event_types(client, owner, "ROUTE_REMOVAL_CONFIRMED") == []
+
+    # The sweep still *covers* the node — no enabled route remains, so the
+    # outstanding change is the only thing that can keep it in the candidate set —
+    # and it stays bounded while the node is unreachable.
+    counts = await asyncio.to_thread(sweep_routes)
+    assert counts["nodes"] >= 1
+    assert counts.get(proxy_service.RECONCILE_DEFERRED, 0) >= 1
+    assert counts.get(proxy_service.RECONCILE_RECOVERY_QUEUED, 0) == 0
+    assert await _live_operations(client, owner, node["id"], op_type="nginx.apply") == []
+    # A deferred tick is not a repair: nothing claims the difference was fixed.
+    assert await _event_types(client, owner, "NGINX_DRIFT_RECOVERED") == []
+
+    # The node comes back. The next tick queues exactly one apply — the empty
+    # bundle — and only the agent's own applied report confirms the removal.
+    await _heartbeat(client, agent_token)
+    counts = await asyncio.to_thread(sweep_routes)
+    assert counts.get(proxy_service.RECONCILE_RECOVERY_QUEUED, 0) == 1
+    handled = await _drain(client, agent_token)
+    applies = [claimed for op_type, claimed, _ in handled if op_type == "nginx.apply"]
+    assert len(applies) == 1, "one removal, one apply"
+    assert applies[-1]["params"]["bundle"]["manifest"] == []
+
+    state = (await client.get(f"{API}/routes/{route_id}", headers=owner["headers"])).json()
+    assert state["removal_state"] == "CONFIRMED"
+    assert state["removal_confirmed_at"]
+    assert "Removal confirmed" in state["status_detail"]
+    proxy = (
+        await client.get(f"{API}/nodes/{node['id']}/proxy/status", headers=owner["headers"])
+    ).json()
+    assert proxy["expected_bundle_id"] == proxy["live_bundle_id"]
+    assert proxy["drift"] is False
+    assert proxy["route_removal_pending"] == 0
+    assert len(await _event_types(client, owner, "ROUTE_REMOVAL_CONFIRMED")) == 1
+    assert len(await _audits(org_db, "route.removal_confirmed")) == 1
+
+    # Further ticks re-render the same excluded route without re-announcing it,
+    # and the node is no longer a special candidate once nothing is outstanding.
+    await asyncio.to_thread(sweep_routes)
+    await asyncio.to_thread(sweep_routes)
+    assert len(await _event_types(client, owner, "ROUTE_REMOVAL_CONFIRMED")) == 1
+    again = (await client.get(f"{API}/routes/{route_id}", headers=owner["headers"])).json()
+    assert again["removal_state"] == "CONFIRMED"
+    assert "reconcile_required" not in await _node_proxy_state(node["id"])
+
+
+async def test_deleting_the_last_route_reaches_the_node_again_after_recovery(client, owner):
+    """Delete the last route on an offline node: the node's own state remembers it."""
+    from app.services import proxy_service
+    from app.tasks.domain_routing import sweep_routes
+
+    node, agent_token, container_id = await _proxy_ready_node(client, owner)
+    domain = await _verified_domain(client, owner, "lastdeleted.example.com")
+    created = await _create_route(
+        client, owner, domain=domain, node_id=node["id"], container_id=container_id, enabled=True
+    )
+    route_id = created.json()["id"]
+    await _drain(client, agent_token)
+
+    await _mutate_in_system_scope(Server, node["id"], status=ServerStatus.OFFLINE)
+    deleted = await client.delete(f"{API}/routes/{route_id}", headers=owner["headers"])
+    assert deleted.status_code == 204, deleted.text
+
+    # The row is gone, so the *node's* state is the only thing that can remember
+    # the change — and it does, visibly, without claiming anything was applied.
+    assert await _live_operations(client, owner, node["id"], op_type="nginx.apply") == []
+    assert (await _node_proxy_state(node["id"]))["reconcile_required"] is True
+    proxy = (
+        await client.get(f"{API}/nodes/{node['id']}/proxy/status", headers=owner["headers"])
+    ).json()
+    assert proxy["route_total"] == 0
+    assert proxy["drift"] is True
+    assert proxy["expected_bundle_id"] != proxy["live_bundle_id"]
+
+    counts = await asyncio.to_thread(sweep_routes)
+    assert counts.get(proxy_service.RECONCILE_RECOVERY_QUEUED, 0) == 0
+    assert counts.get(proxy_service.RECONCILE_DEFERRED, 0) >= 1
+    assert await _live_operations(client, owner, node["id"], op_type="nginx.apply") == []
+
+    await _heartbeat(client, agent_token)
+    counts = await asyncio.to_thread(sweep_routes)
+    assert counts.get(proxy_service.RECONCILE_RECOVERY_QUEUED, 0) == 1
+    handled = await _drain(client, agent_token)
+    applies = [claimed for op_type, claimed, _ in handled if op_type == "nginx.apply"]
+    assert len(applies) == 1
+    assert applies[-1]["params"]["bundle"]["manifest"] == []
+
+    proxy = (
+        await client.get(f"{API}/nodes/{node['id']}/proxy/status", headers=owner["headers"])
+    ).json()
+    assert proxy["expected_bundle_id"] == proxy["live_bundle_id"]
+    assert proxy["drift"] is False
+    assert "reconcile_required" not in await _node_proxy_state(node["id"])
+
+
+# --- 9. a status read is a read --------------------------------------------------
+#
+# The defect this section pins: `GET /nodes/{id}/proxy/status` answered by
+# rendering the desired tree, and rendering *records* what it finds — so a plain
+# read could stamp `removal_requested_at` onto a route or mark it stale. The
+# transition happened where nobody asked for one and no operator action explained
+# it.
+
+
+async def _read_only_headers(client, owner) -> dict:
+    """Credentials for a Viewer, who holds the routing read permissions only."""
+    created = await client.post(
+        f"{API}/users",
+        headers=owner["headers"],
+        json={
+            "email": unique_email("status-reader"),
+            "password": "Viewer-Pass1!",
+            "full_name": "Status Reader",
+            "role_id": await _role_id(client, owner, "Viewer"),
+        },
+    )
+    assert created.status_code == 201, created.text
+    login = await client.post(
+        f"{API}/auth/login",
+        json={"email": created.json()["user"]["email"], "password": "Viewer-Pass1!"},
+    )
+    assert login.status_code == 200, login.text
+    return bearer(login.json()["access_token"], owner["active_organization_id"])
+
+
+async def test_a_status_read_does_not_request_a_removal(client, owner):
+    """A domain losing its proof is discovered by the sweep, never by a GET."""
+    from app.tasks.domain_routing import sweep_routes
+
+    node, agent_token, container_id = await _proxy_ready_node(client, owner)
+    domain = await _verified_domain(client, owner, "readonlyremoval.example.com")
+    created = await _create_route(
+        client, owner, domain=domain, node_id=node["id"], container_id=container_id, enabled=True
+    )
+    route_id = created.json()["id"]
+    await _drain(client, agent_token)
+    headers = await _read_only_headers(client, owner)
+
+    await _mutate_in_system_scope(Domain, domain["id"], status=DomainStatus.UNVERIFIED)
+    before_route = (await client.get(f"{API}/routes/{route_id}", headers=owner["headers"])).json()
+    assert before_route["config_state"] == "IN_SYNC"
+    assert before_route["removal_requested_at"] is None
+    before_state = await _node_proxy_state(node["id"])
+
+    for _ in range(3):
+        read = await client.get(f"{API}/nodes/{node['id']}/proxy/status", headers=headers)
+        assert read.status_code == 200, read.text
+
+    after_route = (await client.get(f"{API}/routes/{route_id}", headers=owner["headers"])).json()
+    assert after_route["config_state"] == "IN_SYNC"
+    assert after_route["status_detail"] == before_route["status_detail"]
+    assert after_route["removal_requested_at"] is None, "a GET must not open a removal"
+    assert after_route["removal_confirmed_at"] is None
+    assert after_route["removal_state"] is None
+    assert await _node_proxy_state(node["id"]) == before_state
+
+    # The bookkeeping still happens — where it belongs, in the sweep, which owns
+    # the transaction and the apply that follows.
+    counts = await asyncio.to_thread(sweep_routes)
+    assert counts["nodes"] >= 1
+    swept = (await client.get(f"{API}/routes/{route_id}", headers=owner["headers"])).json()
+    assert swept["config_state"] == "STALE"
+    assert swept["removal_state"] == "REQUESTED"
+    assert swept["removal_requested_at"]
+
+
+async def test_a_status_read_does_not_mark_a_route_stale(client, owner):
+    """A stopped upstream is discovered by the sweep, never by a GET."""
+    from app.tasks.domain_routing import sweep_routes
+
+    node, agent_token, container_id = await _proxy_ready_node(client, owner)
+    domain = await _verified_domain(client, owner, "readonlystale.example.com")
+    created = await _create_route(
+        client, owner, domain=domain, node_id=node["id"], container_id=container_id, enabled=True
+    )
+    route_id = created.json()["id"]
+    await _drain(client, agent_token)
+    headers = await _read_only_headers(client, owner)
+
+    await _mutate_in_system_scope(Container, container_id, status=ContainerStatus.EXITED)
+    before_route = (await client.get(f"{API}/routes/{route_id}", headers=owner["headers"])).json()
+    assert before_route["config_state"] == "IN_SYNC"
+    assert before_route["last_apply_error"] == ""
+    before_state = await _node_proxy_state(node["id"])
+
+    read = await client.get(f"{API}/nodes/{node['id']}/proxy/status", headers=headers)
+    assert read.status_code == 200, read.text
+
+    after_route = (await client.get(f"{API}/routes/{route_id}", headers=owner["headers"])).json()
+    assert after_route["config_state"] == "IN_SYNC", "a GET must not mark a route stale"
+    assert after_route["last_apply_error"] == ""
+    assert await _node_proxy_state(node["id"]) == before_state
+
+    counts = await asyncio.to_thread(sweep_routes)
+    assert counts["nodes"] >= 1
+    swept = (await client.get(f"{API}/routes/{route_id}", headers=owner["headers"])).json()
+    assert swept["config_state"] == "STALE"
+    assert swept["last_apply_error"] == "the upstream container is not running"
 
 
 async def test_a_converged_node_is_polled_on_an_interval_not_every_tick(client, owner):

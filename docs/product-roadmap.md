@@ -396,8 +396,26 @@ redirect, and nothing in the renderer can emit one (`CHECK (scheme = 'http')`, n
   audit row `route.removal_confirmed` carry the distinction into the trail and the
   UI, and the module registry's `DOMAIN_UNVERIFIED` wording no longer implies the
   routes stopped being served the moment the name changed hands.
+- **Reconciliation and result hardening (2026-10-11).** Two reproduced defects,
+  both about what the platform *claims*. (1) Candidate discovery filtered on "this
+  node has an enabled route", so a node whose last route was disabled or deleted
+  while it was unreachable dropped out of `sweep-routes` for good: the removal was
+  never retried and nginx kept serving a revoked name. A node now also qualifies
+  when its persisted `proxy_state` records an outstanding desired change, so
+  withdrawing a name no longer depends on the node being reachable — and the marker
+  is cleared by the apply that converges the node, so a converged node is not swept
+  for nothing. (2) The result endpoint ran the proxy side effects for *every*
+  report, including one for an already-terminal operation: a re-delivered
+  `nginx.apply` result doubled the route's events and audit rows, and a late result
+  for an expired operation could mark a route that a later successful apply had put
+  back in service as failed. Result handling now acts on the transition the service
+  actually performed (`ResultTransition`), so a duplicate, late or contradicting
+  report is a 200 no-op that writes nothing at all. `GET /nodes/{id}/proxy/status`
+  stopped mutating route-removal state too: rendering is split into a pure
+  computation (what the status read uses) and the recording step the apply and
+  reconcile paths own.
 - **Testing:** mock-DNS unit + integration suites (verification lifecycle, grace
-  window, cross-org flip), a 66-test HTTP integration suite for domains/routes/
+  window, cross-org flip), a 73-test HTTP integration suite for domains/routes/
   apply/rollback/drift/tenancy — including the ownership-transfer scenario with the
   previous owner's node (online, and separately offline-then-recovered) and the
   reconciler's bounds — render snapshots, agent contract tests (including the

@@ -18,12 +18,19 @@ The two transitions that matter for security are:
   200 no-op rather than an error, so an agent retrying a delivery it is unsure
   about cannot be told it did something wrong; a report against a *non-terminal*
   row it never claimed (``PENDING``) is a protocol violation and is refused.
+
+Every result transition is reported as a :class:`ResultTransition`, not inferred
+from the row afterwards: a terminal row looks the same whether this call moved it
+or it was already there, and the caller's side effects (route state, events,
+audits, notifications) must run for exactly one of those cases.
 """
 
 from __future__ import annotations
 
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from enum import StrEnum
 from typing import Any
 
 from fastapi import Request
@@ -424,6 +431,36 @@ async def _explain_failed_claim(
     raise Conflict("Operation is past its queue deadline", code="OPERATION_EXPIRED")
 
 
+class ResultTransition(StrEnum):
+    """What one reported result did to its operation row.
+
+    The caller's side effects — route states, events, audits, notifications — are
+    justified by the *transition*, never by the report having arrived. Returning
+    this rather than the bare row is what keeps a duplicate or late delivery from
+    being re-processed: an operation row that is already terminal looks exactly
+    like one this call just finished.
+    """
+
+    #: ``CLAIMED|RUNNING → SUCCEEDED|FAILED``: this report moved the operation.
+    TRANSITIONED = "TRANSITIONED"
+    #: The row was already terminal (a retried delivery, a late report): nothing
+    #: was written and nothing downstream should be.
+    DUPLICATE = "DUPLICATE"
+
+
+@dataclass(frozen=True, slots=True)
+class OperationResult:
+    """The row a report was accepted for, plus what the report actually did."""
+
+    operation: Operation
+    transition: ResultTransition
+
+    @property
+    def transitioned(self) -> bool:
+        """Whether this report earned its side effects."""
+        return self.transition is ResultTransition.TRANSITIONED
+
+
 async def record_result(
     db: AsyncSession,
     *,
@@ -433,12 +470,23 @@ async def record_result(
     output: dict[str, Any],
     error_code: str | None,
     error_message: str | None,
-) -> Operation:
+) -> OperationResult:
     """``CLAIMED|RUNNING → SUCCEEDED|FAILED``, guarded by ownership and expiry.
 
-    Terminal rows are returned unchanged (a duplicate delivery is a no-op, not an
-    error). A report against a still-``PENDING`` row means the agent reported on
-    something it never claimed, which is refused.
+    Returns the row *and the transition that was performed* (see
+    :class:`ResultTransition`), so the caller can distinguish:
+
+    * a report that moved the operation — side effects are justified;
+    * a duplicate delivery, or a late report for an operation that has already
+      reached a terminal state (``SUCCEEDED``/``FAILED``/``EXPIRED``/
+      ``CANCELLED``): a 200 no-op, deliberately *not* an error, because an agent
+      retrying a delivery it is unsure about did nothing wrong;
+    * a report against a still-``PENDING`` row — the agent reported on something
+      it never claimed, which is refused with a named conflict.
+
+    Only the first of those may produce events, audits or route changes; the
+    ``DUPLICATE`` case is reported back so the caller can say so without writing
+    anything at all.
     """
     now = _utcnow()
     target = OperationStatus.SUCCEEDED if ok else OperationStatus.FAILED
@@ -477,9 +525,9 @@ async def record_result(
             operation=str(operation_id),
             status=str(operation.status),
         )
-        return operation
+        return OperationResult(operation, ResultTransition.DUPLICATE)
     await db.flush()
-    return await get_operation(db, operation_id)
+    return OperationResult(await get_operation(db, operation_id), ResultTransition.TRANSITIONED)
 
 
 def _bounded(output: dict[str, Any]) -> dict[str, Any]:

@@ -319,8 +319,17 @@ async def report_operation_result(
     The report is *asserted*, never verified: the platform's guarantee is
     attribution and bounded blast radius, not proof of execution. A duplicate
     report against an already-terminal row is a no-op rather than an error.
+
+    The transition is what earns the side effects. A duplicate or late delivery
+    (including one for an operation that has since expired) is answered with the
+    operation's terminal state and writes **nothing** — not a route state, not an
+    event, not an audit row — because re-processing it would duplicate history and
+    could mark a route that a later successful apply put back in service as
+    failed. The operation transition and everything it implies share this
+    request's transaction, so a side effect that fails rolls the transition back
+    too and the agent's retry replays the whole thing consistently.
     """
-    operation = await operation_service.record_result(
+    result = await operation_service.record_result(
         db,
         server=_server,
         operation_id=operation_id,
@@ -329,24 +338,26 @@ async def report_operation_result(
         error_code=data.error_code,
         error_message=data.error_message,
     )
-    # Proxy operations additionally move their routes' ``config_state`` and the
-    # node's bounded proxy state. Attribution comes from the bundle manifest, so
-    # only routes this bundle actually carried are touched.
-    await proxy_service.handle_operation_result(db, operation)
-    await audit_service.record(
-        db,
-        None,
-        action="operation.result",
-        resource_type="operation",
-        resource_id=operation.id,
-        org_id=_server.org_id,
-        actor_email=f"agent:{_server.name}",
-        metadata={
-            "node_id": str(_server.id),
-            "type": str(operation.type),
-            "status": str(operation.status),
-        },
-    )
+    operation = result.operation
+    if result.transitioned:
+        # Proxy operations additionally move their routes' ``config_state`` and
+        # the node's bounded proxy state. Attribution comes from the bundle
+        # manifest, so only routes this bundle actually carried are touched.
+        await proxy_service.handle_operation_result(db, operation)
+        await audit_service.record(
+            db,
+            None,
+            action="operation.result",
+            resource_type="operation",
+            resource_id=operation.id,
+            org_id=_server.org_id,
+            actor_email=f"agent:{_server.name}",
+            metadata={
+                "node_id": str(_server.id),
+                "type": str(operation.type),
+                "status": str(operation.status),
+            },
+        )
     return AgentOperationResultOut(
         id=operation.id,
         type=operation.type,

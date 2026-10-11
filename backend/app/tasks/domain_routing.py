@@ -31,8 +31,9 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
+from typing import Any, cast
 
-from sqlalchemy import select, update
+from sqlalchemy import or_, select, update
 
 from app.core.errors import Conflict
 from app.core.logging import get_logger
@@ -494,11 +495,25 @@ def sweep_routes() -> dict[str, int]:
     from app.services import proxy_service
 
     async def _candidates() -> list[tuple[uuid.UUID, uuid.UUID]]:
+        """Nodes with routing work: an enabled route, or an unconfirmed change.
+
+        The second half is what keeps a node whose *last* route was disabled or
+        deleted eligible at all. Route rows cannot describe that node — it has
+        none — so a lost or expired apply would drop it out of reconciliation for
+        good and leave nginx serving a revoked hostname nobody ever retries. The
+        marker is cleared by the next sweep that finds the node converged, so a
+        node with nothing on it and nothing outstanding is still not swept.
+        """
+        from app.services.proxy_service import RECONCILE_REQUIRED_KEY
+
+        enabled = select(Route.node_id).where(Route.enabled.is_(True))
+        pending_change = cast(Any, Server.proxy_state[RECONCILE_REQUIRED_KEY]).astext == "true"
         async with sweep_session("task.sweep_routes.claim") as db:
             rows = (
                 await db.execute(
                     select(Server.id, Server.org_id)
-                    .where(Server.id.in_(select(Route.node_id).where(Route.enabled.is_(True))))
+                    .where(or_(Server.id.in_(enabled), pending_change))
+                    .order_by(Server.id.asc())
                     .limit(ROUTE_SWEEP_BATCH)
                 )
             ).all()

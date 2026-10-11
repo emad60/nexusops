@@ -1067,7 +1067,11 @@ test.describe("domains and routes — a real nginx node, a real URL", () => {
       });
       expect(recoveredResponse.status(), await recoveredResponse.text()).toBe(200);
       const recoveredWhileOffline = (await recoveredResponse.json()) as { items: EventBody[] };
-      expect(recoveredWhileOffline.items).toHaveLength(0);
+      // Scoped to this node: the feed is organization-wide, so a node from another
+      // scenario in the same organization may legitimately have been recovered.
+      expect(
+        recoveredWhileOffline.items.filter((event) => event.resource_id === nodeA?.id),
+      ).toHaveLength(0);
       expect(
         (await (
           await api.get(`/api/v1/routes/${routeA}`, { headers: orgA.headers })
@@ -1107,7 +1111,9 @@ test.describe("domains and routes — a real nginx node, a real URL", () => {
       });
       expect(recoveredResponseAfter.status(), await recoveredResponseAfter.text()).toBe(200);
       const recoveredEvents = (await recoveredResponseAfter.json()) as { items: EventBody[] };
-      expect(recoveredEvents.items.length).toBeGreaterThan(0);
+      expect(recoveredEvents.items.filter((event) => event.resource_id === nodeA?.id)).toHaveLength(
+        1,
+      );
 
       // Exactly one removal was processed by the returning agent — not one per
       // sweep tick, and not zero: the reconciler queues a single apply and the
@@ -1126,7 +1132,7 @@ test.describe("domains and routes — a real nginx node, a real URL", () => {
           params: { types: "ROUTE_REMOVAL_CONFIRMED" },
         })
       ).json()) as { items: EventBody[] };
-      expect(confirmedEvents.items).toHaveLength(1);
+      expect(confirmedEvents.items.filter((event) => event.resource_id === routeA)).toHaveLength(1);
       expect(
         (await (
           await api.get(`/api/v1/nodes/${nodeA.id}/proxy/status`, { headers: orgA.headers })
@@ -1265,6 +1271,250 @@ test.describe("domains and routes — a real nginx node, a real URL", () => {
         if (tenant && node) {
           await api.delete(`/api/v1/nodes/${node.id}`, { headers: tenant.headers }).catch(() => undefined);
         }
+      }
+    }
+  });
+
+  /**
+   * The last route of an unreachable node — a withdrawal that still has to happen.
+   *
+   * Disabling the only route leaves the node with an *empty* desired
+   * configuration, and with no route row left for the reconciler to discover it
+   * by. If the node is unreachable when the operator withdraws the name, the
+   * request must still be recorded (a node being down cannot block taking a name
+   * down) and the node must stay eligible for reconciliation — otherwise the
+   * removal is retried by nothing and nginx keeps answering for a name the
+   * dashboard says is gone.
+   *
+   * What it has to show, on the wire:
+   *
+   *   the route serves the node's upstream before anything is withdrawn;
+   *   with only the agent stopped, the node goes OFFLINE while nginx keeps serving;
+   *   the disable is accepted, and the route reads removal *requested*, not removed;
+   *   the node reads drifted with nothing queued and nothing announced as repaired;
+   *   sweep ticks while it is unreachable still queue nothing, and the name answers;
+   *   the agent returns, exactly one empty-bundle apply is processed, and the old
+   *   Host then gets the managed 444 — with the removal confirmed only from that apply.
+   */
+  test("the last route of an offline node is removed when the agent returns", async ({
+    api,
+    apiToken,
+  }) => {
+    test.setTimeout(600_000);
+
+    const stamp = Date.now();
+    const domainName = DNS_ZONE;
+    const nodeName = `e2e-lastroute-${stamp}`;
+    const nodeContainer = `nexusops-e2e-lastroute-${stamp}`;
+    const appName = `nexusops-e2e-lastroute-app-${stamp}`;
+    const marker = `NEXUSOPS_E2E_LASTROUTE_${stamp}`;
+    const tenant: Tenant = { id: apiToken.orgId, headers: { "X-Org-Id": apiToken.orgId } };
+
+    const zone = await dnsZone();
+    test.skip(zone === null, `mock DNS control API is not reachable at ${DNS_CONTROL}`);
+    test.skip(zone !== null && zone !== DNS_ZONE, `mock DNS serves ${zone}, expected ${DNS_ZONE}`);
+
+    let node: NodeHarness | null = null;
+    let routeId: string | null = null;
+    let domainId: string | null = null;
+    let recordName = `_nexusops.${domainName}`;
+
+    try {
+      node = await startNode(api, {
+        tenant,
+        name: nodeName,
+        container: nodeContainer,
+        app: appName,
+        marker,
+        // The platform's own 30 s offline threshold, so stopping the agent flips
+        // the node within the journey's patience.
+        offlineAfterSeconds: 30,
+      });
+      const proven = await proveName(api, tenant, domainName);
+      domainId = proven.domainId;
+      recordName = proven.recordName;
+
+      const created = await api.post("/api/v1/routes", {
+        headers: tenant.headers,
+        data: {
+          domain_id: domainId,
+          hostname: domainName,
+          path: "/",
+          node_id: node.id,
+          container_id: node.targetId,
+          port: node.upstreamPort,
+          enabled: true,
+        },
+      });
+      expect(created.status(), await created.text()).toBe(201);
+      routeId = ((await created.json()) as RouteBody).id;
+      await expect
+        .poll(
+          async () => {
+            const res = await api.get(`/api/v1/routes/${routeId}`, { headers: tenant.headers });
+            if (!res.ok()) return `http-${res.status()}`;
+            return ((await res.json()) as RouteBody).config_state;
+          },
+          { timeout: 120_000, intervals: [2_000, 3_000] },
+        )
+        .toBe("IN_SYNC");
+      await expect
+        .poll(() => httpGet("http://127.0.0.1/", domainName).body, {
+          timeout: 30_000,
+          intervals: [1_000, 2_000],
+        })
+        .toContain(marker);
+
+      // Only the management agent goes away; nginx keeps serving the name.
+      stopAgent(nodeContainer);
+      await expect
+        .poll(
+          async () => {
+            const res = await api.get(`/api/v1/nodes/${node?.id}`, { headers: tenant.headers });
+            if (!res.ok()) return `http-${res.status()}`;
+            return ((await res.json()) as NodeDetail).status;
+          },
+          { timeout: 150_000, intervals: [3_000, 5_000] },
+        )
+        .toBe("OFFLINE");
+      expect(
+        httpGet("http://127.0.0.1/", domainName).body,
+        "nginx must keep serving while only the agent is stopped",
+      ).toContain(marker);
+
+      // The operator withdraws the last route. It is accepted and recorded — a
+      // node that cannot be reached must not be able to hold a name hostage — and
+      // it says which half of the removal it is in.
+      const disabled = await api.post(`/api/v1/routes/${routeId}/disable`, {
+        headers: tenant.headers,
+      });
+      expect(disabled.status(), await disabled.text()).toBe(200);
+      const disabledBody = (await disabled.json()) as RouteBody;
+      expect(disabledBody.enabled).toBe(false);
+      expect(disabledBody.config_state).toBe("STALE");
+      expect(disabledBody.removal_state).toBe("REQUESTED");
+      expect(disabledBody.removal_confirmed_at).toBeNull();
+      expect(disabledBody.status_detail).toContain("Removal requested");
+      expect(disabledBody.status_detail).toContain("may still be serving");
+
+      const statusWhileOffline = (await (
+        await api.get(`/api/v1/nodes/${node.id}/proxy/status`, { headers: tenant.headers })
+      ).json()) as ProxyStatusBody;
+      expect(statusWhileOffline.eligible).toBe(false);
+      expect(statusWhileOffline.drift).toBe(true);
+      expect(statusWhileOffline.expected_bundle_id).not.toBe(statusWhileOffline.live_bundle_id);
+      expect(statusWhileOffline.route_total).toBe(1);
+      expect(statusWhileOffline.route_enabled).toBe(0);
+      expect(statusWhileOffline.route_removal_pending).toBe(1);
+      expect(await liveApplies(api, tenant, node.id)).toHaveLength(0);
+      expect(await finishedRemovalApplies(api, tenant, node.id)).toHaveLength(0);
+      // Nothing has been applied, so nothing may claim the name stopped answering.
+      expect(httpGet("http://127.0.0.1/", domainName).body).toContain(marker);
+
+      // Sweep ticks (15 s on this stack) while the node is unreachable: the node is
+      // still covered — that is the whole fix — and still nothing is queued for it.
+      await new Promise((resolve) => setTimeout(resolve, 35_000));
+      expect(await liveApplies(api, tenant, node.id)).toHaveLength(0);
+      // Scoped to *this* node: the feed is organization-wide, so an earlier
+      // scenario in the same organization may legitimately have recovered a node
+      // of its own. What must be absent is a repair claimed for this one.
+      const recoveredWhileOffline = (await (
+        await api.get("/api/v1/events", {
+          headers: tenant.headers,
+          params: { types: "NGINX_DRIFT_RECOVERED" },
+        })
+      ).json()) as { items: EventBody[] };
+      expect(
+        recoveredWhileOffline.items.filter((event) => event.resource_id === node.id),
+      ).toHaveLength(0);
+      const stillRequested = (await (
+        await api.get(`/api/v1/routes/${routeId}`, { headers: tenant.headers })
+      ).json()) as RouteBody;
+      expect(stillRequested.removal_state).toBe("REQUESTED");
+      expect(stillRequested.removal_confirmed_at).toBeNull();
+
+      // The agent returns. The next tick queues exactly one apply — the empty
+      // bundle — and the node confirms the removal with what it applied.
+      startAgent(nodeContainer);
+      await expect
+        .poll(
+          async () => {
+            const res = await api.get(`/api/v1/nodes/${node?.id}`, { headers: tenant.headers });
+            if (!res.ok()) return `http-${res.status()}`;
+            return ((await res.json()) as NodeDetail).status;
+          },
+          { timeout: 120_000, intervals: [2_000, 3_000] },
+        )
+        .toBe("ONLINE");
+      await expect
+        .poll(
+          async () => {
+            const res = await api.get(`/api/v1/nodes/${node?.id}/proxy/status`, {
+              headers: tenant.headers,
+            });
+            if (!res.ok()) return `http-${res.status()}`;
+            const body = (await res.json()) as ProxyStatusBody;
+            return body.expected_bundle_id === body.live_bundle_id ? "converged" : "drifted";
+          },
+          { timeout: 180_000, intervals: [2_000, 3_000] },
+        )
+        .toBe("converged");
+
+      const removalApplies = await finishedRemovalApplies(api, tenant, node.id);
+      expect(removalApplies).toHaveLength(1);
+      const confirmed = (await (
+        await api.get(`/api/v1/routes/${routeId}`, { headers: tenant.headers })
+      ).json()) as RouteBody;
+      expect(confirmed.removal_state).toBe("CONFIRMED");
+      expect(confirmed.removal_confirmed_at).not.toBeNull();
+      expect(confirmed.status_detail).toContain("Removal confirmed");
+      const confirmedEvents = (await (
+        await api.get("/api/v1/events", {
+          headers: tenant.headers,
+          params: { types: "ROUTE_REMOVAL_CONFIRMED" },
+        })
+      ).json()) as { items: EventBody[] };
+      expect(
+        confirmedEvents.items.filter((event) => event.resource_id === routeId),
+      ).toHaveLength(1);
+      expect(
+        (await (
+          await api.get(`/api/v1/nodes/${node.id}/proxy/status`, { headers: tenant.headers })
+        ).json()) as ProxyStatusBody,
+      ).toMatchObject({ route_removal_pending: 0 });
+
+      // The fragment is really gone, and the name really stopped answering.
+      const routesDir = docker(["exec", nodeContainer, "ls", "/etc/nexusops/nginx/routes.d"]);
+      expect(
+        routesDir.split("\n").filter((line) => /^r-[0-9a-f]{32}\.conf$/.test(line.trim())),
+      ).toHaveLength(0);
+      const oldHost = httpGet("http://127.0.0.1/", domainName);
+      expect(oldHost.body).not.toContain(marker);
+      expect(oldHost.status === 0 || oldHost.status === 444).toBe(true);
+    } finally {
+      if (routeId) {
+        await api
+          .delete(`/api/v1/routes/${routeId}`, { headers: tenant.headers })
+          .catch(() => undefined);
+      }
+      if (domainId) {
+        await api
+          .delete(`/api/v1/domains/${domainId}`, { headers: tenant.headers })
+          .catch(() => undefined);
+      }
+      await dnsClear(recordName).catch(() => undefined);
+      try {
+        docker(["rm", "-f", nodeContainer]);
+      } catch {
+        /* already gone */
+      }
+      try {
+        docker(["rm", "-f", appName]);
+      } catch {
+        /* already gone */
+      }
+      if (node) {
+        await api.delete(`/api/v1/nodes/${node.id}`, { headers: tenant.headers }).catch(() => undefined);
       }
     }
   });

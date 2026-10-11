@@ -732,7 +732,7 @@ export interface NodeProxyStatusOut {
   route_in_sync: number;
   route_stale: number;
   route_failed: number;
-  /** Enabled routes out of the desired configuration whose removal is unconfirmed. */
+  /** Routes out of the desired configuration whose removal is unconfirmed. */
   route_removal_pending: number;
   last_applied_at: string | null;
   last_apply_error: string;

@@ -1,7 +1,8 @@
 # Domain Routing — NexusOps
 
 **Status:** Implemented for HTTP routing (Phase 4, 2026-10-10; revocation and
-reconciliation hardened 2026-10-10). **No certificate issuance, no TLS listener and
+reconciliation hardened 2026-10-10; reconciliation candidate discovery and
+result handling hardened 2026-10-11). **No certificate issuance, no TLS listener and
 no HTTPS redirect exist yet** — every certificate-related shape in this document is
 **Phase 5 target design**, labelled as such below, and post-deploy route sync remains
 Phase 6 target design.
@@ -477,6 +478,19 @@ misreporting, it is running the wrong tree — so:
    from a queued or attempted apply. A failed apply leaves the previous known-good
    configuration live (rollback, §7) and the route `FAILED`/`STALE` with the reason.
 
+**What the sweep looks at.** A node is a candidate when it has an enabled route
+**or** when its persisted `proxy_state` records an outstanding desired change
+(`reconcile_required`, set when a route is disabled or deleted and the apply could
+not be dispatched — the node was offline, its capability stale, its listeners in
+conflict). Route rows alone cannot describe a node whose *last* route was
+withdrawn: it has none, so a lost, refused or expired apply would drop it out of
+the sweep for good while nginx kept serving a name the platform already believed
+was gone. The marker is cleared by the apply that converges the node, or by a
+sweep that proves there is nothing left to apply — so it is not a second,
+unbounded candidate source: a node with nothing on it and nothing outstanding is
+not swept, and one apply in flight plus the failure backoff bound it exactly as
+before.
+
 The database is the only source of truth for desired state; out-of-band node edits
 are corrected by step 2 rather than tolerated.
 
@@ -487,7 +501,7 @@ know by itself:
 
 | Half | Written by | What it means | Wire |
 |---|---|---|---|
-| **Requested** | the renderer (a route left the desired tree) and the cross-org release path | this route must stop being served; **the node may still be running the configuration that serves it** | `route.removal_state = REQUESTED`, `status_detail` "Removal requested — … ; the node has not confirmed the removal, so it may still be serving it", `node.route_removal_pending` counts it, event `ROUTE_REMOVAL_REQUESTED` |
+| **Requested** | the renderer (a route left the desired tree), the cross-org release path, and a route being disabled | this route must stop being served; **the node may still be running the configuration that serves it** | `route.removal_state = REQUESTED`, `status_detail` "Removal requested — … ; the node has not confirmed the removal, so it may still be serving it", `node.route_removal_pending` counts it, event `ROUTE_REMOVAL_REQUESTED` |
 | **Confirmed** | the apply-result handler, and nothing else | an agent reported an *applied* bundle whose manifest omits this route, so the node's live configuration no longer contains it | `route.removal_state = CONFIRMED`, `status_detail` "Removal confirmed — … ; the node applied a configuration without this route", the count drops, event `ROUTE_REMOVAL_CONFIRMED` + audit `route.removal_confirmed` |
 
 Consequences the implementation is built around:
@@ -496,6 +510,13 @@ Consequences the implementation is built around:
   removal column, so the route stays `REQUESTED` and `route_removal_pending` stays
   non-zero until an agent actually applies. The name being served by a node the
   platform cannot reach is a *visible* state, not an assumption.
+- **Withdrawing a name does not depend on the node being reachable.** Disabling or
+  deleting a route is a statement about the *desired* configuration, so it is
+  recorded even when no apply can be dispatched, and the route reads as
+  `REQUESTED` from that moment. A deleted route has no row to carry it, so the
+  *node* carries it: `reconcile_required` is what keeps a node with no routes left
+  in the reconcile sweep until an agent applies the configuration that omits the
+  route. Confirmation is still only ever written by an applied bundle.
 - **Exactly once, and only from the report.** Confirmation is recorded from the
   agent-echoed manifest of a successful apply; a failed or rolled-back apply
   produces none. A route that is already confirmed is not confirmed again, however
@@ -617,6 +638,17 @@ returns, **exactly one** apply with an empty manifest is processed (asserted fro
 the operations API, not inferred), the fragment is gone from disk, the old Host gets
 the managed 444, the removal is then reported confirmed, the new owner serves the
 name from its own node, and neither organization can read or modify the other's rows.
+
+**Withdrawing the last route of an offline node is proven the same way.** A third
+scenario disables the *only* route of a node whose agent has been stopped. The
+disable is accepted and the route reads removal *requested* while the node is
+unreachable — the platform cannot take a name down only when it can reach the node —
+and the node, left with an empty desired configuration and no route row at all to be
+discovered by, stays in the reconcile sweep. Ticks while it is away queue nothing and
+announce no repair, the old Host still reaches the upstream, and when the agent
+returns exactly one empty-bundle apply is processed: the fragment disappears from
+disk, the Host then gets the managed 444, and the removal is reported confirmed from
+that apply and no earlier.
 
 ## 12. API surface, permissions, audit
 

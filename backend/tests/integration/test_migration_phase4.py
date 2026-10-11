@@ -26,14 +26,24 @@ import uuid
 import psycopg
 import pytest
 
-from .test_migration_phase2 import Statement, _exec, _rows, _run_migration
+from .test_migration_phase2 import (
+    Statement,
+    _exec,
+    _rows,
+    _run_downgrade,
+    _run_migration,
+)
 
 pytestmark = pytest.mark.integration
 
 #: The Phase 3 head. Everything below is written in that schema.
 PRE_PHASE4_REVISION = "a1b2c3d4e5f6"
-#: This migration's own revision — the Phase 4 head.
+#: The Phase 4 revision — the schema the Phase 4.2 migration builds on.
 PHASE4_REVISION = "f4a5b6c7d8e9"
+#: The Phase 4.2 revision — the head this module pins.
+PHASE42_REVISION = "b7c8d9e0f1a2"
+#: The removal-state columns Phase 4.2 adds (requested vs confirmed).
+_REMOVAL_COLUMNS = {"removal_requested_at", "removal_confirmed_at"}
 
 ORG = "33333333-3333-3333-3333-333333333333"
 OTHER_ORG = "44444444-4444-4444-4444-444444444444"
@@ -333,3 +343,122 @@ def test_the_phase4_revision_is_in_the_chain_and_does_not_fork_it() -> None:
     heads = script.get_heads()
     assert len(heads) == 1, f"multiple alembic heads: {heads}"
     assert any(rev.revision == PHASE4_REVISION for rev in script.walk_revisions("base", "heads"))
+
+
+# --- 5. the Phase 4.2 removal-state columns ---------------------------------------
+
+
+def _columns(database: str, table: str) -> set[str]:
+    """The column names of one table, read from the catalogue."""
+    return {
+        str(row[0])
+        for row in _rows(
+            database,
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_schema = 'public' AND table_name = %s",
+            (table,),
+        )
+    }
+
+
+def _seed_one_route(database: str, *, hostname: str) -> str:
+    """A verified domain and an enabled route in the Phase 4 schema."""
+    domain_id, route_id = str(uuid.uuid4()), str(uuid.uuid4())
+    _exec(
+        database,
+        [
+            (
+                "INSERT INTO domains "
+                "(id, org_id, name, status, verification_token, ns_snapshot, last_error, "
+                " dns_reachability) "
+                "VALUES (%s, %s, %s, 'VERIFIED', 'nxs-verify-token', '[]', '', '{}')",
+                (domain_id, ORG, hostname),
+            ),
+            (
+                "INSERT INTO routes "
+                "(id, org_id, domain_id, hostname, path, node_id, port, scheme, headers, enabled, "
+                " config_state, monitor_optout, last_apply_error) "
+                "VALUES (%s, %s, %s, %s, '/', %s, 8080, 'http', '[]', true, 'IN_SYNC', false, '')",
+                (route_id, ORG, domain_id, hostname, NODE),
+            ),
+        ],
+    )
+    return route_id
+
+
+def test_route_removal_states_upgrade_downgrade_and_return(scratch_database: str) -> None:
+    """Phase 4.2 is reversible, and neither direction disturbs existing rows.
+
+    The migration is additive and nullable, so the promises worth testing are
+    that the downgrade really removes what the upgrade added — a downgrade that
+    silently keeps a column leaves the schema at a revision no revision
+    describes — and that the route rows the routing design depends on survive
+    both directions.
+    """
+    # A populated instance, built in the schema it was written for and then
+    # migrated forward: Phase 3 data, the Phase 4 head, and one routed name.
+    _run_migration(scratch_database, PRE_PHASE4_REVISION)
+    _seed_phase3(scratch_database)
+    _run_migration(scratch_database, PHASE4_REVISION)
+    assert not (_REMOVAL_COLUMNS & _columns(scratch_database, "routes"))
+    route_id = _seed_one_route(scratch_database, hostname="removal.example.com")
+
+    _run_migration(scratch_database, PHASE42_REVISION)
+    assert _REMOVAL_COLUMNS <= _columns(scratch_database, "routes")
+    # The pre-existing route survives the upgrade, reading "no removal in flight".
+    rows = _rows(
+        scratch_database,
+        "SELECT id, enabled, config_state, removal_requested_at, removal_confirmed_at FROM routes",
+    )
+    assert len(rows) == 1
+    row = rows[0]
+    assert str(row[0]) == route_id
+    assert row[1] is True
+    assert row[2] == "IN_SYNC"
+    assert row[3] is None
+    assert row[4] is None
+
+    # The new columns are writable facts, not decorations.
+    _exec(
+        scratch_database,
+        [
+            (
+                "UPDATE routes SET removal_requested_at = now(), config_state = 'STALE' "
+                "WHERE id = %s",
+                (route_id,),
+            )
+        ],
+    )
+
+    _run_downgrade(scratch_database, PHASE4_REVISION)
+    assert not (_REMOVAL_COLUMNS & _columns(scratch_database, "routes"))
+    # ...and the route itself is untouched: dropping the columns must not drop the
+    # rows every other routing guarantee hangs off.
+    kept = _rows(scratch_database, "SELECT id, enabled FROM routes WHERE id = %s", (route_id,))
+    assert len(kept) == 1
+    assert str(kept[0][0]) == route_id
+    assert kept[0][1] is True
+
+    _run_migration(scratch_database, PHASE42_REVISION)
+    assert _REMOVAL_COLUMNS <= _columns(scratch_database, "routes")
+    # Re-added empty by design: the removal episodes a downgrade discarded cannot
+    # be reconstructed, and inventing them would be worse than losing them.
+    restored = _rows(
+        scratch_database,
+        "SELECT removal_requested_at, removal_confirmed_at FROM routes WHERE id = %s",
+        (route_id,),
+    )
+    assert restored == [(None, None)]
+
+
+def test_the_phase42_revision_is_the_head_of_one_chain() -> None:
+    """CI pins the actual head; Phase 4.2 sits directly on the Phase 4 head."""
+    from alembic.script import ScriptDirectory
+
+    from .test_migration_phase2 import _alembic_config
+
+    script = ScriptDirectory.from_config(_alembic_config("postgres"))
+    heads = script.get_heads()
+    assert heads == [PHASE42_REVISION], f"unexpected alembic heads: {heads}"
+    revision = script.get_revision(PHASE42_REVISION)
+    assert revision.down_revision == PHASE4_REVISION

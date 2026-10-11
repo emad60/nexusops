@@ -173,9 +173,11 @@ class NodeProxyStatusOut(OutModel):
     route_in_sync: int = 0
     route_stale: int = 0
     route_failed: int = 0
-    #: Enabled routes that are out of the desired configuration but whose removal
-    #: no node has confirmed. Non-zero means a node may still be running the
-    #: configuration that serves them — never that they are gone.
+    #: Routes that are out of the desired configuration but whose removal no node
+    #: has confirmed — disabled ones included, since a disabled route is exactly
+    #: as likely to still be served by a node that could not take the apply.
+    #: Non-zero means a node may still be running the configuration that serves
+    #: them — never that they are gone.
     route_removal_pending: int = 0
     last_applied_at: datetime | None = None
     last_apply_error: str = ""

@@ -24,6 +24,7 @@ Nothing here writes configuration text anywhere except into operation params
 from __future__ import annotations
 
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -92,6 +93,14 @@ RECONCILE_DEFERRED = "deferred"
 RECONCILE_BLOCKED = "blocked"
 RECONCILE_NO_CHANGE = "no_change"
 RECONCILE_IDLE = "idle"
+
+#: ``proxy_state`` key recording that the node's desired configuration changed and
+#: no apply has confirmed it yet. This is what keeps a node whose **last** route
+#: was disabled or deleted eligible for reconciliation at all: with zero enabled
+#: routes there is no route row left to discover it by, so a lost or expired apply
+#: would otherwise drop the node out of the sweep for good — leaving nginx serving
+#: a revoked hostname nobody ever retries.
+RECONCILE_REQUIRED_KEY = "reconcile_required"
 
 #: Host ports the proxy owns on a node. A container publishing on one of these
 #: can never be routed to: nginx needs them for the routes themselves.
@@ -350,49 +359,77 @@ async def usable_upstreams(db: AsyncSession, *, node_id: uuid.UUID) -> list[Upst
 
 
 # --- rendering ----------------------------------------------------------------
+#
+# Computing the desired tree is a **pure read**; recording what it says is a
+# separate step. The split is not cosmetic: the apply and reconcile paths own a
+# transaction and must persist what rendering discovered, while the proxy-status
+# endpoint is a `GET` and must not move a single route's removal state on the way
+# to answering.
+
+#: A route left the desired tree: the node still has to be told to drop it.
+EXCLUSION_REMOVAL = "removal"
+#: A route stays in the database but cannot be rendered right now (no upstream, a
+#: stopped container, …): there is nothing to remove, and nothing to serve.
+EXCLUSION_UNRESOLVED = "unresolved"
 
 
-async def _resolved_for(db: AsyncSession, route: Route) -> ResolvedRoute | None:
-    """Flatten one enabled route into renderer input, or ``None`` if unrenderable.
+@dataclass(frozen=True, slots=True)
+class RouteExclusion:
+    """One route the desired tree does not carry, and why — not yet persisted."""
 
-    A route whose container or published port disappeared is *excluded* and marked
-    stale — never rendered with a guessed upstream. That is what keeps a removed
-    container from becoming traffic to the wrong address.
+    route: Route
+    kind: str
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
+class DesiredTree:
+    """What a node *should* be running: the bundle, its routes and its exclusions."""
+
+    bundle: NginxBundle
+    routes: list[Route]
+    exclusions: list[RouteExclusion]
+
+    @property
+    def bundle_id(self) -> str:
+        return self.bundle.bundle_id
+
+
+async def _resolve_for_render(db: AsyncSession, route: Route) -> tuple[ResolvedRoute | None, str]:
+    """Renderer input for one route — or the reason it cannot be rendered.
+
+    A route whose container or published port disappeared is *excluded*, never
+    rendered with a guessed upstream. That is what keeps a removed container from
+    becoming traffic to the wrong address. Pure: it reports, it does not write.
     """
     if route.container_id is None:
-        await _mark_route_stale(db, route, "the route has no upstream container")
-        return None
+        return None, "the route has no upstream container"
     container = await db.get(Container, route.container_id)
     if container is None:
-        await _mark_route_stale(db, route, "the upstream container no longer exists")
-        return None
+        return None, "the upstream container no longer exists"
     if container.server_id != route.node_id:
-        await _mark_route_stale(db, route, "the upstream container is on a different node")
-        return None
+        return None, "the upstream container is on a different node"
     bindings = {port.host_port: port for port in usable_upstream_ports(container)}
     binding = bindings.get(route.port)
     if binding is None:
-        await _mark_route_stale(
-            db,
-            route,
-            f"port {route.port} is no longer published for this container",
-        )
-        return None
+        return None, f"port {route.port} is no longer published for this container"
     if container.status != ContainerStatus.RUNNING:
         # A stopped container has no live upstream; the route keeps its records
         # but leaves the rendered tree until it runs again.
-        await _mark_route_stale(db, route, "the upstream container is not running")
-        return None
-    return ResolvedRoute(
-        id=str(route.id),
-        hostname=route.hostname,
-        path=route.path,
-        upstream_host=binding.upstream_host,
-        upstream_port=binding.host_port,
-        headers=tuple(route.headers or ()),
-        rate_limit=dict(route.rate_limit) if route.rate_limit else None,
-        redirect=dict(route.redirect) if route.redirect else None,
-        metadata={"node_id": str(route.node_id), "domain_id": str(route.domain_id)},
+        return None, "the upstream container is not running"
+    return (
+        ResolvedRoute(
+            id=str(route.id),
+            hostname=route.hostname,
+            path=route.path,
+            upstream_host=binding.upstream_host,
+            upstream_port=binding.host_port,
+            headers=tuple(route.headers or ()),
+            rate_limit=dict(route.rate_limit) if route.rate_limit else None,
+            redirect=dict(route.redirect) if route.redirect else None,
+            metadata={"node_id": str(route.node_id), "domain_id": str(route.domain_id)},
+        ),
+        "",
     )
 
 
@@ -470,6 +507,12 @@ async def _confirm_pending_removals(
     an unrelated reason (a stopped upstream, say) keeps its own explanation
     instead of being relabelled as a removal.
 
+    ``enabled`` is deliberately not part of the filter: a *disabled* route has
+    left the desired tree just as surely as one whose domain stopped serving, and
+    the requested-at timestamp — not the enabled flag — is what says a removal is
+    in flight. The timestamp is also what keeps a route excluded for an unrelated
+    reason out of this list.
+
     Returns the rows so the caller can audit and announce them.
     """
     rows = (
@@ -477,7 +520,6 @@ async def _confirm_pending_removals(
             await db.execute(
                 select(Route).where(
                     Route.node_id == node.id,
-                    Route.enabled.is_(True),
                     Route.removal_requested_at.is_not(None),
                     Route.removal_confirmed_at.is_(None),
                 )
@@ -517,13 +559,15 @@ async def _mark_enabled_routes_stale(db: AsyncSession, *, node: Server, detail: 
         await _mark_route_stale(db, route, detail)
 
 
-async def render_for_node(db: AsyncSession, *, node: Server) -> tuple[NginxBundle, list[Route]]:
-    """Render the complete desired state for *node* from the database.
+async def compute_desired(db: AsyncSession, *, node: Server) -> DesiredTree:
+    """Compute the complete desired state for *node*, **recording nothing**.
 
     Only **enabled routes on verified domains** are eligible, which is the single
     place that rule is applied — the renderer never decides ownership. Routes that
-    cannot currently be rendered are excluded and marked stale as a side effect;
-    the caller owns the transaction.
+    cannot be rendered are reported as exclusions with the reason, and a route
+    whose domain no longer serves is reported as a removal; persisting any of that
+    is :func:`render_for_node`'s job, so a caller that only needs to *know* the
+    answer (the status endpoint) can ask without writing.
     """
     rows = (
         await db.execute(
@@ -535,27 +579,26 @@ async def render_for_node(db: AsyncSession, *, node: Server) -> tuple[NginxBundl
     ).all()
     resolved: list[ResolvedRoute] = []
     included: list[Route] = []
+    exclusions: list[RouteExclusion] = []
     for route, domain in rows:
         status = DomainStatus(domain.status)
         if status is not DomainStatus.VERIFIED:
             # Domain lost its proof (or never had it): the route is pulled from
-            # the rendered tree immediately and labelled as a removal the node has
-            # not confirmed. It is not "stale" in the vague sense any more — it is
-            # excluded, and whether it still answers is a fact only the node has.
-            await mark_removal_requested(
-                db, route=route, reason=f"the domain is {status.value.lower()}"
+            # the rendered tree and labelled a removal the node has not confirmed.
+            # It is not "stale" in the vague sense any more — it is excluded, and
+            # whether it still answers is a fact only the node has.
+            exclusions.append(
+                RouteExclusion(
+                    route=route,
+                    kind=EXCLUSION_REMOVAL,
+                    reason=f"the domain is {status.value.lower()}",
+                )
             )
             continue
-        item = await _resolved_for(db, route)
+        item, reason = await _resolve_for_render(db, route)
         if item is None:
+            exclusions.append(RouteExclusion(route=route, kind=EXCLUSION_UNRESOLVED, reason=reason))
             continue
-        if route.removal_requested_at is not None or route.removal_confirmed_at is not None:
-            # Desired again, so the removal episode is over: the markers clear here
-            # while ``config_state`` still reports that the apply which puts the
-            # route back in service has not happened yet.
-            route.removal_requested_at = None
-            route.removal_confirmed_at = None
-            await db.flush()
         resolved.append(item)
         included.append(route)
 
@@ -570,18 +613,56 @@ async def render_for_node(db: AsyncSession, *, node: Server) -> tuple[NginxBundl
             code="ROUTE_RENDER_FAILED",
             details={"reason": str(exc)[:200]},
         ) from exc
-    return bundle, included
+    return DesiredTree(bundle=bundle, routes=included, exclusions=exclusions)
+
+
+async def _record_desired(db: AsyncSession, *, desired: DesiredTree) -> None:
+    """Persist what a computed desired tree says about its node's routes.
+
+    Only the mutating callers run this: the sweep, and the render an apply is
+    built from. A route that left the tree is marked as a *removal* (the node
+    still has to confirm it), a route that cannot be rendered is marked stale with
+    the reason, and a route that is desired again has its removal markers cleared
+    while ``config_state`` still reports that the apply putting it back in service
+    has not happened yet.
+    """
+    for exclusion in desired.exclusions:
+        if exclusion.kind == EXCLUSION_REMOVAL:
+            await mark_removal_requested(db, route=exclusion.route, reason=exclusion.reason)
+        else:
+            await _mark_route_stale(db, exclusion.route, exclusion.reason)
+    for route in desired.routes:
+        if route.removal_requested_at is not None or route.removal_confirmed_at is not None:
+            route.removal_requested_at = None
+            route.removal_confirmed_at = None
+            await db.flush()
+
+
+async def render_for_node(db: AsyncSession, *, node: Server) -> tuple[NginxBundle, list[Route]]:
+    """Render *node*'s desired state **and record** what it says about its routes.
+
+    The mutating half of rendering, used by the apply and reconcile paths, which
+    own the transaction. Anything that must not write while reading configuration
+    state — the status endpoint above all — calls :func:`compute_desired`.
+    """
+    desired = await compute_desired(db, node=node)
+    await _record_desired(db, desired=desired)
+    return desired.bundle, desired.routes
 
 
 async def expected_bundle_id(db: AsyncSession, *, node: Server) -> str | None:
     """The bundle fingerprint the node *should* be running, or ``None`` if it has
-    no enabled routes and never applied one."""
+    no enabled routes and never applied one.
+
+    Read-only, deliberately: the status endpoint calls this, and a `GET` must not
+    move a route's removal state on its way to reporting it.
+    """
     if not await _has_enabled_routes(db, node_id=node.id):
         state = node.proxy_state or {}
         if not state.get("applied_bundle_id"):
             return None
-    bundle, _ = await render_for_node(db, node=node)
-    return bundle.bundle_id
+    desired = await compute_desired(db, node=node)
+    return desired.bundle_id
 
 
 async def _has_enabled_routes(db: AsyncSession, *, node_id: uuid.UUID) -> bool:
@@ -624,7 +705,11 @@ async def enqueue_apply(
         )
         return None
     if not bundle.manifest and not applied:
-        return None
+        # Nothing to serve and nothing was ever applied — unless a desired change
+        # is outstanding, in which case the empty bundle *is* the work: it is what
+        # removes a route whose apply was lost before any bundle id was recorded.
+        if not state.get(RECONCILE_REQUIRED_KEY):
+            return None
     if not force and await operation_service.has_live_operation(
         db, node_id=node.id, op_type=OperationType.NGINX_APPLY
     ):
@@ -750,6 +835,34 @@ def _is_due(raw: Any, window: timedelta) -> bool:
     return stamp is None or (_utcnow() - stamp) >= window
 
 
+async def mark_reconcile_required(db: AsyncSession, *, node: Server) -> None:
+    """Record that *node*'s desired configuration changed and is not applied yet.
+
+    Written by every path that changes the desired tree in a way route rows alone
+    cannot describe — a disabled last route, a deleted route, an apply that could
+    not be dispatched because the node was unreachable. The reconcile sweep reads
+    it as a candidate condition (see :data:`RECONCILE_REQUIRED_KEY`), which is the
+    whole point: without it, a node with no enabled routes is invisible to the
+    sweep and an unapplied removal would never be retried.
+
+    It is cleared the moment the desired configuration is confirmed applied (or
+    when a sweep proves there is nothing to apply), so it can never turn into an
+    unbounded retry loop: at most one apply is in flight and the sweep's own
+    backoff and de-duplication still bound the attempts.
+    """
+    state = dict(node.proxy_state or {})
+    if state.get(RECONCILE_REQUIRED_KEY) is True:
+        return
+    state[RECONCILE_REQUIRED_KEY] = True
+    node.proxy_state = state
+    await db.flush()
+
+
+def _clear_reconcile_required(state: dict[str, Any]) -> None:
+    """Drop the outstanding-desired-change marker from a node's proxy state."""
+    state.pop(RECONCILE_REQUIRED_KEY, None)
+
+
 async def reconcile_node(db: AsyncSession, *, node: Server) -> str:
     """Bring one node's live configuration back to the desired bundle — bounded.
 
@@ -798,14 +911,20 @@ async def reconcile_node(db: AsyncSession, *, node: Server) -> str:
         return RECONCILE_BLOCKED
 
     if not await _has_enabled_routes(db, node_id=node.id) and not confirmed:
-        # Nothing is served from here and nothing ever was.
-        return RECONCILE_IDLE
+        # Nothing is served from here and nothing ever was — unless a desired
+        # change is explicitly outstanding, which is exactly the case a node with
+        # no enabled routes still has to be reconciled for.
+        if not state.get(RECONCILE_REQUIRED_KEY):
+            return RECONCILE_IDLE
 
     desired = bundle.bundle_id
     if desired == confirmed:
         state["drift"] = False
         state["drift_since"] = None
         state["reconcile_error"] = ""
+        # The desired tree is what is live, so whatever change was outstanding has
+        # been applied: the node stops being a reconciliation candidate here.
+        _clear_reconcile_required(state)
         node.proxy_state = state
         await db.flush()
         # Converged. Only now is a fingerprint worth asking for, and only when the
@@ -993,6 +1112,9 @@ async def _handle_apply_result(db: AsyncSession, *, node: Server, operation: Ope
         state["recovery_attempts"] = 0
         state["next_recovery_at"] = None
         state["reconcile_error"] = ""
+        # The desired configuration is confirmed applied, so this node is no
+        # longer an outstanding-removal candidate.
+        _clear_reconcile_required(state)
     elif outcome is ProxyApplyOutcome.ROLLED_BACK:
         # The previous configuration is live again. The bundle manifest is the
         # full *desired* tree, so it names routes that were already serving from
@@ -1263,7 +1385,6 @@ async def node_proxy_status(db: AsyncSession, *, node: Server) -> NodeProxyStatu
                 func.count().filter(Route.config_state == RouteConfigState.FAILED).label("failed"),
                 func.count()
                 .filter(
-                    Route.enabled.is_(True),
                     Route.removal_requested_at.is_not(None),
                     Route.removal_confirmed_at.is_(None),
                 )
@@ -1331,13 +1452,19 @@ async def get_route_or_404(db: AsyncSession, route_id: uuid.UUID) -> Route:
 
 __all__ = [
     "CAPABILITY_STALE_AFTER",
+    "EXCLUSION_REMOVAL",
+    "EXCLUSION_UNRESOLVED",
+    "RECONCILE_REQUIRED_KEY",
     "RECOVERY_BACKOFF_MAX",
     "RECOVERY_BACKOFF_START",
     "RESERVED_HOST_PORTS",
     "STATUS_REFRESH_AFTER",
+    "DesiredTree",
+    "RouteExclusion",
     "after_hello",
     "capability_of",
     "capability_out",
+    "compute_desired",
     "container_out",
     "eligibility_error",
     "enqueue_apply",
@@ -1345,6 +1472,7 @@ __all__ = [
     "expected_bundle_id",
     "get_route_or_404",
     "handle_operation_result",
+    "mark_reconcile_required",
     "mark_removal_requested",
     "node_proxy_status",
     "provider",

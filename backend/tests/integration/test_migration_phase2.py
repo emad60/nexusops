@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import os
 import uuid
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 
 import psycopg
 import pytest
@@ -98,8 +98,8 @@ def _alembic_config(database: str) -> Config:
     return cfg
 
 
-def _run_migration(database: str, revision: str) -> None:
-    """Upgrade ``database`` to ``revision`` through the app's own settings path.
+def _at_revision(database: str, revision: str, action: Callable[[Config, str], None]) -> None:
+    """Run one Alembic direction against ``database`` through the app's settings path.
 
     ``alembic/env.py`` resolves the URL from the cached settings singleton, so
     the DSN is exported and the cache cleared for the duration of the call —
@@ -111,13 +111,28 @@ def _run_migration(database: str, revision: str) -> None:
     os.environ["MIGRATION_DATABASE_URL"] = _migration_dsn(database)
     get_settings.cache_clear()
     try:
-        command.upgrade(_alembic_config(database), revision)
+        action(_alembic_config(database), revision)
     finally:
         if previous is None:
             os.environ.pop("MIGRATION_DATABASE_URL", None)
         else:
             os.environ["MIGRATION_DATABASE_URL"] = previous
         get_settings.cache_clear()
+
+
+def _run_migration(database: str, revision: str) -> None:
+    """Upgrade ``database`` to ``revision``."""
+    _at_revision(database, revision, command.upgrade)
+
+
+def _run_downgrade(database: str, revision: str) -> None:
+    """Move ``database`` *back* to ``revision``.
+
+    The same code path a deployment uses when it has to undo a migration, which
+    is exactly what a migration's ``downgrade()`` is for — and the only way to
+    prove that a revision is undoable at all rather than merely forward-appliable.
+    """
+    _at_revision(database, revision, command.downgrade)
 
 
 def _exec(database: str, statements: Sequence[Statement]) -> None:

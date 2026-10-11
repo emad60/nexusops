@@ -527,6 +527,31 @@ async def enable_route(
     return route
 
 
+async def _apply_or_defer(
+    db: AsyncSession,
+    ctx: AuthContext | None,
+    *,
+    node: Server,
+    reason: str,
+) -> None:
+    """Queue an apply for *node*, tolerating a node that cannot take one now.
+
+    Taking a route away is a statement about the *desired* configuration, so it
+    must not depend on the node being reachable: the change is recorded, the route
+    reads as unresolved ("removal requested, not confirmed"), and the reconcile
+    sweep retries until the node applies it. A named refusal — offline, stale
+    capability, listener conflict — is logged rather than raised, because the
+    reconciler is what makes the change eventually true and the route's own state
+    already says it is not live.
+    """
+    try:
+        await proxy_service.enqueue_apply(
+            db, node=node, requested_by_id=ctx.user_id if ctx else None, reason=reason
+        )
+    except Conflict as exc:
+        log.info("route_apply_deferred", node=str(node.id), code=exc.code, reason=reason)
+
+
 async def disable_route(
     db: AsyncSession,
     ctx: AuthContext | None,
@@ -536,15 +561,20 @@ async def disable_route(
 ) -> Route:
     """Pull a route from the node's configuration.
 
-    The change is *not* live until the node applies the new bundle, so the state
-    is left ``PENDING`` and the operator sees "applying" rather than a claim that
-    traffic already stopped.
+    The change is *not* live until the node applies the new bundle, so the route
+    is left unresolved — ``STALE`` plus a **requested** removal that only a node's
+    applied bundle can turn into a confirmed one — and the operator never reads a
+    disabled route as already gone while its node may still be serving it.
+
+    That state is recorded whether or not an apply could be dispatched: an
+    unreachable node must not be able to *block* the withdrawal of a name, and the
+    outstanding change stays discoverable by the reconciler (see
+    ``proxy_service.mark_reconcile_required``).
     """
     route = await get_route(db, route_id)
     node = await _resolve_node(db, route.node_id)
     was_enabled = route.enabled
     route.enabled = False
-    route.config_state = RouteConfigState.PENDING
     route.last_apply_error = ""
     if route.monitor_id is not None:
         monitor = await db.get(Monitor, route.monitor_id)
@@ -552,6 +582,12 @@ async def disable_route(
             monitor.enabled = False
             monitor.status = MonitorStatus.PAUSED
     await db.flush()
+    if was_enabled:
+        # A route that was live left the desired tree: that is a removal the node
+        # has to confirm, and the node-level marker is what keeps a node with no
+        # enabled routes in the reconcile sweep's candidate set at all.
+        await proxy_service.mark_removal_requested(db, route=route, reason="the route was disabled")
+        await proxy_service.mark_reconcile_required(db, node=node)
 
     actor_id, actor_type = _actor(ctx)
     await event_bus.publish(
@@ -573,9 +609,7 @@ async def disable_route(
         metadata={"hostname": route.hostname, "was_enabled": was_enabled},
         request=request,
     )
-    await proxy_service.enqueue_apply(
-        db, node=node, requested_by_id=ctx.user_id if ctx else None, reason="route_disabled"
-    )
+    await _apply_or_defer(db, ctx, node=node, reason="route_disabled")
     return route
 
 
@@ -594,6 +628,12 @@ async def delete_route(
     await db.flush()
     await db.delete(route)
     await db.flush()
+    if was_enabled:
+        # The row is gone, so the node's own state is the only place that can
+        # remember the change: without this, deleting the last route would leave a
+        # node with nothing for the reconcile sweep to discover it by, and the
+        # fragment would stay on the node forever.
+        await proxy_service.mark_reconcile_required(db, node=node)
     await event_bus.publish(
         db,
         type="ROUTE_DELETED",
@@ -612,10 +652,9 @@ async def delete_route(
         request=request,
     )
     # Deleting the last route still has to reach the node, so the fragment is
-    # removed from the live tree rather than only from the database.
-    await proxy_service.enqueue_apply(
-        db, node=node, requested_by_id=ctx.user_id if ctx else None, reason="route_deleted"
-    )
+    # removed from the live tree rather than only from the database — now if the
+    # node can take it, and by the reconciler if it cannot.
+    await _apply_or_defer(db, ctx, node=node, reason="route_deleted")
 
 
 async def _sync_route_monitor(db: AsyncSession, *, route: Route, ctx: AuthContext | None) -> None:

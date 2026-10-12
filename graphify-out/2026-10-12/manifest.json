@@ -1602,9 +1602,9 @@
     "semantic_hash": ""
   },
   "docs/platform-security-model.md": {
-    "mtime": 1791761642.2423801,
-    "seen": 1791761773.455259,
-    "ast_hash": "b677e4cf511fed78c8370460b7245dac",
+    "mtime": 1791762492.1107912,
+    "seen": 1791762550.26295,
+    "ast_hash": "95d29a9e619755bd35f64aac03d1394b",
     "semantic_hash": ""
   },
   "docs/platform-vision.md": {
@@ -1620,9 +1620,9 @@
     "semantic_hash": ""
   },
   "docs/secrets-architecture.md": {
-    "mtime": 1791761670.6923788,
-    "seen": 1791761773.4552617,
-    "ast_hash": "7705a5a3660750f3c217a01d85e43cc4",
+    "mtime": 1791762475.2173343,
+    "seen": 1791762550.262953,
+    "ast_hash": "6830c31c2fce0027ffd541238ee9e619",
     "semantic_hash": ""
   },
   ".claude/workflows/nexusops-challenge.mjs": {
@@ -2160,9 +2160,9 @@
     "semantic_hash": ""
   },
   "docs/phase5-design.md": {
-    "mtime": 1791761736.782375,
-    "seen": 1791761773.4552581,
-    "ast_hash": "41fda3880f05b3b35c6d3ee446d83f90",
+    "mtime": 1791762519.8143318,
+    "seen": 1791762550.262948,
+    "ast_hash": "df021d17cfc0ede3d14bd850e5d377af",
     "semantic_hash": ""
   },
   "backend/alembic/versions/20261012_1200-c8d9e0f1a2b3_phase5_certificate_metadata.py": {

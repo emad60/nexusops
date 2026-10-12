@@ -37,8 +37,18 @@ it issues nothing, delivers nothing and activates nothing, and the API says so
 (`issued: false`, `current_generation_id: null`, `expires_at: null`). See
 phase5-design.md §1.1 and §10.1.1.
 
-**Not shipped (the rest of this document):** the key envelope (org DEK + KEK provider),
-`dns_providers` and its credential storage, `acme_accounts`, and therefore **any** ACME
+**Shipped since (5.2.1):** the **key envelope** — the `KEKProvider` seam, the Vault
+Transit adapter, the explicitly selected deterministic test/dev provider, the
+operation-scoped organization DEK (`organizations.dek_ciphertext` + `dek_generation`,
+wrapped and never stored in plaintext), provider health reporting, and the KEK-rotation
+rewrap path. The organization/purpose/generation binding travels as the derivation
+context of a `derived=true` transit key (phase5-design.md §6.7 amendment). **It protects
+nothing yet** — no certificate material exists in the database for it to wrap — so its
+value here is structural: the custody path is built and tested before the first key it
+will hold.
+
+**Not shipped (the rest of this document):** `dns_providers` and its credential storage,
+`acme_accounts`, and therefore **any** ACME
 issuance, DNS-01 publication, private-key delivery, installation, HTTPS activation,
 renewal, expiry monitoring or revocation. `routes.scheme` cannot be set to `https` and
 there is no `certificate_id` column, so an HTTPS route is not merely unwired — it is

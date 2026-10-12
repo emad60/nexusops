@@ -18,6 +18,13 @@ class HealthOut(APIModel):
 class ReadyComponents(APIModel):
     database: str = "unknown"
     redis: str = "unknown"
+    #: Key-management (KEK provider) status: one of ``ok``, ``disabled``,
+    #: ``unreachable``, ``unauthorized``, ``invalid_configuration``. **Informational
+    #: only** — it never gates readiness, because the platform keeps serving the
+    #: features that do not need a DEK while the provider is down (phase5-design.md
+    #: §6.9). Only the status is exposed: never the provider's address, key name or
+    #: any credential.
+    key_management: str = "unknown"
 
 
 class ReadyOut(APIModel):

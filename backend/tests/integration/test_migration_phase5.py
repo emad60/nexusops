@@ -834,11 +834,19 @@ def test_the_migration_is_reversible_and_reappliable(scratch_database: str) -> N
 
 
 def test_the_phase5_revision_extends_the_phase4_chain() -> None:
-    """Exactly one head, and Phase 5.1 sits directly on the Phase 4.2 head."""
+    """Exactly one head, and Phase 5.1 sits directly on the Phase 4.2 head.
+
+    The head itself moves on with each later slice (5.2.1's ``f5a6b7c8d9e0`` pins
+    the organization DEK envelope, see ``test_migration_phase521.py``). What this
+    test owns is Phase 5.1's own place: directly on Phase 4.2, and still on the
+    path to whatever the head currently is — never orphaned by a later revision.
+    """
     from alembic.script import ScriptDirectory
 
     script = ScriptDirectory.from_config(_alembic_config("postgres"))
     heads = script.get_heads()
-    assert heads == [PHASE5_REVISION], f"unexpected alembic heads: {heads}"
+    assert len(heads) == 1, f"unexpected alembic heads: {heads}"
     revision = script.get_revision(PHASE5_REVISION)
     assert revision.down_revision == PRE_PHASE5_REVISION
+    ancestors = {rev.revision for rev in script.iterate_revisions(heads[0], "base")}
+    assert PHASE5_REVISION in ancestors, "Phase 5.1 is no longer on the path to the head"

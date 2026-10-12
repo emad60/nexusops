@@ -965,12 +965,13 @@ class KEKProvider(Protocol):
 
 with two value objects it exchanges:
 
-- `EncryptionContext(org_id, purpose, dek_generation)` — bound into the wrap as
-  associated data wherever the provider supports it (Vault transit `context`, AWS KMS
-  `EncryptionContext`, GCP KMS AAD), so a wrapped DEK cannot be replayed under a
-  different organization or generation. Providers without an AAD concept (Azure Key
-  Vault's wrap operations) document that limit explicitly instead of pretending
-  otherwise.
+- `EncryptionContext(org_id, purpose, dek_generation)` — **cryptographically bound into
+the ciphertext**, not stored beside it, so a wrapped DEK cannot be replayed under a
+  different organization, purpose or generation. For Vault that binding is the
+  **derivation context** of a `derived=true` transit key (§6.7 amendment below) — *not*
+  `associated_data`. A provider without an equivalent context parameter implements the
+  binding provider-side (or the limit is documented explicitly) rather than weakening
+  the invariant; see the amendment for why AAD cannot serve.
 - `WrappedKey(provider, key_id, key_version, ciphertext)` — recorded next to the
   ciphertext so a rotation can decide what to re-wrap without guessing who wrapped it.
 
@@ -997,6 +998,37 @@ Rules that make the seam real rather than decorative:
    NexusOps code. A provider without a rewrap primitive must implement the operation
    provider-side (bring-your-own-key import or an equivalent) rather than decrypting into
    the application.
+
+**Amendment — the binding is the provider's derivation context, not AAD (approved
+2026-10-12).** The bullet above originally said "associated data wherever the provider
+supports it". Implementing the Vault adapter against a real Vault 1.15 transit key showed
+that this cannot hold, so the binding is re-specified here rather than quietly worked
+around:
+
+- **What was measured.** `transit/encrypt` and `transit/decrypt` accept both
+  `associated_data` (AAD) and a derived-key `context`, but **`transit/rewrap` has no
+  `associated_data` parameter at all**. A ciphertext encrypted with AAD therefore fails
+to rewrap — Vault returns `message authentication failed`, because the AAD cannot be
+  supplied on that path. An AAD binding makes an envelope **un-rotatable provider-side**,
+  which would force a KEK rotation to unwrap every DEK in the application — precisely
+  what approved point 6 forbids. The two parameters are not interchangeable, and neither
+  is "authenticated context" merely because it is stored next to the ciphertext.
+- **What the binding is, therefore.** The organization, purpose and DEK generation travel
+  as the **derivation context** (base64) of a transit key created with **`derived=true`**.
+  Vault accepts that context on `encrypt`, `decrypt` *and* `rewrap`, a wrong value fails
+  authentication, and the binding survives provider-side rewrapping intact. `derived=true`
+  is a **hard requirement of the deployment**, not a preference: a key created without it
+  cannot satisfy the binding, and the platform reports that as an *invalid configuration*
+  (with the fix in the message) and refuses to wrap — it never falls back to a weaker
+  binding, and it never stores the context beside the ciphertext as though it were
+  authenticated.
+- **How it is proven.** The repo carries tests for both halves: wrong organization,
+purpose and generation each fail to unwrap; rewrap preserves the binding and moves the key
+  version with no plaintext DEK returned; and the AAD failure above is asserted against a
+  real Vault container, so the reason for the choice stays measured rather than
+  remembered (`backend/tests/integration/test_kek_vault_transit_live.py`). A future
+  provider that offers only AAD must implement an equivalent provider-side rewrap before
+  it can be selected — adding it to a fallback chain is not an option (rule 4).
 
 **Development and tests: a deterministic provider, and no way to reach it in production.**
 
@@ -1075,7 +1107,8 @@ somewhere.
 | Stage | Requirement |
 |---|---|
 | Generation | The DEK is generated **in the application** with a CSPRNG (Fernet-compatible key), then wrapped by the provider. The DEK is never *derived* from anything, never reused across organizations, and never re-wrapped twice with the same `dek_generation` recorded |
-| Wrapping | `wrap_dek` with the `EncryptionContext` bound (§6.7). The stored value is the self-describing envelope, so the row states which provider, key and version can unwrap it |
+| Key creation (operator) | The transit key is created **once, by the operator**, with **`derived=true`** and a type that supports a derivation context (`aes256-gcm96`). The application never creates or configures keys, so `derived=true` belongs in the provisioning runbook (§6.7 amendment) |
+| Wrapping | `wrap_dek` with the `EncryptionContext` bound as the **derivation context** of a `derived=true` key (§6.7 amendment) — not as AAD, which rewrap cannot carry. The stored value is the self-describing envelope, so the row states which provider, key and version can unwrap it |
 | Rotation (KEK-only) | **`rewrap_dek` provider-side** (approved point 6): Vault `transit/rewrap` rewrites each stored ciphertext under the new key version with no plaintext DEK returned to the application. It is idempotent per row and resumable |
 | Rotation (org DEK) | New DEK generation → wrapped → `organizations.dek_generation` bumped → the org's Phase-5 rows re-encrypted in background batches, each row's `deke_id` updated as it is re-encrypted. A half-rotated org is visible (mixed `deke_id`), never silently half-readable |
 | Recovery | A generation whose ciphertext cannot be unwrapped is **not** served and **not** guessed at: it is marked failed with a reason and re-issued (§6.5), matching the fail-closed behaviour of `decrypt_str` today |
@@ -1088,6 +1121,7 @@ somewhere.
 | Provider unset, unknown, or `test` in a production configuration | **Abort at import** (exit 2), the same fail-fast path `ENCRYPTION_KEY` uses today |
 | Provider configured but unreachable (Vault down, KMS unreachable, AppRole secret expired) | The API **starts** and serves everything that does not need a DEK; certificate issuance, material delivery and DNS-credential reads fail closed with a named error, are visible to the operator (health reporting), and are **not** retried into a storm. No fallback to an env key, ever |
 | Provider reachable but the role lacks the policy | Fail closed with the provider's own denial surfaced, and a health check that distinguishes "unreachable" from "unauthorized" — the two need different operator actions |
+| Provider reachable but the transit key is **not derivable** | **Invalid configuration**, reported as its own state (not "unhealthy"): the provider is fine, the key cannot satisfy the binding, and the fix is to re-create it with `derived=true`. Key-management operations refuse; the API keeps serving |
 | Non-production implementation (`test`) in a non-production environment | Allowed, loudly: it is logged at startup and reported in health, so an environment can never be *mistaken* for production custody |
 
 ---

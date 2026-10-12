@@ -91,6 +91,11 @@ def configure_test_env() -> None:
     os.environ["REDIS_URL"] = TEST_REDIS_URL
     os.environ["SIMULATION_MODE"] = "true"
     os.environ["ENVIRONMENT"] = "test"
+    # Key management: the deterministic provider, **named on purpose**. This is the
+    # deliberate test selection the design requires — there is no detection and no
+    # fallback, so a suite that wanted the real provider would have to ask for
+    # 'vault-transit' and supply credentials (see test_kek_vault_transit.py).
+    os.environ["KEK_PROVIDER"] = "test"
     # Security tests must exercise the strict SSRF guard regardless of what a
     # developer's .env permits for local dev convenience.
     os.environ["ALLOW_PRIVATE_TARGETS"] = "false"

@@ -223,13 +223,25 @@ make test                 # unit backend + frontend vitest — no services neede
   (`backend/tests/integration/conftest.py`) creates the test database, applies
   migrations once per session, truncates and re-seeds the RBAC registry between
   tests, and provides `client` (httpx against the ASGI app), `db`, and `owner`
-  fixtures.
+  fixtures. It also selects the key-management provider explicitly
+  (`KEK_PROVIDER=test` — the deterministic fixture provider, never a fallback).
+- **Key-management tests, and the one that needs Docker.** `tests/unit/` covers the
+  envelope codec, the deterministic provider, provider selection (including the
+  production refusal) and the Vault adapter's HTTP contract against a mocked
+  transport. The real-Vault behaviour — derivation context binding, rewrap, least
+  privilege, and the measured reason AAD cannot be the binding — is asserted in
+  `tests/integration/test_kek_vault_transit_live.py`, which starts its **own**
+  throwaway `hashicorp/vault:1.15` container (unique name, loopback port, generated
+  TLS material) and removes it afterwards; it never touches the compose services or
+  a volume. If Docker or that image is unavailable the module **skips with an
+  explicit reason** — a skipped run is not evidence, and the report will say so.
 - Pytest configuration lives in `backend/pyproject.toml`:
   `asyncio_mode = "auto"`, `--strict-markers`, and the single custom marker
   `integration: requires PostgreSQL + Redis`. `DeprecationWarning` raised from
   `app.*` code is an error — fix the source, do not filter it.
-- The suite collects 437 test cases today (unit + integration; integration tests are
-  parametrized, so a handful of functions cover many scenarios). 22 of them are the
+- The suite collects **1104** test cases today — 735 unit and 369 integration
+  (`pytest --collect-only`, `-m "not integration"` / `-m "integration"` split; integration
+  tests are parametrized, so a handful of functions cover many scenarios). 22 of them are the
   cross-tenant isolation gate in `tests/integration/test_tenant_isolation.py`, which
   connects to Postgres as the RLS-enforced application role to probe the policies
   without the ORM.

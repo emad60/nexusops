@@ -2,6 +2,12 @@
 
 Mounted at the root so orchestrators can probe ``/health``, ``/ready`` and
 ``/liveness`` without the API prefix.
+
+Readiness gates on the database and Redis only. The key-management provider is
+reported in ``components.key_management`` and deliberately **never** moves the
+status code: the approved posture (phase5-design.md §6.9) is that the API keeps
+serving while key-dependent operations fail closed with a named error, so a Vault
+outage must not pull a healthy instance out of rotation.
 """
 
 from __future__ import annotations
@@ -13,6 +19,7 @@ from app.core.db import get_sessionmaker
 from app.core.logging import get_logger
 from app.core.redis_client import get_redis
 from app.schemas.health import HealthOut, ReadyComponents, ReadyOut
+from app.services.kek.health import provider_health
 
 health_router = APIRouter(tags=["health"])
 
@@ -46,6 +53,17 @@ async def readiness(response: Response) -> ReadyOut:
     except Exception as exc:
         components.redis = f"error: {type(exc).__name__}"
         log.warning("readiness_redis_failed", error=str(exc))
+
+    # Key management is reported, not enforced: a provider that is down or
+    # misconfigured leaves this instance serving everything that does not need a
+    # DEK, so failing the whole probe would take a working API out of rotation for
+    # a subsystem the platform is explicitly designed to keep serving without.
+    try:
+        health = await provider_health()
+        components.key_management = str(health.status)
+    except Exception as exc:
+        components.key_management = f"error: {type(exc).__name__}"
+        log.warning("readiness_kek_failed", error=type(exc).__name__)
 
     ready = components.database == "ok" and components.redis == "ok"
     if not ready:

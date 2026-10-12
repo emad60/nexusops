@@ -410,7 +410,10 @@ and rotation is impossible (§1.1). Target: **per-org DEK envelope, KMS-ready**.
 > Vault Transit as the first production implementation, cloud KMS as future adapters
 > behind the same interface, one provider seam, a deterministic test provider that
 > production cannot select, operation-scoped unwrap with no long-lived plaintext-DEK
-> cache, provider-side rewrap) and its **operational custody requirements** (§6.9:
+> cache, provider-side rewrap), its **context-binding amendment** (the org/purpose/
+> generation binding travels as the derivation context of a `derived=true` transit key,
+> never as `associated_data` — which rewrap cannot carry) and its **operational custody
+> requirements** (§6.9:
 > AppRole + single-key policy, auto-unseal through a cloud KMS, audit retention and
 > access review, rotation and key-loss consequences, startup behaviour). Phase 5 applies
 the org-DEK envelope to
@@ -430,7 +433,7 @@ flowchart LR
 
 | Layer | What | Notes |
 |---|---|---|
-| KEK (root) | Master key | Wraps DEKs only; today `ENCRYPTION_KEY`, later a KMS-managed key |
+| KEK (root) | Master key | Wraps DEKs only. Today `ENCRYPTION_KEY` for the secret store; for Phase-5 material it is the **approved external provider** (Vault Transit, `derived=true` key, phase5-design.md §6.7) — never present in the process |
 | DEK | One Fernet key per Organization | Generated at org creation; stored **wrapped** (`organizations.dek_ciphertext`); plaintext DEK exists in process memory only |
 | Data | secrets, secret_versions, credentials, channel config | Fernet under the org's DEK |
 
@@ -438,7 +441,10 @@ Mechanics:
 
 - Org creation: generate DEK → wrap with KEK → store wrapped. Unwrap on use,
   per-worker LRU keyed by org_id (replaces the module-global Fernet cache,
-  `security.py:121-129`).
+  `security.py:121-129`). **Superseded for Phase-5 material by the approved decision
+  against caching** (phase5-design.md §6.7 K4): unwrap is operation-scoped there, and a
+  plaintext-DEK cache would have to be justified by a measurement first. A cache, if one
+  is ever added, is a *secret-store migration* decision (§6.4 there), not a Phase-5 one.
 - New secrets write under the org's DEK; legacy rows migrate via a background
   re-encryption job, per-org batches, resumable (the production contabo instance
   upgrades in place).
@@ -447,7 +453,9 @@ Mechanics:
   DEKs only — fast, touches no data. This is what makes key rotation possible at
   all (today it destroys every ciphertext, `generate_secrets.sh:7-10`).
 - **KMS-ready:** swap the unwrap call for a provider call (`wrap_dek`/`unwrap_dek`,
-  phase5-design.md §6.7 — approved, Vault Transit first); wrapped DEKs never leave the DB;
+  phase5-design.md §6.7 — approved, Vault Transit first and **implemented in 5.2.1** for
+  certificate/DNS/ACME material, with the context binding carried as the derivation
+  context of a `derived=true` transit key); wrapped DEKs never leave the DB;
   a plaintext DEK exists only for the duration of the operation that unwrapped it, with no
   long-lived cache (approved point 5). The stored value is a self-describing envelope
   naming the provider, key id and key version, so a rotation knows what to re-wrap — and

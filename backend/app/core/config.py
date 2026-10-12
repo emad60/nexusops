@@ -80,6 +80,36 @@ class Settings(BaseSettings):
     login_lockout_seconds: int = Field(default=900, ge=10)
     session_idle_timeout_days: int = Field(default=30, ge=1)
 
+    # --- Key management (Phase 5.2.1) ----------------------------------
+    #: Which root-key provider wraps organization DEKs. **Explicitly selected**:
+    #: there is no detection, no default and no fallback. ``vault-transit`` is the
+    #: production provider; ``test`` is the deterministic in-process provider for
+    #: tests and explicitly configured development, and it is refused in
+    #: production (see :func:`validate_key_management` below and
+    #: ``app/services/kek/factory.py``). Empty means "no key management", which is
+    #: tolerated outside production so the rest of the platform can serve while
+    #: key-dependent operations fail closed.
+    kek_provider: str = ""
+    kek_vault_addr: str | None = None
+    kek_vault_namespace: str | None = None
+    #: The transit key name. It must be created with ``derived=true``: the
+    #: organization/purpose/generation binding travels as the derivation context,
+    #: which is the only parameter Transit accepts on encrypt, decrypt *and*
+    #: rewrap.
+    kek_vault_transit_key: str | None = None
+    #: AppRole credentials for a policy scoped to that one transit key. No root
+    #: token, and no key-administration capability, ever reaches this process.
+    kek_vault_role_id: str | None = None
+    kek_vault_secret_id: str | None = None
+    #: CA bundle used to verify Vault's certificate. Unset means the system trust
+    #: store; there is deliberately no way to disable verification.
+    kek_vault_ca_bundle: str | None = None
+    kek_vault_timeout_seconds: float = Field(default=5.0, ge=0.5, le=60)
+    #: How long a provider health probe is reused. Readiness probes are frequent,
+    #: and a health check is a provider round-trip; caching the *answer* (never key
+    #: material) keeps probing from becoming provider load.
+    kek_health_cache_seconds: int = Field(default=30, ge=0, le=600)
+
     # --- Simulation mode ----------------------------------------------
     simulation_mode: bool = False
 
@@ -247,6 +277,62 @@ class Settings(BaseSettings):
             raise ValueError(
                 "POSTGRES_APP_USER must be set when POSTGRES_APP_PASSWORD is: "
                 "the runtime connects as that role so row-level security applies"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_key_management(self) -> Settings:
+        """Refuse to start with an unusable or unsafe key source.
+
+        Two failures are worth exiting the process for rather than reporting at
+        request time: a production deployment that names no provider (nothing can
+        ever unwrap a DEK), and any environment that names the deterministic test
+        provider *and* production. The latter is the important one — an unsafe key
+        source must be unreachable by configuration, not by convention — and it is
+        enforced here as well as in the provider factory, because this is the
+        validation a container runs before it serves anything.
+        """
+        name = (self.kek_provider or "").strip().lower()
+        self.kek_provider = name
+        if not name:
+            if self.is_production:
+                raise ValueError(
+                    "KEK_PROVIDER is required in production (set 'vault-transit'). "
+                    "Organization DEKs would be unwrappable without a root-key provider."
+                )
+            return self
+        if name not in ("vault-transit", "test"):
+            raise ValueError(
+                f"KEK_PROVIDER must be one of 'vault-transit', 'test' (got {name!r}); "
+                "there is no fallback provider"
+            )
+        if name == "test":
+            if self.is_production:
+                raise ValueError(
+                    "KEK_PROVIDER=test is refused in production: the deterministic "
+                    "provider is a test fixture, not key custody. Use 'vault-transit'."
+                )
+            return self
+        # vault-transit: a half-configured provider is a startup error in every
+        # environment, because discovering it at the first unwrap would be a data
+        # availability incident instead of a deployment mistake.
+        missing = [
+            variable
+            for variable, value in (
+                ("KEK_VAULT_ADDR", self.kek_vault_addr),
+                ("KEK_VAULT_TRANSIT_KEY", self.kek_vault_transit_key),
+                ("KEK_VAULT_ROLE_ID", self.kek_vault_role_id),
+                ("KEK_VAULT_SECRET_ID", self.kek_vault_secret_id),
+            )
+            if not value
+        ]
+        if missing:
+            raise ValueError("KEK_PROVIDER=vault-transit requires " + ", ".join(missing))
+        assert self.kek_vault_addr is not None
+        if not self.kek_vault_addr.startswith("https://"):
+            raise ValueError(
+                "KEK_VAULT_ADDR must use https:// — Vault carries the root key and "
+                "certificate verification is mandatory"
             )
         return self
 

@@ -29,6 +29,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Index,
+    Integer,
     String,
     Text,
     UniqueConstraint,
@@ -57,6 +58,16 @@ class Organization(TimestampMixin, Base):
             f"id <> '{SYSTEM_ORG_SENTINEL}'::uuid",
             name="id_not_system_sentinel",
         ),
+        # Phase 5.2.1 — the organization DEK envelope. A wrapped DEK and a zero
+        # generation are mutually exclusive in both directions: generation 0 means
+        # "no DEK yet" (so a ciphertext with it would be an orphan), and a nonzero
+        # generation without a ciphertext would be a promise of key material that
+        # does not exist. The pair is a database invariant rather than a convention
+        # because every unwrap path reads both columns together.
+        CheckConstraint(
+            "(dek_ciphertext IS NULL) = (dek_generation = 0)",
+            name="dek_pair_valid",
+        ),
     )
 
     id: Mapped[uuid.UUID] = uuid_pk()
@@ -78,6 +89,20 @@ class Organization(TimestampMixin, Base):
     )
     #: Truncated for display once the org owns real work; NULL until then.
     renamed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    #: The organization's Fernet DEK, **wrapped** by the configured KEK provider
+    #: (``app/services/dek_envelope.py``). The plaintext key never reaches this
+    #: column and never leaves the operation that unwrapped it. The stored value is
+    #: the self-describing envelope (``v1:provider:key_id:key_version:base64``), so
+    #: a row states which provider can unwrap it and a KEK rotation knows what to
+    #: re-wrap. NULL until the organization's first Phase-5 write.
+    dek_ciphertext: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: Which DEK generation is wrapped above: 0 means "no DEK yet", the first real
+    #: DEK is 1, and a rotation increments it. Its value is part of the binding, so
+    #: a DEK cannot be presented as belonging to another generation.
+    dek_generation: Mapped[int] = mapped_column(
+        Integer, default=0, nullable=False, server_default=text("0")
+    )
 
     memberships: Mapped[list[Membership]] = relationship(
         back_populates="organization", cascade="all, delete-orphan", lazy="selectin"

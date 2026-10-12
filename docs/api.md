@@ -34,7 +34,7 @@ All application traffic enters through the nginx edge on host port **8080**
 | Vite dev server (dev profile) | `http://localhost:5173` | proxies `/api` (incl. WS) to `:8080` — mirrors the edge (`frontend/vite.config.ts`) |
 | Edge health probe | `http://localhost:8080/health` | answered by **nginx itself** (`edge ok`); never reaches the API |
 | API liveness | `http://localhost:8080/api/v1/health` | also mounted at `/liveness`; process-level, no dependency checks |
-| API readiness | `http://localhost:8080/api/v1/ready` | checks PostgreSQL **and** Redis; `503` with component detail when either is down |
+| API readiness | `http://localhost:8080/api/v1/ready` | checks PostgreSQL **and** Redis; `503` with component detail when either is down. `components.key_management` is also reported — one of `ok`, `disabled`, `unreachable`, `unauthorized`, `invalid_configuration` — but **never** gates the status code: a key-provider outage degrades key-dependent features and leaves the API in rotation (`docs/deployment.md` §health, phase5-design.md §6.9). Only the state word is published, never a Vault address, key name or credential |
 
 The `api` container port (8000) is **not** published to the host; the edge is the only
 HTTP entry point. Health probes are mounted at the root of the FastAPI app too

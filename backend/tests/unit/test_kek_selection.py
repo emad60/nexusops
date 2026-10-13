@@ -97,6 +97,58 @@ def test_vault_must_be_https() -> None:
         )
 
 
+# --- F4: no credentials in the Vault address ----------------------------------
+
+#: Every shape ``user:password@`` can take, including one that also carries a path
+#: prefix — the credentials are what disqualify the address, not the path.
+_CREDENTIALLED_ADDRS = [
+    "https://deploy-bot@vault.internal:8200",  # username only
+    "https://:hunter2@vault.internal:8200",  # password only
+    "https://deploy-bot:hunter2@vault.internal:8200",  # both
+    "https://deploy-bot:hunter2@vault.internal:8200/team",  # both, with a prefix
+]
+
+
+@pytest.mark.parametrize("addr", _CREDENTIALLED_ADDRS)
+def test_vault_addr_must_not_embed_credentials(addr: str) -> None:
+    """Vault access here is AppRole; an HTTP credential is one nothing consumes.
+
+    Worse than useless: the address is a base URL, so an HTTP client drops the
+    userinfo silently — leaving a password in a compose file, a shell history and a
+    startup log line, protecting nothing.
+    """
+    with pytest.raises(ValidationError, match="must not embed a username or password"):
+        _settings(kek_provider="vault-transit", **{**VAULT_CONFIG, "kek_vault_addr": addr})
+
+
+@pytest.mark.parametrize("addr", _CREDENTIALLED_ADDRS)
+def test_the_vault_addr_error_never_echoes_the_address_or_its_credentials(addr: str) -> None:
+    """A validation error is startup output — the least private place there is.
+
+    The field validator controls its own message, and ``hide_input_in_errors`` keeps
+    pydantic from appending the rejected input, so neither the URL nor either
+    credential appears in the text.
+    """
+    with pytest.raises(ValidationError) as raised:
+        _settings(kek_provider="vault-transit", **{**VAULT_CONFIG, "kek_vault_addr": addr})
+    message = str(raised.value)
+    assert "hunter2" not in message
+    assert "deploy-bot" not in message
+    assert "vault.internal" not in message, "the host is part of the input, not of the report"
+    # The message still says which variable is wrong and how to fix it.
+    assert "KEK_VAULT_ADDR" in message
+    assert "KEK_VAULT_ROLE_ID" in message and "KEK_VAULT_SECRET_ID" in message
+
+
+def test_a_vault_path_prefix_is_still_a_valid_address() -> None:
+    """Only the authority is inspected — a prefix (and its port) survives untouched."""
+    settings = _settings(
+        kek_provider="vault-transit",
+        **{**VAULT_CONFIG, "kek_vault_addr": "https://vault.internal:8200/team"},
+    )
+    assert settings.kek_vault_addr == "https://vault.internal:8200/team"
+
+
 def test_a_complete_vault_configuration_validates_in_production() -> None:
     settings = _settings(environment="production", kek_provider="vault-transit", **VAULT_CONFIG)
     assert settings.is_production

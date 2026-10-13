@@ -1,10 +1,10 @@
-"""Tenancy models: organizations and memberships.
+"""Tenancy models: organizations, memberships, and the organization DEK envelope.
 
-These two tables are the root of every tenant boundary in the platform:
+The first two tables are the root of every tenant boundary in the platform:
 
 ``User → Membership → Organization → tenant-scoped resources``
 
-Neither table inherits :class:`~app.models.base.OrgScoped`, and that is
+Neither of them inherits :class:`~app.models.base.OrgScoped`, and that is
 deliberate rather than an oversight:
 
 * ``organizations`` *is* the tenant, so it cannot be scoped by itself.
@@ -16,6 +16,12 @@ Both are therefore in the pre-org credential/identity class documented in
 ``docs/multi-tenancy.md`` §8(a): application-layer guarded, RLS-exempt. The
 residual risk is stated plainly there — this class has no database-level
 tenancy net, so the carve-out allowlist in :mod:`app.core.tenancy` is the fence.
+
+:class:`OrganizationDekEnvelope` is the counter-example that keeps that class
+small: it holds per-organization key material, so it is **not** exempt. It is a
+normal ``OrgScoped`` tenant table with RLS policies of its own (Phase 5.2.1.2,
+audit finding F1), which is what stops a plain organization read from being a
+cross-tenant envelope read.
 """
 
 from __future__ import annotations
@@ -37,7 +43,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.models.base import Base, TimestampMixin, status_check, uuid_pk
+from app.models.base import Base, OrgScoped, TimestampMixin, status_check, uuid_pk
 from app.models.enums import MembershipStatus, OrganizationStatus
 from app.models.identity import Role
 
@@ -57,16 +63,6 @@ class Organization(TimestampMixin, Base):
         CheckConstraint(
             f"id <> '{SYSTEM_ORG_SENTINEL}'::uuid",
             name="id_not_system_sentinel",
-        ),
-        # Phase 5.2.1 — the organization DEK envelope. A wrapped DEK and a zero
-        # generation are mutually exclusive in both directions: generation 0 means
-        # "no DEK yet" (so a ciphertext with it would be an orphan), and a nonzero
-        # generation without a ciphertext would be a promise of key material that
-        # does not exist. The pair is a database invariant rather than a convention
-        # because every unwrap path reads both columns together.
-        CheckConstraint(
-            "(dek_ciphertext IS NULL) = (dek_generation = 0)",
-            name="dek_pair_valid",
         ),
     )
 
@@ -90,22 +86,78 @@ class Organization(TimestampMixin, Base):
     #: Truncated for display once the org owns real work; NULL until then.
     renamed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
-    #: The organization's Fernet DEK, **wrapped** by the configured KEK provider
-    #: (``app/services/dek_envelope.py``). The plaintext key never reaches this
-    #: column and never leaves the operation that unwrapped it. The stored value is
-    #: the self-describing envelope (``v1:provider:key_id:key_version:base64``), so
-    #: a row states which provider can unwrap it and a KEK rotation knows what to
-    #: re-wrap. NULL until the organization's first Phase-5 write.
-    dek_ciphertext: Mapped[str | None] = mapped_column(Text, nullable=True)
-    #: Which DEK generation is wrapped above: 0 means "no DEK yet", the first real
-    #: DEK is 1, and a rotation increments it. Its value is part of the binding, so
-    #: a DEK cannot be presented as belonging to another generation.
-    dek_generation: Mapped[int] = mapped_column(
-        Integer, default=0, nullable=False, server_default=text("0")
-    )
+    # NOTE: the organization's wrapped DEK deliberately does **not** live here.
+    # This table is RLS-exempt (it *is* the tenant), so key material stored on it
+    # would be readable by every code path that can read an organization row.
+    # Phase 5.2.1.2 (audit finding F1) moved it to
+    # :class:`OrganizationDekEnvelope`, an ordinary tenant table.
 
     memberships: Mapped[list[Membership]] = relationship(
         back_populates="organization", cascade="all, delete-orphan", lazy="selectin"
+    )
+
+
+class OrganizationDekEnvelope(TimestampMixin, OrgScoped, Base):
+    """The organization's Fernet DEK, **wrapped** by the configured KEK provider.
+
+    The plaintext key never reaches this table and never leaves the operation
+    that unwrapped it. The stored value is the self-describing envelope
+    (``v1:provider:key_id:key_version:base64``), so a row states which provider
+    can unwrap it and a KEK rotation knows what it is looking at.
+
+    **Why a table of its own** (Phase 5.2.1.2, audit finding F1). Until this
+    revision the two columns below sat on ``organizations``, which is one of the
+    documented RLS-exempt tables — it *is* the tenant and cannot be scoped by its
+    own id. The consequence was that the confidentiality of every organization's
+    key material rested on the KEK provider alone: any read path that could reach
+    an organization row (a listing, a join, a bulk export, a future report) could
+    read another tenant's envelope, and PostgreSQL would not have refused. Here
+    the envelope is an ordinary tenant table: ``org_id`` is stamped by the
+    tenancy guard, the RLS policies scope every read and write to the acting
+    organization, and a cross-tenant envelope read is a thing the database
+    refuses rather than a thing this codebase remembers not to write.
+
+    **One row per organization**, enforced by ``uq_organization_dek_envelopes_org_id``
+    rather than by a convention: "the authoritative current envelope and
+    generation" is then a property of the schema, and the row is what a
+    compare-and-set rotates. The row is created **lazily and only by the
+    key-management service** (``app/services/dek_envelope.py``) — organization
+    creation does not write here, so no other module gains a write path to key
+    material. An organization with no row has no DEK; a row with
+    ``dek_generation = 0`` says the same thing explicitly.
+
+    The pair invariant survives the move unchanged, and is joined by the explicit
+    non-negative generation bound the 5.2.1 migration documented but did not
+    create: generation 0 means "no DEK yet" (so a ciphertext with it would be an
+    orphan) and a nonzero generation without a ciphertext would promise key
+    material that does not exist.
+    """
+
+    __tablename__ = "organization_dek_envelopes"
+    __table_args__ = (
+        UniqueConstraint("org_id", name="uq_organization_dek_envelopes_org_id"),
+        # Audit finding F3: the documented bound, made a database guarantee.
+        # ``dek_generation`` is a counter, so a negative value is not a state this
+        # model can produce — it is only reachable by a writer that bypassed it,
+        # which is exactly what a CHECK is for.
+        CheckConstraint("dek_generation >= 0", name="dek_generation_non_negative"),
+        CheckConstraint(
+            "(dek_ciphertext IS NULL) = (dek_generation = 0)",
+            name="dek_pair_valid",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+
+    #: The wrapped DEK of the organization this row belongs to. NULL until that
+    #: organization's first key-management write.
+    dek_ciphertext: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: Which DEK generation is wrapped above: 0 means "no DEK yet", the first real
+    #: DEK is 1, and a *DEK* rotation increments it. A KEK rotation does not (the
+    #: KEK version lives inside the envelope, not in this column) — see
+    #: :func:`app.services.dek_envelope.rewrap_org_deks`.
+    dek_generation: Mapped[int] = mapped_column(
+        Integer, default=0, nullable=False, server_default=text("0")
     )
 
 
@@ -153,4 +205,9 @@ class Membership(TimestampMixin, Base):
     role: Mapped[Role | None] = relationship(lazy="selectin")
 
 
-__all__ = ["SYSTEM_ORG_SENTINEL", "Membership", "Organization"]
+__all__ = [
+    "SYSTEM_ORG_SENTINEL",
+    "Membership",
+    "Organization",
+    "OrganizationDekEnvelope",
+]

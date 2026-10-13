@@ -44,7 +44,7 @@ from app.models.observability import (
 from app.models.operations import Operation
 from app.models.routing import Domain, Route
 from app.models.secrets import Secret, SecretVersion
-from app.models.tenancy import Membership, Organization
+from app.models.tenancy import Membership, Organization, OrganizationDekEnvelope
 
 __all__ = [
     "AgentCredential",
@@ -75,6 +75,7 @@ __all__ = [
     "Operation",
     "OrgScoped",
     "Organization",
+    "OrganizationDekEnvelope",
     "Permission",
     "Project",
     "RefreshToken",

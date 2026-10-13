@@ -327,6 +327,58 @@ async def test_tls_verification_is_not_disableable() -> None:
         )
 
 
+#: The shapes ``user:password@`` can take, one of them with a path prefix.
+_CREDENTIALLED_ADDRS = [
+    "https://deploy-bot@vault.internal:8200",
+    "https://:hunter2@vault.internal:8200",
+    "https://deploy-bot:hunter2@vault.internal:8200",
+    "https://deploy-bot:hunter2@vault.internal:8200/team",
+]
+
+
+@pytest.mark.parametrize("addr", _CREDENTIALLED_ADDRS)
+async def test_a_vault_address_with_embedded_credentials_is_refused(addr: str) -> None:
+    """Refused at construction, so no base URL ever carries a credential (F4).
+
+    Checked here as well as in settings validation because the adapter is
+    constructible directly — tests, tooling, a future caller — and the address is
+    the one input that reaches both an httpx base URL and the unreachable-error
+    text.
+    """
+    with pytest.raises(KEKConfigurationError, match="must not embed a username or password"):
+        VaultTransitKEKProvider(
+            addr=addr, transit_key=TRANSIT_KEY, role_id=ROLE_ID, secret_id=SECRET_ID
+        )
+
+
+@pytest.mark.parametrize("addr", _CREDENTIALLED_ADDRS)
+async def test_the_credentialled_address_is_not_echoed_in_the_error(addr: str) -> None:
+    with pytest.raises(KEKConfigurationError) as raised:
+        VaultTransitKEKProvider(
+            addr=addr, transit_key=TRANSIT_KEY, role_id=ROLE_ID, secret_id=SECRET_ID
+        )
+    message = str(raised.value)
+    assert "hunter2" not in message
+    assert "deploy-bot" not in message
+    assert "vault.internal" not in message
+
+
+async def test_a_vault_path_prefix_reaches_the_request_unchanged() -> None:
+    """A prefixed address is supported, and it is the base URL that carries it.
+
+    httpx merges its base path with each request path, so a Vault behind
+    ``https://vault.internal:8200/team`` is addressed without the adapter having to
+    rewrite anything — and without TLS verification being relaxed for it.
+    """
+    recorder = _Recorder(
+        [_login_ok(), httpx.Response(200, json={"data": {"ciphertext": "vault:v1:AAAA"}})]
+    )
+    provider = _provider(recorder, addr="https://vault.internal:8200/team")
+    await provider.wrap_dek(b"0" * 32, _ctx())
+    assert recorder.paths[0] == "/team/v1/auth/approle/login"
+    assert provider._verify is True, "a path prefix must not touch TLS verification"
+
+
 async def test_incomplete_configuration_is_refused_at_construction() -> None:
     with pytest.raises(KEKConfigurationError):
         VaultTransitKEKProvider(addr=ADDR, transit_key="", role_id=ROLE_ID, secret_id=SECRET_ID)

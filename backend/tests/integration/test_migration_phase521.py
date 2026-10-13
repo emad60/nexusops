@@ -17,6 +17,16 @@ do* and *what it will not undo*:
   is checked for the thing that actually matters: that the ciphertext is still
   there afterwards.
 
+**Where the columns live now** (Phase 5.2.1.2, audit finding F1): this revision's
+shape is asserted *at this revision*, not at ``head``. The envelope has since been
+moved into ``organization_dek_envelopes`` and the two columns dropped from
+``organizations``, so every statement about "the 5.2.1 schema" below pins
+``f5a6b7c8d9e0`` and the current schema is pinned by
+``test_migration_phase5212.py``. The one test that does run to ``head`` is the
+later-slice boundary, and it still holds: the move added no certificate, DNS or
+ACME artifact. The 5.2.1 revision itself is unmodified, exactly as the follow-up
+required.
+
 Every statement is parameterized, and each test builds its own scratch database,
 so nothing here depends on the order the suite runs in.
 """
@@ -86,7 +96,9 @@ def test_upgrade_adds_only_the_approved_columns(scratch_database: str) -> None:
     _seed_phase51(scratch_database)
     assert "dek_ciphertext" not in _columns(scratch_database)
 
-    _run_migration(scratch_database, "head")
+    # Pinned to this revision: at ``head`` the columns have been moved to the
+    # tenant table by 5.2.1.2, which is a different (also asserted) shape.
+    _run_migration(scratch_database, PHASE521_REVISION)
     columns = _columns(scratch_database)
 
     assert columns["dek_ciphertext"] == ("text", "YES"), "the envelope column is nullable text"
@@ -107,6 +119,9 @@ def test_upgrade_adds_only_the_approved_columns(scratch_database: str) -> None:
 
 
 def test_upgrade_adds_no_later_slice_artifacts(scratch_database: str) -> None:
+    # Deliberately ``head``, unlike the shape tests above: the claim is about the
+    # slice boundary — no certificate, DNS-provider, ACME or delivery artifact
+    # exists anywhere in the schema as it stands, including after 5.2.1.2.
     _run_migration(scratch_database, "head")
     present = set(_columns(scratch_database))
     assert not present & set(LATER_SLICE_COLUMNS), (
@@ -133,7 +148,7 @@ def test_the_constraint_is_named_exactly_once(scratch_database: str) -> None:
     ``compare_metadata`` cannot match against the model — silent drift that only
     shows up in the migration-drift test.
     """
-    _run_migration(scratch_database, "head")
+    _run_migration(scratch_database, PHASE521_REVISION)
     names = {
         str(row[0])
         for row in _rows(
@@ -148,7 +163,7 @@ def test_the_constraint_is_named_exactly_once(scratch_database: str) -> None:
 
 def test_the_pair_invariant_is_enforced_in_both_directions(scratch_database: str) -> None:
     """A ciphertext behind generation 0, and a generation with no material, both fail."""
-    _run_migration(scratch_database, "head")
+    _run_migration(scratch_database, PHASE521_REVISION)
     _seed_phase51(scratch_database)
 
     # A wrapped DEK with generation 0: an orphan, indistinguishable from "no DEK".
@@ -190,7 +205,7 @@ def test_the_pair_invariant_is_enforced_in_both_directions(scratch_database: str
 
 
 def test_downgrade_removes_the_columns_when_no_dek_is_stored(scratch_database: str) -> None:
-    _run_migration(scratch_database, "head")
+    _run_migration(scratch_database, PHASE521_REVISION)
     _seed_phase51(scratch_database)
 
     _run_downgrade(scratch_database, PRE_PHASE521_REVISION)
@@ -203,7 +218,7 @@ def test_downgrade_removes_the_columns_when_no_dek_is_stored(scratch_database: s
     ]
 
     # And it is forward-appliable again: a downgrade is a reversal, not a dead end.
-    _run_migration(scratch_database, "head")
+    _run_migration(scratch_database, PHASE521_REVISION)
     columns = _columns(scratch_database)
     assert columns["dek_ciphertext"] == ("text", "YES")
     assert columns["dek_generation"] == ("integer", "NO")
@@ -211,7 +226,7 @@ def test_downgrade_removes_the_columns_when_no_dek_is_stored(scratch_database: s
 
 def test_downgrade_refuses_to_discard_a_wrapped_dek(scratch_database: str) -> None:
     """The refusal is the point: a rollback must not delete key material."""
-    _run_migration(scratch_database, "head")
+    _run_migration(scratch_database, PHASE521_REVISION)
     _seed_phase51(scratch_database)
     _exec(
         scratch_database,

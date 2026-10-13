@@ -9,7 +9,7 @@ from __future__ import annotations
 import sys
 from functools import lru_cache
 from typing import Literal
-from urllib.parse import quote_plus, unquote_plus
+from urllib.parse import quote_plus, unquote_plus, urlsplit
 
 from cryptography.fernet import Fernet
 from pydantic import Field, field_validator, model_validator
@@ -26,6 +26,14 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
+        # A settings object holds every credential the process has (the signing
+        # key, the database password, the AppRole secret id). Pydantic renders the
+        # offending *input* into a validation error by default, and
+        # ``fail_on_bad_config`` prints that text to stderr — so a mistyped
+        # variable would echo the very secret it is complaining about. Hiding the
+        # input keeps the message (which names variables, never values) and drops
+        # the echo.
+        hide_input_in_errors=True,
     )
 
     # --- Core ---------------------------------------------------------
@@ -241,6 +249,40 @@ class Settings(BaseSettings):
                 "Generate one with: python -c 'from cryptography.fernet import Fernet;"
                 " print(Fernet.generate_key().decode())'"
             ) from exc
+        return v
+
+    @field_validator("kek_vault_addr")
+    @classmethod
+    def _reject_vault_addr_credentials(cls, v: str | None) -> str | None:
+        """Refuse a Vault address that carries userinfo (Phase 5.2.1.2, F4).
+
+        ``https://user:password@vault:8200`` puts a credential in a place nothing
+        here reads: Vault access is AppRole, through ``KEK_VAULT_ROLE_ID`` and
+        ``KEK_VAULT_SECRET_ID``. Such an address is at best a mistake — the
+        credentials are silently dropped by the HTTP client's base URL rules — and
+        at worst a password sitting in a shell history, a compose file and a log
+        line. It is rejected for that reason.
+
+        The message names the variables and never the value: a validation error is
+        startup output, and the input is exactly what must not appear in it (see
+        ``hide_input_in_errors`` above). A path prefix is untouched —
+        ``https://vault.example:8200/team`` stays valid, since only the *authority*
+        component is inspected.
+        """
+        if v is None or not v.strip():
+            return v
+        try:
+            parts = urlsplit(v)
+        except ValueError:
+            # Not parseable as a URL at all; the https:// check reports that with a
+            # message that does not quote the value either.
+            return v
+        if parts.username is not None or parts.password is not None or "@" in parts.netloc:
+            raise ValueError(
+                "KEK_VAULT_ADDR must not embed a username or password: Vault access "
+                "is authenticated with KEK_VAULT_ROLE_ID and KEK_VAULT_SECRET_ID. "
+                "Remove the credentials from the address."
+            )
         return v
 
     @field_validator("log_level")

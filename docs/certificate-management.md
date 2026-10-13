@@ -39,13 +39,24 @@ phase5-design.md §1.1 and §10.1.1.
 
 **Shipped since (5.2.1):** the **key envelope** — the `KEKProvider` seam, the Vault
 Transit adapter, the explicitly selected deterministic test/dev provider, the
-operation-scoped organization DEK (`organizations.dek_ciphertext` + `dek_generation`,
-wrapped and never stored in plaintext), provider health reporting, and the KEK-rotation
-rewrap path. The organization/purpose/generation binding travels as the derivation
-context of a `derived=true` transit key (phase5-design.md §6.7 amendment). **It protects
-nothing yet** — no certificate material exists in the database for it to wrap — so its
-value here is structural: the custody path is built and tested before the first key it
-will hold.
+operation-scoped organization DEK (`organization_dek_envelopes.dek_ciphertext` +
+`dek_generation`, always wrapped, never stored in plaintext), provider health reporting,
+and the KEK-rotation rewrap path. The organization/purpose/generation binding travels as
+the derivation context of a `derived=true` transit key (phase5-design.md §6.7 amendment).
+**It protects nothing yet** — no certificate material exists in the database for it to
+wrap — so its value here is structural: the custody path is built and tested before the
+first key it will hold.
+
+**Hardened since (5.2.1.2, 2026-10-14):** the independent audit of 5.2.1 recorded four
+findings, all fixed before any material column is added (phase5-design.md §10.6). The
+envelope left the RLS-exempt `organizations` table (F1) — it is now a tenant table, so
+PostgreSQL refuses a cross-tenant read instead of relying on the KEK provider alone; the
+rewrap is compare-and-set against the envelope it read (F2), so a stale rewrap cannot
+overwrite a newer one and a losing writer reloads rather than clobbers; `dek_generation`
+carries the non-negative bound the design documented but had not created, alongside the
+paired-column invariant (F3); and a Vault address with embedded credentials is refused at
+startup (F4). None of it touches issuance, DNS credentials or delivery, which still do
+not exist.
 
 **Not shipped (the rest of this document):** `dns_providers` and its credential storage,
 `acme_accounts`, and therefore **any** ACME
@@ -379,8 +390,10 @@ success (phase5-design.md §8.6).
 ## 9. Storage and leak paths
 
 **Phase 5 target (not the current secret-store path):** certificate and DNS-credential
-ciphertext is Fernet under a **per-organization DEK**, itself wrapped under
-`ENCRYPTION_KEY` (the KEK) and stored on the organization row. `decrypt_str` fails
+ciphertext is Fernet under a **per-organization DEK**, itself wrapped under the KEK and
+stored in the organization's row of `organization_dek_envelopes` (a tenant table behind
+RLS — not on the RLS-exempt `organizations` row, where 5.2.1 first put it; §10.6 of
+phase5-design.md). `decrypt_str` fails
 closed on a mismatch. This does **not** re-encrypt the existing secret store — secrets,
 `secret_versions`, `server_credentials` and channel configs keep the current single-key
 path (`backend/app/core/security.py`), and migrating them is a separate reviewed change.

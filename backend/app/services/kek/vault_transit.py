@@ -31,6 +31,7 @@ import asyncio
 import base64
 import ssl
 import time
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -58,6 +59,21 @@ _CIPHERTEXT_PREFIX = "vault:v"
 #: is never echoed into a log or an exception message.
 _AUTH_FAILED = "authentication failed"
 _DERIVATION_REQUIRED = "key derivation"
+
+
+def _embeds_userinfo(addr: str) -> bool:
+    """Whether a Vault address carries ``user:password@`` (Phase 5.2.1.2, F4).
+
+    Only the authority component is inspected, so a path prefix
+    (``https://vault.example:8200/team``) is unaffected. An address that does not
+    parse as a URL at all is left to the ``https://`` check, which refuses it
+    first anyway.
+    """
+    try:
+        parts = urlsplit(addr)
+    except ValueError:
+        return False
+    return parts.username is not None or parts.password is not None or "@" in parts.netloc
 
 
 class VaultTransitKEKProvider:
@@ -93,6 +109,16 @@ class VaultTransitKEKProvider:
             raise KEKConfigurationError(
                 "KEK_VAULT_ADDR must use https:// — Vault carries the root key and "
                 "certificate verification is mandatory"
+            )
+        if _embeds_userinfo(addr):
+            # Same reasoning: authentication is AppRole, so a user:password in the
+            # address is a credential nothing here consumes — it must not be
+            # carried into an httpx base URL or a request log. Neither this message
+            # nor the settings one quotes the address (Phase 5.2.1.2, F4).
+            raise KEKConfigurationError(
+                "KEK_VAULT_ADDR must not embed a username or password: Vault access is "
+                "authenticated with KEK_VAULT_ROLE_ID and KEK_VAULT_SECRET_ID. Remove "
+                "the credentials from the address."
             )
         if ca_bundle == "":
             # An empty bundle string would silently fall back to the system store;

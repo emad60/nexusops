@@ -543,6 +543,94 @@ async def test_rls_rejects_cross_tenant_writes_without_the_orm(client, owner, or
     ) == [("legit",)]
 
 
+async def test_the_organization_dek_envelope_is_a_tenant_table(org_a, second_org):
+    """Key material is out of reach of a read *and* a write, in raw SQL.
+
+    This is audit finding F1's exit test. Before Phase 5.2.1.2 the wrapped DEK was
+    two columns on ``organizations``, which is RLS-exempt, so a query like the ones
+    below would have returned another tenant's envelope and PostgreSQL would have
+    allowed it — the cryptography was the only thing standing between the caller
+    and the key. Now the same statements are refused by the database.
+
+    The rows are created here as the application role with the tenant GUC set, so
+    what is asserted is the policy on a genuinely populated table rather than on an
+    empty one.
+    """
+
+    def _insert(org: str, marker: str) -> list[tuple]:
+        return _raw_probe(
+            "INSERT INTO organization_dek_envelopes "
+            "(id, org_id, dek_ciphertext, dek_generation, created_at, updated_at) "
+            "VALUES (gen_random_uuid(), %s, %s, 1, now(), now()) RETURNING org_id",
+            (org, f"v1:test:rls-probe:1:{marker}"),
+            org=org,
+        )
+
+    assert [str(row[0]) for row in _insert(org_a["id"], "a")] == [org_a["id"]]
+    assert [str(row[0]) for row in _insert(second_org["id"], "b")] == [second_org["id"]]
+
+    # A: an unfiltered read sees only A.
+    assert {
+        str(row[0])
+        for row in _raw_probe("SELECT org_id FROM organization_dek_envelopes", org=org_a["id"])
+    } == {org_a["id"]}
+    # A: asking for B's envelope by its organization id returns nothing.
+    assert (
+        _raw_probe(
+            "SELECT dek_ciphertext FROM organization_dek_envelopes WHERE org_id = %s",
+            (second_org["id"],),
+            org=org_a["id"],
+        )
+        == []
+    )
+    # No scope at all: nothing, including A's own row.
+    assert _raw_probe("SELECT org_id FROM organization_dek_envelopes") == []
+    # The system scope is the cross-tenant one — and the only one that reads both.
+    assert {
+        str(row[0])
+        for row in _raw_probe(
+            "SELECT org_id FROM organization_dek_envelopes",
+            org="00000000-0000-0000-0000-000000000000",
+        )
+    } == {org_a["id"], second_org["id"]}
+
+    # A: an UPDATE aimed at B's envelope matches no row, so the value is untouched.
+    assert (
+        _raw_probe(
+            "UPDATE organization_dek_envelopes SET dek_ciphertext = 'overwritten' "
+            "WHERE org_id = %s RETURNING org_id",
+            (second_org["id"],),
+            org=org_a["id"],
+        )
+        == []
+    )
+    assert _raw_probe(
+        "SELECT dek_ciphertext FROM organization_dek_envelopes WHERE org_id = %s",
+        (second_org["id"],),
+        org=second_org["id"],
+    ) == [("v1:test:rls-probe:1:b",)]
+
+    # A: an INSERT that claims B's organization is refused by the policy's WITH CHECK.
+    error = _raw_probe(
+        "INSERT INTO organization_dek_envelopes "
+        "(id, org_id, dek_ciphertext, dek_generation, created_at, updated_at) "
+        "VALUES (gen_random_uuid(), %s, 'smuggled', 1, now(), now())",
+        (second_org["id"],),
+        org=org_a["id"],
+        expect_error=True,
+    )
+    assert error is not None and "row-level security" in str(error)
+
+    # A: repointing its own envelope at B is refused for the same reason.
+    error = _raw_probe(
+        "UPDATE organization_dek_envelopes SET org_id = %s WHERE org_id = %s",
+        (second_org["id"], org_a["id"]),
+        org=org_a["id"],
+        expect_error=True,
+    )
+    assert error is not None and "row-level security" in str(error)
+
+
 async def test_every_table_with_an_org_id_has_a_policy(org_db):
     """Catalog completeness: a new tenant table cannot ship unprotected.
 

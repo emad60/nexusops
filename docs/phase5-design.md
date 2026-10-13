@@ -798,7 +798,7 @@ the KEK or the application runtime is compromised, and no document may claim it 
 
 ```mermaid
 flowchart LR
-    KEK["ENCRYPTION_KEY (KEK, env)<br/>wraps DEKs only"] -->|wrap/unwrap| D1["Org A DEK (wrapped,<br/>organizations.dek_ciphertext)"]
+    KEK["ENCRYPTION_KEY (KEK, env)<br/>wraps DEKs only"] -->|wrap/unwrap| D1["Org A DEK (wrapped,<br/>organization_dek_envelopes)"]
     KEK --> D2["Org B DEK (wrapped)"]
     D1 -->|"Fernet"| C1["Org A: certificate key/chain,<br/>dns_providers creds, acme account key"]
     D2 --> C2["Org B: certificate key/chain,<br/>dns_providers creds, acme account key"]
@@ -810,8 +810,11 @@ flowchart LR
   production source is an external **KMS / secret manager**, and the `unwrap` call is
   the single seam that swap replaces (§6.6).
 - **DEK:** one Fernet key per organization, generated lazily at the first Phase-5 write
-  and stored **wrapped** on the organization row (`organizations.dek_ciphertext`),
-  with a `dek_generation` integer. A plaintext DEK exists only for the operation that
+  and stored **wrapped** in that organization's own row of
+  `organization_dek_envelopes` (`dek_ciphertext`, with a `dek_generation` integer). The
+  design originally put these two columns on `organizations` itself; 5.2.1.2 moved them
+  into a tenant table, because `organizations` is RLS-exempt and the envelope therefore
+  sat outside every database-level tenant net (§10.6). A plaintext DEK exists only for the operation that
   unwrapped it and is dropped when that operation ends: **operation-scoped unwrap, no
   long-lived plaintext-DEK cache** (§6.7 approved point 5, §6.9). This is deliberately
   *not* the module-global `_fernet_cache` pattern the secret store uses, and it applies
@@ -831,7 +834,7 @@ flowchart LR
 
 | Rotation | Procedure | Cost |
 |---|---|---|
-| Org DEK | Generate a new DEK, wrap under the KEK, bump `organizations.dek_generation`, then background re-encrypt rows whose `deke_id` is older — per-org batches, resumable, using an explicit `state=ROTATING` marker so a half-rotated org is visible. Old DEK kept until the last row is migrated, then cleared. | Re-encrypts that org's cert/DNS material |
+| Org DEK | Generate a new DEK, wrap under the KEK, bump the organization's `dek_generation`, then background re-encrypt rows whose `deke_id` is older — per-org batches, resumable, using an explicit `state=ROTATING` marker so a half-rotated org is visible. Old DEK kept until the last row is migrated, then cleared. | Re-encrypts that org's cert/DNS material |
 | KEK (`ENCRYPTION_KEY`) | Rotate by re-wrapping every org DEK only — **touches no ciphertext rows**, fast, and the reason the envelope exists. Today's single-key design cannot do this (S5). | Re-wrap ~1 row per org |
 | Certificate key (per cert) | Generate a new generation (renewal); the old generation is `SUPERSEDED`. Keys are per-certificate, so this is the normal renewal path. | One ACME order |
 | ACME account key | Generate a new account key, re-register, and roll the old key out per RFC 8555 key-rollover; the old key stays until rollover completes. | One CA round-trip |
@@ -977,10 +980,12 @@ the ciphertext**, not stored beside it, so a wrapped DEK cannot be replayed unde
 
 Rules that make the seam real rather than decorative:
 
-1. **`organizations.dek_ciphertext` stores a self-describing envelope**
+1. **The organization envelope stores a self-describing value**
    (`provider:key_id:key_version:<base64 ciphertext>`, versioned). It is one Text
    column in 5.2, so adding a provider must not require a migration, and a row always
-   says which provider can unwrap it. *(Decided here; implemented in 5.2.)*
+   says which provider can unwrap it. *(Decided here; implemented in 5.2 — on
+   `organizations` at first, relocated to the RLS-scoped `organization_dek_envelopes`
+   in 5.2.1.2, §10.6.)*
 2. **`rewrap_dek` is a provider operation**, so §6.3's "KEK rotation = re-wrap every org
    DEK" never decrypts a DEK into application memory to re-encrypt it.
 3. **No provider may return the root key**, and no application code path reads, logs or
@@ -1110,7 +1115,7 @@ somewhere.
 | Key creation (operator) | The transit key is created **once, by the operator**, with **`derived=true`** and a type that supports a derivation context (`aes256-gcm96`). The application never creates or configures keys, so `derived=true` belongs in the provisioning runbook (§6.7 amendment) |
 | Wrapping | `wrap_dek` with the `EncryptionContext` bound as the **derivation context** of a `derived=true` key (§6.7 amendment) — not as AAD, which rewrap cannot carry. The stored value is the self-describing envelope, so the row states which provider, key and version can unwrap it |
 | Rotation (KEK-only) | **`rewrap_dek` provider-side** (approved point 6): Vault `transit/rewrap` rewrites each stored ciphertext under the new key version with no plaintext DEK returned to the application. It is idempotent per row and resumable |
-| Rotation (org DEK) | New DEK generation → wrapped → `organizations.dek_generation` bumped → the org's Phase-5 rows re-encrypted in background batches, each row's `deke_id` updated as it is re-encrypted. A half-rotated org is visible (mixed `deke_id`), never silently half-readable |
+| Rotation (org DEK) | New DEK generation → wrapped → the organization's `dek_generation` bumped → the org's Phase-5 rows re-encrypted in background batches, each row's `deke_id` updated as it is re-encrypted. A half-rotated org is visible (mixed `deke_id`), never silently half-readable |
 | Recovery | A generation whose ciphertext cannot be unwrapped is **not** served and **not** guessed at: it is marked failed with a reason and re-issued (§6.5), matching the fail-closed behaviour of `decrypt_str` today |
 | Key loss | Stated above, and stated in the UI/docs (C6): per-org DEKs do **not** bound a KEK compromise or an application-runtime compromise (§6.1). Nothing in this section changes that, and no document or interface may imply it does |
 
@@ -1477,7 +1482,7 @@ so an operator is never told a certificate is revoked when it is not.
 | Slice | Scope | Ships | Acceptance criteria |
 |---|---|---|---|
 | **5.1 — Certificate metadata & lifecycle foundations — SHIPPED 2026-10-12 (`37b7211`)** | `certificates` + `certificate_generations` **first** migration (identity + pre-issuance lifecycle only — **no `dns_provider_id`, no material columns, no `deke_id`**), `certificate.read`/`certificate.manage` codenames **+ the role matrix (§4.1, O3 resolved)**, RLS/grant pattern from the Phase 4 migration, metadata-only CRUD (no issuance) | Migration + API + IDOR cases | A `certificates` row is org-scoped; a foreign id is 404; `GET` returns no ciphertext field; the one-live-generation unique index rejects a second concurrent issuance; **the generation `state` CHECK is limited to pre-issuance states, so an `ISSUED` row is rejected** (no forward dependency on 5.2); no `dns_providers` table exists yet and nothing references one; no `deke_id` column exists, so no placeholder can be written; role matrix matches §4.1; drift test green. |
-| **5.2.1 — KEK provider and organization DEK envelope** — *next; the approved direction is §6.7, the plan is §10.5* | The `KEKProvider` seam with the **Vault Transit** adapter and the deterministic test provider; `organizations.dek_ciphertext` / `dek_generation`; org-DEK create/wrap/unwrap/rewrap; provider configuration + fail-fast startup validation; operation-scoped unwrap (no LRU) | Migration (`organizations`) + provider module + envelope service + config + tests | A production configuration cannot select or fall back to a non-production provider (abort at import); the KEK never reaches application code, the DB plaintext, logs or responses; a wrap/unwrap round-trip is bound to `(org_id, purpose, dek_generation)` so a moved ciphertext is rejected; `rewrap_dek` leaves no plaintext DEK in the application; provider outage fails closed with a named error while the API stays up; **no certificate/DNS material column exists yet, so nothing can be written with a placeholder key** |
+| **5.2.1 — KEK provider and organization DEK envelope — SHIPPED 2026-10-12 (`06e8c52`); storage relocated by **5.2.1.2** (`a7b8c9d0e1f2`, §10.6)* | The `KEKProvider` seam with the **Vault Transit** adapter and the deterministic test provider; the organization envelope (`organization_dek_envelopes.dek_ciphertext` / `dek_generation` — the plan put these on `organizations`; §10.6 moved them); org-DEK create/wrap/unwrap/rewrap; provider configuration + fail-fast startup validation; operation-scoped unwrap (no LRU) | Migration (`organization_dek_envelopes` + the `organizations` columns it retires) + provider module + envelope service + config + tests | A production configuration cannot select or fall back to a non-production provider (abort at import); the KEK never reaches application code, the DB plaintext, logs or responses; a wrap/unwrap round-trip is bound to `(org_id, purpose, dek_generation)` so a moved ciphertext is rejected; `rewrap_dek` leaves no plaintext DEK in the application; provider outage fails closed with a named error while the API stays up; **no certificate/DNS material column exists yet, so nothing can be written with a placeholder key** |
 | **5.2.2 — Providers, ACME accounts and material columns** — *after 5.2.1* | `dns_providers` + its metadata-only API and credential storage, `acme_accounts`, the generation material columns + `deke_id`, `certificates.dns_provider_id` **FK added with its target table**, widened `state` vocabulary, **material guard CHECK**; `verify_creds` + zone allowlist | Migration + service + write-only API | **An issued (or superseded/suspended/expired/revoked) generation cannot exist without `key_ciphertext`, `chain_ciphertext`, `deke_id`, `issued_at` and `not_after`** (guard CHECK rejects it); `dns_provider_id` FK resolves to a real row (no artificial provider); DNS credential never returned by any endpoint; a challenge outside `zone_allowlist` is refused; DEK rotation re-encrypts only Phase-5 rows; no existing secret re-encrypted; a `decrypt_str` mismatch fails closed |
 | **5.3 — ACME issuance (staging + pebble)** | `acme`/`josepy` dependency behind `AcmeProvider`; per-org account; DNS-01 order → publish → propagate → validate → finalize → store; state machine; backoff | Worker task + tests against pebble | Issue a certificate for a name whose TXT record the test publishes; generation reaches `ISSUED` with `not_after` set; retry/backoff and stuck-state sweep pinned; **no production CA traffic in tests** |
 | **5.4 — Secure delivery** | `certificate_deliveries`, `POST /agent/certificates/{id}/material`, `certificate.install`/`.remove` op types + agent handlers, content-addressed paths, fingerprint check, no-store response policy | Endpoint + op types + agent + contract tests | **No certificate private key or chain appears in operation params, results, audit metadata, events or logs** (asserted by tests over each path, §7.6); a foreign node's delivery is 404; a superseded generation is refused; a duplicate claim is idempotent; interrupted delivery recovers within the window and not after. **Non-production only until C1–C6 (§6.6) are met.** |
@@ -1647,6 +1652,14 @@ key, because no column exists to store one in.
 | Downgrade | Drops both columns. It **must fail loudly** rather than silently discard material that exists: if any row has `dek_ciphertext IS NOT NULL`, the downgrade refuses with a message naming the affected organizations (a downgrade that destroys the only copy of a wrapped DEK is not a routine operation) |
 | Not in this migration | No `dns_providers`, no `acme_accounts`, no material columns, no guard CHECK, no RLS change (an existing tenant column on an existing RLS-governed table needs none) |
 
+> **Superseded in 5.2.1.2 (§10.6, 2026-10-14).** The two column rows above are the plan as
+> it stood at 5.2.1 and are kept as the record of it. The audit of that slice found the
+> placement itself was the defect — `organizations` is RLS-exempt, so the envelope had no
+> database-level tenant net — and the envelope now lives in the tenant table
+> `organization_dek_envelopes`. Read §10.6 for the shipped schema; the nullable/generation
+> semantics and the pair invariant are unchanged, only relocated (plus the missing
+> `dek_generation >= 0` bound).
+
 #### 10.5.2 Modules, interfaces and configuration
 
 | Artifact | Contents |
@@ -1697,6 +1710,43 @@ cannot select a non-production provider, and the Adapter operates against Vault 
 CI. **No certificate has been issued, no key material exists, and no DNS or ACME record has
 been created** when this slice is done — by construction, since none of those columns exist
 yet.
+
+### 10.6 Phase 5.2.1.2 — envelope isolation, rewrap safety, address hygiene (audit remediation)
+
+**Scope.** Exactly the four findings of the independent security audit of 5.2.1
+(`ba4de5e8e7b7e45e294dee55de4f38983ad885f6`). **Out of scope, deliberately:** DNS-provider
+credentials, ACME accounts, certificate material, issuance and agent delivery — none of
+them exist, and none of them are introduced here. This slice hardens the custody path that
+5.2.1 built, before the first key it will hold exists.
+
+| Finding | What was wrong | Fix |
+|---|---|---|
+| **F1** — the envelope sat outside every database-level tenant net | `dek_ciphertext`/`dek_generation` lived on `organizations`, a documented RLS-exempt table (it *is* the tenant). Any read path that could reach an organization row could read another tenant's wrapped DEK, and PostgreSQL would not have refused — confidentiality rested on the KEK provider alone | The envelope moved to `organization_dek_envelopes`: `org_id` NOT NULL with a `ON DELETE CASCADE` FK, `uq_organization_dek_envelopes_org_id` making "one authoritative envelope per organization" a schema guarantee, the same tenant + system policies as every other tenant table, and the explicit app-role grant (the tenancy migration's blanket `GRANT ... ON ALL TABLES` predates the table). Envelope reads and writes go through that table only; the RLS-exempt path no longer holds key material at all. Populated envelopes are copied before the source columns are dropped, and the migration raises if the counts disagree |
+| **F2** — a concurrent or stale rewrap could overwrite a newer envelope | `rewrap_org_deks` updated the row by organization id alone, so a rewrap that read version *n* could land after one that read *n+1* and silently regress the stored envelope to an older, still-readable — and therefore *valid-looking* — value | The update is compare-and-set on the exact envelope value **and** generation read before the provider call (`... WHERE org_id = $1 AND dek_ciphertext = $old AND dek_generation = $gen`). A losing writer updates zero rows, reloads the authoritative state, and either re-attempts under a bounded retry budget or exits without writing. KEK-only rotation still delegates to the provider's rewrap, so no plaintext DEK enters the process, and the DEK generation is not incremented merely because the KEK version moved (a rewrap moves the *key version* carried inside the envelope) |
+| **F3** — the documented generation bound was never created | 5.2.1 documented `dek_generation >= 0` and shipped only the pair invariant, so a negative generation was representable by any writer that bypassed the model | `ck_organization_dek_envelopes_dek_generation_non_negative` alongside the relocated pair CHECK, both declared in the model metadata so the drift check stays green. Valid: the initial state (`NULL` ciphertext, generation `0`) and a populated envelope (generation `≥ 1`); rejected: a negative generation, a ciphertext at generation `0`, a generation without ciphertext, and either half of any inconsistent pair |
+| **F4** — a Vault address could carry HTTP credentials | `KEK_VAULT_ADDR=https://user:password@vault:8200` was accepted. Vault access here is AppRole, so those credentials are read by nothing — the HTTP client drops them from a base URL — while they sit in a compose file, a shell history and any startup output | Rejected in both places that can construct a Vault client: settings validation at startup and the adapter's own constructor. Only the authority component is inspected, so a path prefix (`https://vault.example:8200/team`) stays valid, and neither message quotes the address or its contents (settings errors also set `hide_input_in_errors`, so pydantic does not echo the rejected input). https-only and mandatory TLS verification are unchanged |
+
+**Access model after this slice.** One row per organization, in a tenant table, behind two
+RLS policies, reachable by the application role with the four DML verbs and *not* as owner
+(`NOSUPERUSER NOBYPASSRLS`). Tenant scope reads and writes only its own envelope; the
+system scope (the sentinel GUC) is the sweep/administrative path and is unchanged from every
+other tenant table. The RLS-exempt `organizations` table holds no key material. The
+compare-and-set predicate is the only write path, so "the value I wrote is the value I
+read" is enforced by the database rather than by the ordering of two application calls.
+
+**Verification.** `backend/tests/integration/test_migration_phase5212.py` (the move, the
+data preservation, the constraint pair, the RLS/grant shape, the constraint names, and the
+downgrade that restores or stops with the key material still in place),
+`backend/tests/integration/test_org_dek_envelope.py` (scoped access, cross-tenant refusal,
+concurrent rewrap, stale snapshot, duplicate attempt, provider failure between rewrap and
+update), `backend/tests/integration/test_tenant_isolation.py` (raw SQL under the runtime
+role), and `backend/tests/unit/test_kek_selection.py` /
+`backend/tests/unit/test_kek_vault_transit.py` (the address rule, at both construction
+sites).
+
+**Not in this slice, and unchanged by it:** no certificate material column, no
+dns_providers credential, no ACME account key, no issuance, no delivery. 5.2.2 remains the
+next step, and this slice is the precondition for it rather than a part of it.
 
 ---
 

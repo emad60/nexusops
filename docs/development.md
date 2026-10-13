@@ -227,8 +227,13 @@ make test                 # unit backend + frontend vitest — no services neede
   (`KEK_PROVIDER=test` — the deterministic fixture provider, never a fallback).
 - **Key-management tests, and the one that needs Docker.** `tests/unit/` covers the
   envelope codec, the deterministic provider, provider selection (including the
-  production refusal) and the Vault adapter's HTTP contract against a mocked
-  transport. The real-Vault behaviour — derivation context binding, rewrap, least
+  production refusal, the credential-free Vault address rule at both construction
+  sites — settings validation and the adapter — and the path-prefix case) and the Vault
+  adapter's HTTP contract against a mocked transport.
+  `tests/integration/test_org_dek_envelope.py` covers the scoped access path: the
+  envelope's own table, cross-tenant refusal, and the compare-and-set rewrap under
+  concurrency (two rewraps racing, a stale snapshot, a duplicate attempt, a provider
+  failure between the rewrap and the update). The real-Vault behaviour — derivation context binding, rewrap, least
   privilege, and the measured reason AAD cannot be the binding — is asserted in
   `tests/integration/test_kek_vault_transit_live.py`, which starts its **own**
   throwaway `hashicorp/vault:1.15` container (unique name, loopback port, generated
@@ -239,12 +244,13 @@ make test                 # unit backend + frontend vitest — no services neede
   `asyncio_mode = "auto"`, `--strict-markers`, and the single custom marker
   `integration: requires PostgreSQL + Redis`. `DeprecationWarning` raised from
   `app.*` code is an error — fix the source, do not filter it.
-- The suite collects **1104** test cases today — 735 unit and 369 integration
+- The suite collects **1138** test cases today — 751 unit and 387 integration
   (`pytest --collect-only`, `-m "not integration"` / `-m "integration"` split; integration
-  tests are parametrized, so a handful of functions cover many scenarios). 22 of them are the
+  tests are parametrized, so a handful of functions cover many scenarios). 25 of them are the
   cross-tenant isolation gate in `tests/integration/test_tenant_isolation.py`, which
   connects to Postgres as the RLS-enforced application role to probe the policies
-  without the ORM.
+  without the ORM — including the organization DEK envelope, which is a tenant table
+  since 5.2.1.2 and is probed the same way as every other one.
 
 > **Gotcha:** the Makefile builds `DATABASE_URL` from the shell environment
 > (`$POSTGRES_PASSWORD`, default `change-me-postgres`) — it does **not** read your

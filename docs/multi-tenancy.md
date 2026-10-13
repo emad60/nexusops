@@ -341,7 +341,14 @@ credential-routing table so `servers` itself gets full RLS.
 this doc already scopes (containers, deployments, log entries, metric
 snapshots, monitors, incidents, secrets, notification channels, events/audit —
 among others), plus the future domains, routes, certificates, operations,
-grants. Session guard + RLS.
+grants, and the organization DEK envelope `organization_dek_envelopes`
+(Phase 5.2.1.2). Session guard + RLS.
+  The DEK envelope belongs to this class *because an audit said so*: 5.2.1 put it
+  on `organizations` — class (a) below, RLS-exempt — so every tenant's wrapped key
+  sat outside the database-level net, with only the KEK provider between a stray
+  read path and another organization's key material. Moving it into a tenant table
+  is that audit's F1, and the reason a new org-bearing table should be argued into
+  class (a) explicitly rather than grandfathered by where it was first written.
 
 - Platform ops tables (later phases): enrollment token objects are org-scoped, but
   the registry itself is platform data.

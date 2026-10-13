@@ -425,7 +425,7 @@ the org-DEK envelope to
 
 ```mermaid
 flowchart LR
-    KEK["KEK (ENCRYPTION_KEY today; KMS-managed later)"] -->|"wraps"| D1["Org A DEK (wrapped, stored on org row)"]
+    KEK["KEK (ENCRYPTION_KEY today; KMS-managed later)"] -->|"wraps"| D1["Org A DEK (wrapped, stored in organization_dek_envelopes)"]
     KEK -->|"wraps"| D2["Org B DEK (wrapped)"]
     D1 -->|"Fernet-encrypts"| S1["Org A secrets + versions, credentials, channel config"]
     D2 -->|"Fernet-encrypts"| S2["Org B secrets + versions, credentials, channel config"]
@@ -434,7 +434,7 @@ flowchart LR
 | Layer | What | Notes |
 |---|---|---|
 | KEK (root) | Master key | Wraps DEKs only. Today `ENCRYPTION_KEY` for the secret store; for Phase-5 material it is the **approved external provider** (Vault Transit, `derived=true` key, phase5-design.md §6.7) — never present in the process |
-| DEK | One Fernet key per Organization | Generated at org creation; stored **wrapped** (`organizations.dek_ciphertext`); plaintext DEK exists in process memory only |
+| DEK | One Fernet key per Organization | Generated at org creation; stored **wrapped** (`organization_dek_envelopes.dek_ciphertext`, one authoritative row per organization, RLS-scoped since Phase 5.2.1.2 — it sat on the RLS-exempt `organizations` row before that); plaintext DEK exists in process memory only |
 | Data | secrets, secret_versions, credentials, channel config | Fernet under the org's DEK |
 
 Mechanics:

@@ -503,6 +503,13 @@ references — no forward reference, no placeholder DEK id, no artificial provid
 | **5.2** — key envelope, providers, ACME accounts, material | `dns_providers`, `acme_accounts`; `organizations.dek_ciphertext` / `organizations.dek_generation` | `certificates`: `+dns_provider_id` (FK → `dns_providers`), `+suspended_at`, `+suspension_reason`. `certificate_generations`: `+key_ciphertext`, `+chain_ciphertext`, `+fingerprint`, `+not_before`, `+not_after`, `+deke_id`, `+issued_at`, `+revoked_at`, `+revocation_state`, `+suspended_at`, `+suspension_reason`; **widen `state`** to the full vocabulary; **add the material guard CHECK** | The FK target, the envelope and the material columns land together, so the reference is always satisfiable and the guard CHECK can be written once. |
 | 5.4 / 5.5 / 5.6 | `certificate_deliveries` (5.4); `routes.certificate_id` + widened `scheme` (5.5); `monitors.target_type` + `CERTIFICATE` (5.6) | as scoped in §10.1 | Each consumes the 5.1/5.2 foundations; none introduces an earlier dependency. |
 
+**Where the 5.2 row's envelope actually landed (2026-10-14):** the row above names
+`organizations.dek_ciphertext` / `organizations.dek_generation`, which is the plan as it
+stood — 5.2.1 shipped exactly those two columns, and 5.2.1.2 then moved them to the tenant
+table `organization_dek_envelopes` because `organizations` is RLS-exempt (§10.6, audit
+finding F1). The boundary the table argues for is unchanged; only the table the envelope
+lives in moved, and the row is kept as the plan it was rather than silently rewritten.
+
 **The rule the sequence encodes:** a nullable column introduced early is acceptable
 only when a constraint makes its absence invalid in every state that requires it. Here
 `deke_id` is nullable (pre-issuance rows legitimately have no DEK), but the 5.2 guard
@@ -521,7 +528,7 @@ but the *work inside it* has an order, and the first step is external:
 | # | Step | Depends on |
 |---|---|---|
 | 1 | **KEK provider adapter** behind the seam in §6.7 (`wrap_dek`/`unwrap_dek`/`rewrap_dek`), first implementation **Vault Transit** (approved; §10.5 is its plan) | Nothing — the decision is in. **Blocks steps 2–6**: without it there is no key the org DEK may be wrapped under, and an env-var fallback is exactly the unsafe source §6.7 forbids |
-| 2 | `organizations.dek_ciphertext` / `dek_generation` + org-DEK creation and **operation-scoped unwrap** (no long-lived plaintext-DEK cache) — the **only** place a DEK is wrapped or unwrapped | Step 1 |
+| 2 | The organization DEK envelope — `organization_dek_envelopes.dek_ciphertext` / `dek_generation` (planned on `organizations`; moved in 5.2.1.2, §10.6) + org-DEK creation and **operation-scoped unwrap** (no long-lived plaintext-DEK cache) — the **only** place a DEK is wrapped or unwrapped | Step 1 |
 | 3 | `dns_providers` table + its metadata-only API, then credential *acceptance* (`credentials_ciphertext`, `credential_fingerprint`) | Step 2 — the credential blob is wrapped under the org DEK, so accepting one without the envelope would be a partially working store |
 | 4 | `acme_accounts` + per-org account-key protection | Step 2 (same envelope); independent of step 3 |
 | 5 | `certificates.dns_provider_id` FK (lands **with** its target table), generation material columns, widened `state`, the material guard CHECK, `deke_id` | Steps 2–4 |

@@ -234,9 +234,9 @@
     "semantic_hash": "5bf207fba39dd409cbc3519cc84c52b8"
   },
   "backend/app/core/config.py": {
-    "mtime": 1791764120.4592433,
-    "seen": 1791766948.2509723,
-    "ast_hash": "e024e2bcbe6c78e65e46feb8d47e5b18",
+    "mtime": 1791930028.2140088,
+    "seen": 1791932398.4657583,
+    "ast_hash": "78cc20978ef8e436bc6ab0bd73ed9ce3",
     "semantic_hash": ""
   },
   "backend/app/core/db.py": {
@@ -306,9 +306,9 @@
     "semantic_hash": ""
   },
   "backend/app/models/__init__.py": {
-    "mtime": 1791757790.1058877,
-    "seen": 1791760464.56017,
-    "ast_hash": "f095860910ee35d80c1a08766f62e540",
+    "mtime": 1791927378.5466309,
+    "seen": 1791932398.4657738,
+    "ast_hash": "94bc79b26390096b94019ccb0ba16ef3",
     "semantic_hash": ""
   },
   "backend/app/models/base.py": {
@@ -1506,15 +1506,15 @@
     "semantic_hash": ""
   },
   "docs/deployment.md": {
-    "mtime": 1791765666.1051576,
-    "seen": 1791766948.251325,
-    "ast_hash": "da3886c52afb699235419e43361c2c9c",
+    "mtime": 1791930839.0334394,
+    "seen": 1791932398.4660952,
+    "ast_hash": "1faf106d7152470c229e3d9bb062a07f",
     "semantic_hash": ""
   },
   "docs/development.md": {
-    "mtime": 1791765744.6537046,
-    "seen": 1791766948.2513258,
-    "ast_hash": "a59ace15ef219f8a7c60f9043fb9e81a",
+    "mtime": 1791931095.4059484,
+    "seen": 1791932398.466096,
+    "ast_hash": "e3195f02ee9be6e121dc200da412c326",
     "semantic_hash": ""
   },
   "docs/engineering-report.md": {
@@ -1566,9 +1566,9 @@
     "semantic_hash": ""
   },
   "docs/certificate-management.md": {
-    "mtime": 1791765647.2901587,
-    "seen": 1791766948.251323,
-    "ast_hash": "46204ca26353fdc641a7957e282198b3",
+    "mtime": 1791930947.2954335,
+    "seen": 1791932398.466093,
+    "ast_hash": "867313a3f21db6eeacfb072a773738b9",
     "semantic_hash": ""
   },
   "docs/deployment-architecture.md": {
@@ -1590,9 +1590,9 @@
     "semantic_hash": ""
   },
   "docs/multi-tenancy.md": {
-    "mtime": 1791584907.9414024,
-    "seen": 1791587770.9540844,
-    "ast_hash": "cc5b13a114ac9fb6c1f52873cd30626a",
+    "mtime": 1791930857.1431808,
+    "seen": 1791932398.4661,
+    "ast_hash": "c5f761d613f7cb1aeb366fa1a667ed18",
     "semantic_hash": ""
   },
   "docs/node-agent-architecture.md": {
@@ -1602,9 +1602,9 @@
     "semantic_hash": ""
   },
   "docs/platform-security-model.md": {
-    "mtime": 1791765658.960158,
-    "seen": 1791766948.2513347,
-    "ast_hash": "c1cffbc9a7d3f4af81a9e3f28f422101",
+    "mtime": 1791930786.8504424,
+    "seen": 1791932398.4661038,
+    "ast_hash": "d093a8d96769265eef994feafbc217b4",
     "semantic_hash": ""
   },
   "docs/platform-vision.md": {
@@ -1620,9 +1620,9 @@
     "semantic_hash": ""
   },
   "docs/secrets-architecture.md": {
-    "mtime": 1791765641.020159,
-    "seen": 1791766948.251338,
-    "ast_hash": "4d3e1e8c2585bcf10dbd4001dbcca789",
+    "mtime": 1791930799.6594417,
+    "seen": 1791932398.466107,
+    "ast_hash": "8e57e8e6a7ff0f9f98b212854f5b6c69",
     "semantic_hash": ""
   },
   ".claude/workflows/nexusops-challenge.mjs": {
@@ -1668,9 +1668,9 @@
     "semantic_hash": ""
   },
   "backend/app/models/tenancy.py": {
-    "mtime": 1791763592.6982725,
-    "seen": 1791766948.2510037,
-    "ast_hash": "42fce06e46ef8c4492d6ef29236cf736",
+    "mtime": 1791927339.173633,
+    "seen": 1791932398.4657888,
+    "ast_hash": "2afc403960d47842656f15581dd801ac",
     "semantic_hash": ""
   },
   "backend/app/schemas/organization.py": {
@@ -1686,9 +1686,9 @@
     "semantic_hash": ""
   },
   "backend/tests/integration/test_tenant_isolation.py": {
-    "mtime": 1791580223.1636615,
-    "seen": 1791587770.9539387,
-    "ast_hash": "1b998489ea61af665a9a9899e977b456",
+    "mtime": 1791931013.29843,
+    "seen": 1791932398.4659362,
+    "ast_hash": "dca50dcf9b24aa2b8d234c2df94c3c92",
     "semantic_hash": ""
   },
   "backend/tests/unit/test_tenancy_allowlist.py": {
@@ -2160,9 +2160,9 @@
     "semantic_hash": ""
   },
   "docs/phase5-design.md": {
-    "mtime": 1791765622.48916,
-    "seen": 1791766948.251334,
-    "ast_hash": "afe375f17a5ac6069f5beeb7ad019f3f",
+    "mtime": 1791930941.997434,
+    "seen": 1791932398.4661028,
+    "ast_hash": "2e310fdfe50f035fa7bc2e6ee40df7cc",
     "semantic_hash": ""
   },
   "backend/alembic/versions/20261012_1200-c8d9e0f1a2b3_phase5_certificate_metadata.py": {
@@ -2226,9 +2226,9 @@
     "semantic_hash": ""
   },
   "backend/app/services/dek_envelope.py": {
-    "mtime": 1791765565.701768,
-    "seen": 1791766948.2510679,
-    "ast_hash": "615a9507f2acafefd3133134f1416f6a",
+    "mtime": 1791929453.708089,
+    "seen": 1791932398.4658499,
+    "ast_hash": "aa9db873f8282020142d5357d8d7976c",
     "semantic_hash": ""
   },
   "backend/app/services/kek/__init__.py": {
@@ -2256,9 +2256,9 @@
     "semantic_hash": ""
   },
   "backend/app/services/kek/vault_transit.py": {
-    "mtime": 1791764908.2853024,
-    "seen": 1791766948.2510836,
-    "ast_hash": "b62bcf06f92ac248aebf53ea1a4304d0",
+    "mtime": 1791929999.4905152,
+    "seen": 1791932398.4658654,
+    "ast_hash": "1e4cda7b6a026c2f3fceb1c72675d32d",
     "semantic_hash": ""
   },
   "backend/tests/integration/test_kek_health_api.py": {
@@ -2274,15 +2274,15 @@
     "semantic_hash": ""
   },
   "backend/tests/integration/test_migration_phase521.py": {
-    "mtime": 1791765539.4121647,
-    "seen": 1791766948.251142,
-    "ast_hash": "54e518f161711972591cdb541b8c8100",
+    "mtime": 1791928868.5285485,
+    "seen": 1791932398.4659197,
+    "ast_hash": "ddc3343a3cd85751332c4da59121819c",
     "semantic_hash": ""
   },
   "backend/tests/integration/test_org_dek_envelope.py": {
-    "mtime": 1791766407.2181168,
-    "seen": 1791766948.2511463,
-    "ast_hash": "01b38ebce11c73dc3d6b89b411b71239",
+    "mtime": 1791928815.8995514,
+    "seen": 1791932398.4659255,
+    "ast_hash": "0a0b636009ea5fc5d84a48182f133be5",
     "semantic_hash": ""
   },
   "backend/tests/unit/test_kek_deterministic.py": {
@@ -2298,15 +2298,27 @@
     "semantic_hash": ""
   },
   "backend/tests/unit/test_kek_selection.py": {
-    "mtime": 1791766585.0921597,
-    "seen": 1791766948.2511802,
-    "ast_hash": "f3475dd9e08a0a86efb57350353aa921",
+    "mtime": 1791929808.6284964,
+    "seen": 1791932398.465957,
+    "ast_hash": "dd455e37da14af53a07eda76a865e7dc",
     "semantic_hash": ""
   },
   "backend/tests/unit/test_kek_vault_transit.py": {
-    "mtime": 1791764426.8072262,
-    "seen": 1791766948.2511814,
-    "ast_hash": "3937f77717b0d6d46b616f89e2edd1fd",
+    "mtime": 1791929944.814489,
+    "seen": 1791932398.4659576,
+    "ast_hash": "bc91ca1aa498e805cfd9a674d9d29aa7",
+    "semantic_hash": ""
+  },
+  "backend/alembic/versions/20261014_1200-a7b8c9d0e1f2_isolate_org_dek_envelopes.py": {
+    "mtime": 1791927564.0296206,
+    "seen": 1791932398.4657068,
+    "ast_hash": "82638549c61bdfc2788770332675d362",
+    "semantic_hash": ""
+  },
+  "backend/tests/integration/test_migration_phase5212.py": {
+    "mtime": 1791931013.2964299,
+    "seen": 1791932398.465921,
+    "ast_hash": "41b69cf7250ccd7f071ab9ffabf4a02a",
     "semantic_hash": ""
   }
 }

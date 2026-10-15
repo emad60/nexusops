@@ -3,18 +3,21 @@
 **Status:** Subsystem overview. **Phase 5.1 shipped** — the `certificates` and
 `certificate_generations` tables, the pre-issuance lifecycle, the two permission
 codenames with their role matrix, and the metadata-only certificate API (commit
-`37b7211`, migration `c8d9e0f1a2b3`). **No certificate has ever been issued**: there is
-no ACME client, no key envelope, no TLS listener and no HTTPS redirect — the schema has
+`37b7211`, migration `c8d9e0f1a2b3`); **5.2.2 shipped the inputs** its issuance half needs
+(2026-10-14, migration `b8c9d0e1f2a3`). **No certificate has ever been issued**: there is
+still no ACME client, no CA contact, no order and no TLS listener — the schema has
 no `certificate_id` column on `routes` and `routes.scheme` is a closed CHECK of `'http'`
 (`backend/app/models/routing.py`). Every remaining shape below is **Phase 5 design**, not
-shipped behavior. The authoritative Phase 5 design (architecture, threat model, key
+shipped behavior; where a shape below *is* in the tree, §1 says which slice put it there. The authoritative Phase 5 design (architecture, threat model, key
 hierarchy, delivery mechanism, slices and acceptance criteria) is
 [phase5-design.md](phase5-design.md); this document is the subsystem overview and defers
 to it on every decision where the two differ. The **HTTP half** of the surrounding
 subsystem — domains, routes, TXT verification, the nginx renderer and the `nginx.*`
 operations — **shipped in Phase 4** and is described in
 [domain-routing.md](domain-routing.md).
-**Date:** 2026-09-21 (status updated 2026-10-12: Phase 5.1 shipped)
+**Date:** 2026-09-21 (status updated 2026-10-14: Phase 5.1 shipped 2026-10-12; the 5.2.2
+inputs — DNS credentials, ACME accounts, the generation material columns — shipped
+2026-10-14, phase5-design.md §10.7)
 **Companions:** [phase5-design.md](phase5-design.md) · [domain-routing.md](domain-routing.md) · [domain-model.md](domain-model.md) · [multi-tenancy.md](multi-tenancy.md) · [authorization.md](authorization.md) · [node-agent-architecture.md](node-agent-architecture.md) · [secrets-architecture.md](secrets-architecture.md)
 
 ## 1. Scope and current state
@@ -43,12 +46,14 @@ operation-scoped organization DEK (`organization_dek_envelopes.dek_ciphertext` +
 `dek_generation`, always wrapped, never stored in plaintext), provider health reporting,
 and the KEK-rotation rewrap path. The organization/purpose/generation binding travels as
 the derivation context of a `derived=true` transit key (phase5-design.md §6.7 amendment).
-**It protects nothing yet** — no certificate material exists in the database for it to
-wrap — so its value here is structural: the custody path is built and tested before the
-first key it will hold.
+**It wrapped nothing when it shipped** — no material column existed yet — so its value
+then was structural: the custody path built and tested before the first key it would
+hold. **5.2.2 gave it three things to wrap** (§1): a stored DNS credential, a
+per-organization ACME account key, and (once 5.3 writes it) the certificate material. No
+certificate key is wrapped yet, because nothing has been issued.
 
 **Hardened since (5.2.1.2, 2026-10-14):** the independent audit of 5.2.1 recorded four
-findings, all fixed before any material column is added (phase5-design.md §10.6). The
+findings, all fixed before any material column was added (phase5-design.md §10.6). The
 envelope left the RLS-exempt `organizations` table (F1) — it is now a tenant table, so
 PostgreSQL refuses a cross-tenant read instead of relying on the KEK provider alone; the
 rewrap is compare-and-set against the envelope it read (F2), so a stale rewrap cannot
@@ -58,14 +63,29 @@ paired-column invariant (F3); and a Vault address with embedded credentials is r
 startup (F4). None of it touches issuance, DNS credentials or delivery, which still do
 not exist.
 
-**Not shipped (the rest of this document):** `dns_providers` and its credential storage,
-`acme_accounts`, and therefore **any** ACME
+**Shipped since (5.2.2, 2026-10-14, migration `b8c9d0e1f2a3`):** the certificate
+**inputs** — the `dns_providers` table and its metadata-only, write-only-secret API
+(§4.2), the `acme_accounts` table with one key per organization per directory (§4.3),
+and the `certificate_generations` material columns (`key_ciphertext`, `chain_ciphertext`,
+`fingerprint`, `not_before`/`not_after`, `deke_id`, `issued_at`, `revoked_at`,
+`revocation_state`) with the lifecycle `state` vocabulary widened to the full set
+**paired** with `ck_certificate_generations_material_guard`, which requires key, chain,
+`deke_id` and the validity window the moment a state stops being pre-issuance. The
+columns are **empty** and nothing in the tree writes one — 5.3 is the first slice that
+will. Also shipped: `certificates.dns_provider_id` (added with the table it references)
+and the generation/certificate suspension pair. Credentials and account keys are wrapped
+under the organization DEK with a purpose-bound payload framing, and both are new tables,
+so RLS and grants apply to them like any other tenant table.
+
+**Not shipped (the rest of this document):** **any** ACME
 issuance, DNS-01 publication, private-key delivery, installation, HTTPS activation,
-renewal, expiry monitoring or revocation. `routes.scheme` cannot be set to `https` and
+renewal, expiry monitoring or revocation. The inputs exist and are verifiable; the
+machinery that consumes them does not. `routes.scheme` cannot be set to `https` and
 there is no `certificate_id` column, so an HTTPS route is not merely unwired — it is
-unrepresentable until Phase 5.5 adds it by migration. No certificate key, chain or
-ciphertext column exists anywhere in the schema, which is why an `ISSUED` generation
-cannot be written: its state is not in the database's vocabulary. The only TLS anywhere
+unrepresentable until Phase 5.5 adds it by migration. An `ISSUED` generation is
+representable in the vocabulary since 5.2.2 and still **unwritable without material**:
+the material guard CHECK rejects that row, so the guarantee 5.1 got from a truncated
+CHECK is now kept by a constraint rather than by omission. The only TLS anywhere
 today is the dashboard edge documented in docs/deployment.md, which terminates the
 *dashboard's* own TLS, not customer traffic (domain-routing.md §1).
 
@@ -92,18 +112,21 @@ What exists and is reused:
 
 Honesty labels: the operations framework this document leans on **is real and shipped**
 (Phase 1/3, node-agent-architecture.md §5) — it is not a spec. The certificate
-subsystem's *issuance* half is **not built**: no ACME client, no key envelope, no key or
-chain column. The certificate *record* shipped in Phase 5.1 (`certificates` and
-`certificate_generations`, metadata only — §1). Earlier drafts' `Connection`/`Integration`
-entity for DNS credentials does not exist in the tree; [phase5-design.md](phase5-design.md)
-§3.4/§5.3 decides a dedicated `dns_providers` table instead, and no provider table or
-row exists yet.
+subsystem's *issuance* half is **not built**: no ACME client, no CA contact, no order.
+The certificate *record* shipped in Phase 5.1 and the **inputs** a future issuance will
+consume — DNS credentials, the per-org ACME account key, the generation material columns
+— shipped in 5.2.2 (§1, phase5-design.md §10.7). Earlier drafts'
+`Connection`/`Integration` entity for DNS credentials does not exist in the tree;
+[phase5-design.md](phase5-design.md) §3.4/§5.3 decided a dedicated `dns_providers` table,
+and 5.2.2 created it — empty until an operator stores a credential, and never readable
+back through the API.
 
 ## 2. Certificate entity
 
-**Partly in the schema (Phase 5.1: identity and pre-issuance lifecycle only; every
-material/issuance column below is still design).** The shipped Route table has no
-`certificate_id` column and
+**In the schema, empty, and guarded (Phase 5.1 + 5.2.2).** Identity, the lifecycle
+vocabulary, the material columns and the credential references exist; **no row has ever
+held material**, because nothing in the tree can write one. The shipped Route table has
+no `certificate_id` column and
 `scheme` is a closed CHECK of `'http'` (`backend/app/models/routing.py`); Phase 5 adds
 the column and widens the CHECK by migration. The design is that a Route carries an
 optional `certificate_id`, so one certificate may serve many routes while a route
@@ -144,6 +167,17 @@ remember.
 > `dns_provider_id`, `auto_renew`) and a denormalized `status`/
 > `current_generation_id`/`expires_at`. Full column/index/constraint list:
 > phase5-design.md §3.
+>
+> **What of this table is in the tree (5.2.2):** every column above is — `status`,
+> `challenge_type`, `auto_renew`, `dns_provider_id`, `issued_at`, `expires_at`,
+> `chain_ciphertext`, `key_ciphertext`, `fingerprint`, `order_state`, `last_error`,
+> `next_attempt_at`, `attempt_count` — as are `deke_id`, `not_before`, `not_after` and
+> `revocation_state`, the generation-level fields the rows above do not list, plus the
+> generation/certificate suspension pair. What is **not** shipped is every *write* to the
+> material ones: `key_ciphertext` and `chain_ciphertext` are empty, and
+> `ck_certificate_generations_material_guard` refuses any non-pre-issuance state that
+> lacks them (with `deke_id`, `issued_at`, `not_before`, `not_after`). `expires_at` is
+> likewise NULL until an issuance sets it.
 
 Certificate **status** is a denormalized view of the current generation; the status
 machine below describes a single **generation** (phase5-design.md §2.2), which is what
@@ -170,6 +204,15 @@ certificate row is never hard-deleted while any route references it (RESTRICT, s
 policy as roles); delete is allowed only when orphaned.
 
 ## 3. API surface and permissions
+
+**Shipped today (5.1 + 5.2.2):** `POST`, `GET /certificates`, `GET /certificates/{id}`,
+`PATCH` (`auto_renew`, `dns_provider_id`), `DELETE`, plus the whole
+`/dns-providers` surface (`dns_providers.py`) — reads under `certificate.read`, every
+mutation under `certificate.manage`, both organization-scoped. `POST` records the
+request and its first `PENDING` generation; it enqueues nothing. The `renew`, `revoke`
+and `/{id}/routes` rows below are **design** (5.3–5.6), and `POST`/`GET` do not contain
+the issuance fields this table's design-era wording implies — the authoritative shipped
+shape is docs/api.md §6.
 
 Codenames per authorization.md §2: `certificate.read`, `certificate.manage` —
 **registered in Phase 5.1** (`backend/app/core/permissions.py`, seeded into the stored
@@ -221,11 +264,15 @@ Cloudflare:
 | `propagation_check(name, value, deadline)` | Query authoritative NS before telling ACME "ready" |
 | `verify_creds()` | Health check on save |
 
-- Credentials live in the dedicated **`dns_providers` table** (`org_id`, `name`,
-  `kind`, `credentials_ciphertext`, `credential_fingerprint`, `scopes`,
-  `zone_allowlist`, `verified_at`) — Fernet(**org DEK**)-encrypted whole, write-only via
+- **Shipped in 5.2.2** — credentials live in the dedicated **`dns_providers` table**
+  (`org_id`, `name`,
+  `kind`, `credentials_ciphertext`, `credential_fingerprint`, `deke_id`, `scopes`,
+  `zone_allowlist`, `verified_at`, `auto_cleanup`, `last_used_at`) — Fernet(**org DEK**)-encrypted whole, write-only via
   the API, metadata-only reads: the pattern proven by notification channel config and
-  secret metadata. A Cloudflare API token **scoped to the zone** is the v1 credential
+  secret metadata. `verify_creds()` runs on save and on `POST /dns-providers/{id}/verify`
+  and only records its verdict (a failing credential is stored, not rejected); the
+  `create_txt`/`delete_txt`/`propagation_check` half of the interface is **5.3** and does
+  not exist yet. A Cloudflare API token **scoped to the zone** is the v1 credential
   shape, and `zone_allowlist` is enforced before any provider call. Rationale for a
   dedicated table (vs reusing deployment-resolvable secrets or a notification channel)
   and cleanup/validation rules: phase5-design.md §3.4/§5.3. **A customer DNS token must
@@ -244,10 +291,15 @@ Cloudflare:
   staging**, and a staging-issued certificate is never presented as a production one
   (phase5-design.md §5.4).
 - One ACME account per Organization per directory (staging and production are
-  separate accounts). The account key is generated control-plane-side on first use and
-  stored in a dedicated `acme_accounts` row (`org_id`, `directory_url`, `account_url`,
-  `key_ciphertext` Fernet(**org DEK**)). Per-org accounts keep rate-limit blast radius
-  and revocation ownership scoped to the tenant (phase5-design.md §5.4).
+  separate accounts). **Shipped in 5.2.2:** the `acme_accounts` row and its key custody —
+  `org_id`, `directory_url`, `key_ciphertext` Fernet(**org DEK**) with `deke_id`,
+  `key_fingerprint` over the **public** half, `key_algorithm` fixed at P-256 and never
+  caller-chosen, unique per `(org_id, directory_url)` so two concurrent first uses
+  converge on one row. Per-org accounts keep rate-limit blast radius
+  and revocation ownership scoped to the tenant (phase5-design.md §5.4). **Registration
+  with the CA is 5.3** — the key exists, is decryptable for one operation, and has never
+  been sent anywhere; there is no default directory, and an unknown one is a 422 naming
+  the closed set.
 
 ### 4.4 HTTP-01 via node nginx (later fallback)
 

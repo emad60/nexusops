@@ -99,7 +99,7 @@ Four-way classification, grounded in the subsystem analysis (the harness under
 | 2.1 | Hardening | ✅ delivered 2026-10-09 | `secret_versions` immutability at the database, legacy environment typing, deploy-chain gate recorded | 2 |
 | 3 | Nodes & agent v2 | ✅ delivered 2026-10-09 | capabilities+facts, enrollment v2, **per-node capability advertisement + operations delivery** (the control plane and the fail-closed gate are already in), HTTPS-only agent | 1 |
 | 4 | Domains & routes | ✅ delivered 2026-10-10 — **HTTP only** | Domain/Route entities, DNS verification, NginxProvider, apply pipeline, polymorphic monitors. Certificates and TLS are **not** in it | 3 |
-| 5 | Certificates | **5.1 delivered 2026-10-12** (metadata + pre-issuance lifecycle); 5.2–5.7 proposal | certificate metadata, org-scoped API and role grants (**shipped**); then the key envelope, ACME DNS-01, DNSProvider (Cloudflare first), TLS listener + `scheme=https` on routes, renewal scan, encrypted delivery, TLS-expiry monitors | 4 |
+| 5 | Certificates | **5.1 delivered 2026-10-12** (metadata + pre-issuance lifecycle), **5.2.1/5.2.1.2/5.2.2 delivered 2026-10-14** (key envelope + certificate inputs); 5.3–5.7 proposal | certificate metadata, org-scoped API and role grants (**shipped**); then the key envelope (**shipped**), the DNS credential store, per-org ACME account and generation material columns (**shipped, empty**), then ACME DNS-01, DNSProvider methods (Cloudflare first), TLS listener + `scheme=https` on routes, renewal scan, encrypted delivery, TLS-expiry monitors | 4 |
 | 6 | Real deployments | proposal | 6a image-based via agent ops; 6b git→build on node | 3 (6a), 3+4 (6b) — **and the deployment-secret authorization gate (§9.0), which must close before 6a ships** |
 | 7 | Teams, grants & custom roles | proposal | teams, resource-level grants, custom roles | 2 |
 | 8 | Backups | proposal | policies/runs/destinations, verify + restore drill | 3, 7 |
@@ -107,11 +107,15 @@ Four-way classification, grounded in the subsystem analysis (the harness under
 
 **Status of the plan:** phases 0–4 are **delivered**, and phase 5 has begun —
 **Phase 5.1 shipped 2026-10-12** (certificate metadata, pre-issuance lifecycle,
-org-scoped permissions and the metadata API). The remainder of phase 5 and phases
+org-scoped permissions and the metadata API) and **5.2.1/5.2.1.2/5.2.2 shipped
+2026-10-14** (the KEK provider and organization DEK envelope, then the certificate
+inputs: the DNS credential store, the per-org ACME account key, and the generation
+material columns — present, guarded and empty). The remainder of phase 5 and phases
 6–9 are **proposals** — not approved and not implemented; their "Ships" cells describe
 intended work, not current behaviour. The only code that exists is what the delivered
 sections below record. Phase 4 delivered the HTTP half of
-[domain-routing.md](domain-routing.md), and Phase 5.1 the certificate *record*: there is
+[domain-routing.md](domain-routing.md), and Phase 5.1/5.2 the certificate *record* and
+the inputs it will consume: there is
 still **no certificate issuance, no TLS listener and no HTTPS redirect**, and every
 remaining certificate shape in the design docs is Phase 5 target design.
 
@@ -461,7 +465,7 @@ redirect, and nothing in the renderer can emit one (`CHECK (scheme = 'http')`, n
   from every node that served it; and the cross-container journeys above prove the
   loop end to end.
 
-## 8. Phase 5 — Certificates — **5.1 delivered; the rest is proposal**
+## 8. Phase 5 — Certificates — **5.1 and 5.2 delivered; 5.3+ is proposal**
 
 **Why:** "HTTPS on by default" is the promise; DNS-01 works for NAT-ed home
 servers and wildcards. Spec: [certificate-management.md](certificate-management.md) —
@@ -474,19 +478,36 @@ role grants, org-scoped RLS, and the metadata-only certificate API. Nothing is i
 delivered or activated by 5.1, and the generation `state` vocabulary cannot even express
 an issued generation. See phase5-design.md §1.1 and §10.1.1.
 
+**Delivered (5.2.1 + 5.2.1.2, 2026-10-12/14):** the `KEKProvider` seam with the Vault
+Transit adapter, the organization DEK envelope (wrapped, never stored in plaintext,
+operation-scoped unwrap), its RLS-scoped home on a tenant table, compare-and-set rewrap
+and provider health reporting.
+
+**Delivered (5.2.2, 2026-10-14, `b8c9d0e1f2a3`):** the certificate **inputs** — the
+`dns_providers` table with its metadata-only, write-only-secret API and the pre-call zone
+allowlist; the `acme_accounts` table, one key per organization per directory; the
+generation material columns with the lifecycle vocabulary widened **paired** with the
+material guard CHECK; and `certificates.dns_provider_id`. Nothing issues, publishes a
+challenge, delivers or activates, and every material column is empty — the guard is what
+keeps that from being merely a convention. See phase5-design.md §10.7.
+
 - **DB (delivered):** `certificates` (domain association, primary CN, SANs, derived
-  status, challenge type, auto_renew, key algorithm, expiry, last error) and
-  `certificate_generations` (pre-issuance states + backoff cursors). **Still to come:**
-  the generation ciphertext key/chain columns, the organization DEK envelope, and
-  `dns_providers` for DNS credentials — a dedicated table, **not** the `integrations`
-  shape this section originally proposed (phase5-design.md §3.4, Appendix A).
+  status, challenge type, auto_renew, key algorithm, expiry, last error, DNS credential
+  reference) and `certificate_generations` (lifecycle states + backoff cursors + the
+  material columns, all empty and guarded). **Also delivered:** the organization DEK
+  envelope and `dns_providers` for DNS credentials — a dedicated table, **not** the
+  `integrations` shape this section originally proposed (phase5-design.md §3.4,
+  Appendix A) — and `acme_accounts`. **Still to come:** every *write* of certificate
+  material, and `certificate_deliveries` (5.4).
 - **API:** cert request/list/inspect/delete + status (**delivered in 5.1**, metadata
   only); renew, revoke and bind, plus the renewal scan (celery beat, `expires_at < 30d`)
   with failure alerts + incidents — still to come (5.3–5.6).
-- **Providers:** ACME client with DNS-01 first (HTTP-01 via node nginx later);
-  `DNSProvider` interface — Cloudflare first, credentials held in the dedicated
-  `dns_providers` table under the organization DEK (phase5-design.md §3.4/§5.3).
-  Issuance is gated on the KEK provider decision (K1, phase5-design.md §6.8).
+- **Providers:** ACME client with DNS-01 first (HTTP-01 via node nginx later); the
+  `DNSProvider` seam with `verify_creds()` and the zone allowlist (**delivered in
+  5.2.2** — Cloudflare first, credentials held in the dedicated `dns_providers` table
+  under the organization DEK; `create_txt`/`delete_txt`/`propagation_check` are 5.3).
+  Issuance is gated on the KEK provider decision (K1, phase5-design.md §6.8) — **closed
+  2026-10-12** and implemented in 5.2.1.
 - **Delivery:** only nodes serving routes that use the cert; encrypted agent
   op delivery; private keys never in API responses/logs/WS/audit/frontend.
 - **Frontend:** HTTPS card per domain; expiry visible; failure alerts.

@@ -32,6 +32,14 @@ MAX_LABEL_LENGTH = 63
 MAX_PATH_LENGTH = 255
 
 _LABEL_RE = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$")
+#: A DNS *record* name may carry **service labels**: ``_acme-challenge`` (DNS-01),
+#: ``_dmarc``, ``_service._proto`` (SRV), and this platform's own
+#: ``_nexusops.<apex>`` verification record. Those are valid DNS names, and they are
+#: exactly the names the issuance path publishes and cleans up — while a Domain, a
+#: route hostname and an allowlist zone never use one. The underscore is therefore
+#: allowed **only as a label's first character**, which keeps the refusals above
+#: (``under_score.example.com``) intact rather than relaxing them everywhere.
+_RECORD_LABEL_RE = re.compile(r"^_?[a-z0-9]([a-z0-9-]*[a-z0-9])?$")
 #: Path allowlist for route prefixes. Deliberately conservative: no ``~``/``=``
 #: (nginx match-type markers), no whitespace, quotes, ``;``, ``{``, ``}``, ``$``.
 _PATH_RE = re.compile(r"^[A-Za-z0-9._\-/]*$")
@@ -72,8 +80,19 @@ def _idna(fqdn: str) -> str:
     return ".".join(converted)
 
 
-def _check_labels(name: str, *, allow_wildcard: bool) -> tuple[str, list[str]]:
-    """Validate the shape of an already-lowercased, punycode name."""
+def _check_labels(
+    name: str,
+    *,
+    allow_wildcard: bool,
+    label_re: re.Pattern[str] = _LABEL_RE,
+    label_message: str = "a label may only use letters, digits and hyphens",
+) -> tuple[str, list[str]]:
+    """Validate the shape of an already-lowercased, punycode name.
+
+    ``label_re``/``label_message`` are the one thing a *record* name relaxes (a
+    leading underscore on a label) — every other rule here belongs to both, so a
+    record name and the zone containing it cannot be normalised differently.
+    """
     wildcard = name.startswith("*.")
     if wildcard and not allow_wildcard:
         raise InvalidName("DOMAIN_INVALID", "a wildcard is not valid here")
@@ -90,8 +109,8 @@ def _check_labels(name: str, *, allow_wildcard: bool) -> tuple[str, list[str]]:
             raise InvalidName("DOMAIN_INVALID", "a label is longer than 63 characters")
         if "*" in label:
             raise InvalidName("DOMAIN_INVALID", "a wildcard must be a label of its own")
-        if not _LABEL_RE.match(label):
-            raise InvalidName("DOMAIN_INVALID", "a label may only use letters, digits and hyphens")
+        if not label_re.match(label):
+            raise InvalidName("DOMAIN_INVALID", label_message)
     if labels[-1].isdigit():
         raise InvalidName("DOMAIN_INVALID", "the last label must not be all digits")
     return (body if not wildcard else name), labels
@@ -106,14 +125,14 @@ def _check_not_ip(value: str) -> None:
     raise InvalidName("DOMAIN_IS_IP", "an IP address is not a domain name")
 
 
-def canonicalize_name(value: str, *, allow_wildcard: bool = False) -> str:
-    """Return the canonical form of a domain (or route hostname).
-
-    Raises :class:`InvalidName` for anything that is not a valid name under the
-    rules above. This is the only entry point; callers must not pre-trim or
-    pre-lowercase, because the checks here also cover the IP-literal and TLD
-    cases that a naive normalisation would let through.
-    """
+def _canonicalize(
+    value: str,
+    *,
+    allow_wildcard: bool,
+    label_re: re.Pattern[str],
+    label_message: str,
+) -> str:
+    """The one normalisation path, shared by domains and record names."""
     if not isinstance(value, str):
         raise InvalidName("DOMAIN_INVALID", "a domain name is required")
     name = value.strip().rstrip(".").strip()
@@ -125,12 +144,54 @@ def canonicalize_name(value: str, *, allow_wildcard: bool = False) -> str:
         encoded = _idna(lowered)
     except InvalidName:
         raise
-    _check_labels(encoded, allow_wildcard=allow_wildcard)
+    _check_labels(
+        encoded, allow_wildcard=allow_wildcard, label_re=label_re, label_message=label_message
+    )
     if len(encoded.encode("ascii")) > MAX_NAME_LENGTH:
         raise InvalidName("DOMAIN_INVALID", "the name is longer than 253 characters")
     # The label/character checks above run on the *encoded* form, so an IDNA name
     # that punycodes into something invalid fails here rather than at render time.
     return encoded
+
+
+def canonicalize_name(value: str, *, allow_wildcard: bool = False) -> str:
+    """Return the canonical form of a domain (or route hostname).
+
+    Raises :class:`InvalidName` for anything that is not a valid name under the
+    rules above. This is the only entry point for a *name the platform stores as an
+    identity*; callers must not pre-trim or pre-lowercase, because the checks here
+    also cover the IP-literal and TLD cases that a naive normalisation would let
+    through. A DNS record owner name goes through
+    :func:`canonicalize_record_name` instead.
+    """
+    return _canonicalize(
+        value,
+        allow_wildcard=allow_wildcard,
+        label_re=_LABEL_RE,
+        label_message="a label may only use letters, digits and hyphens",
+    )
+
+
+def canonicalize_record_name(value: str, *, allow_wildcard: bool = False) -> str:
+    """Return the canonical form of a DNS **record owner name**.
+
+    ``_acme-challenge.www.example.com`` is the TXT name DNS-01 publishes and later
+    cleans up, and ``_nexusops.<apex>`` is the platform's own verification record.
+    Both are valid DNS names that :func:`canonicalize_name` refuses, because a
+    Domain, a route hostname and an allowlist zone never carry a service label —
+    widening that function would widen all three.
+
+    Everything else is deliberately identical: lowercased, trailing dot removed,
+    punycode, the same label/name length bounds and the same numeric-TLD refusal,
+    so a record name and the zone that has to contain it are compared in one
+    representation rather than two.
+    """
+    return _canonicalize(
+        value,
+        allow_wildcard=allow_wildcard,
+        label_re=_RECORD_LABEL_RE,
+        label_message=("a label may only use letters, digits, hyphens and a leading underscore"),
+    )
 
 
 def apex_of(name: str) -> str:

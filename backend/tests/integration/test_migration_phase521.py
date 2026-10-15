@@ -22,10 +22,10 @@ shape is asserted *at this revision*, not at ``head``. The envelope has since be
 moved into ``organization_dek_envelopes`` and the two columns dropped from
 ``organizations``, so every statement about "the 5.2.1 schema" below pins
 ``f5a6b7c8d9e0`` and the current schema is pinned by
-``test_migration_phase5212.py``. The one test that does run to ``head`` is the
-later-slice boundary, and it still holds: the move added no certificate, DNS or
-ACME artifact. The 5.2.1 revision itself is unmodified, exactly as the follow-up
-required.
+``test_migration_phase5212.py``. The later-slice boundary is therefore pinned to
+``a7b8c9d0e1f2`` (5.2.1.2) rather than to ``head``, and it still holds there: the
+move added no certificate, DNS or ACME artifact. The 5.2.1 revision itself is
+unmodified, exactly as the follow-up required.
 
 Every statement is parameterized, and each test builds its own scratch database,
 so nothing here depends on the order the suite runs in.
@@ -52,6 +52,11 @@ pytestmark = pytest.mark.integration
 PRE_PHASE521_REVISION = "c8d9e0f1a2b3"
 #: The Phase 5.2.1 revision this module pins.
 PHASE521_REVISION = "f5a6b7c8d9e0"
+#: The 5.2.1.2 follow-up revision (``a7b8c9d0e1f2``). The boundary claim below is
+#: about this slice *and* its follow-up, so it ends here rather than at ``head``:
+#: 5.2.2 (``b8c9d0e1f2a3``) is exactly the slice that creates the artifacts this
+#: test asserts are absent.
+PHASE5212_REVISION = "a7b8c9d0e1f2"
 
 ORG = "77777777-7777-7777-7777-777777777777"
 OTHER_ORG = "88888888-8888-8888-8888-888888888888"
@@ -119,10 +124,11 @@ def test_upgrade_adds_only_the_approved_columns(scratch_database: str) -> None:
 
 
 def test_upgrade_adds_no_later_slice_artifacts(scratch_database: str) -> None:
-    # Deliberately ``head``, unlike the shape tests above: the claim is about the
-    # slice boundary — no certificate, DNS-provider, ACME or delivery artifact
-    # exists anywhere in the schema as it stands, including after 5.2.1.2.
-    _run_migration(scratch_database, "head")
+    # Pinned to 5.2.1.2, the last revision of this slice's chain: the claim is
+    # about *this* slice's boundary — no certificate, DNS-provider, ACME or
+    # delivery artifact exists anywhere in the schema as it stands there. Running
+    # to ``head`` would now assert the opposite of what 5.2.2 is for.
+    _run_migration(scratch_database, PHASE5212_REVISION)
     present = set(_columns(scratch_database))
     assert not present & set(LATER_SLICE_COLUMNS), (
         f"Phase 5.2.1 must not create later-slice columns: {present & set(LATER_SLICE_COLUMNS)}"

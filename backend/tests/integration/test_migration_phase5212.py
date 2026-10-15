@@ -418,11 +418,22 @@ def test_downgrade_refuses_to_drop_the_table_when_the_copy_cannot_be_verified(
 
 
 def test_the_revision_sits_directly_after_phase_521() -> None:
-    """One linear head, with this revision immediately after the 5.2.1 one."""
+    """One linear head, with this revision immediately after the 5.2.1 one.
+
+    This revision is no longer the tip — Phase 5.2.2 (``b8c9d0e1f2a3``) extends
+    the chain — so the claim is about the *chain*: this revision's own
+    down-revision is unchanged, and the single head still passes through it. A
+    second head, a re-parented revision or a branch would all fail here.
+    """
     from alembic.script import ScriptDirectory
 
     script = ScriptDirectory.from_config(_alembic_config("postgres"))
     heads = script.get_heads()
     assert len(heads) == 1, f"multiple alembic heads: {heads}"
-    assert heads[0] == PHASE5212_REVISION
     assert script.get_revision(PHASE5212_REVISION).down_revision == PHASE521_REVISION
+
+    # Walked from the head downwards: this revision must still be on the way in,
+    # and still immediately after 5.2.1.
+    chain = [revision.revision for revision in script.walk_revisions(head=heads[0], base="base")]
+    assert PHASE5212_REVISION in chain, "5.2.1.2 is not an ancestor of the head"
+    assert chain.index(PHASE521_REVISION) == chain.index(PHASE5212_REVISION) + 1

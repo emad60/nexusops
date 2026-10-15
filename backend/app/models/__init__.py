@@ -1,5 +1,6 @@
 """All ORM models. Importing this package registers every table on Base.metadata."""
 
+from app.models.acme import AcmeAccount
 from app.models.base import Base, OrgScoped
 from app.models.certificate import Certificate, CertificateGeneration
 from app.models.delivery import (
@@ -9,6 +10,7 @@ from app.models.delivery import (
     DeploymentStep,
     Project,
 )
+from app.models.dns_provider import DnsProvider
 from app.models.enrollment import EnrollmentToken
 from app.models.identity import (
     ApiKey,
@@ -47,6 +49,7 @@ from app.models.secrets import Secret, SecretVersion
 from app.models.tenancy import Membership, Organization, OrganizationDekEnvelope
 
 __all__ = [
+    "AcmeAccount",
     "AgentCredential",
     "Alert",
     "ApiKey",
@@ -60,6 +63,7 @@ __all__ = [
     "Deployment",
     "DeploymentEnvironment",
     "DeploymentStep",
+    "DnsProvider",
     "DockerHost",
     "Domain",
     "EnrollmentToken",

@@ -13,6 +13,7 @@ from app.core.dnsname import (
     InvalidName,
     canonicalize_name,
     canonicalize_path,
+    canonicalize_record_name,
     hostname_is_covered,
     is_valid_path,
     verification_record_name,
@@ -64,6 +65,56 @@ def test_idna_names_become_punycode() -> None:
 def test_invalid_names_are_rejected(raw: str) -> None:
     with pytest.raises(InvalidName):
         canonicalize_name(raw)
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        # The DNS-01 challenge owner and the platform's own verification record:
+        # both are real record names the issuance and cleanup paths pass here.
+        ("_acme-challenge.www.example.com", "_acme-challenge.www.example.com"),
+        ("_ACME-Challenge.Example.COM.", "_acme-challenge.example.com"),
+        ("_nexusops.example.com", "_nexusops.example.com"),
+        ("_example.com", "_example.com"),
+        ("_service._tcp.example.com", "_service._tcp.example.com"),
+        # A name with no service label is a record name too — the identifier the
+        # challenge is issued for goes through the same function.
+        ("www.example.com", "www.example.com"),
+    ],
+)
+def test_record_names_accept_a_leading_underscore(raw: str, expected: str) -> None:
+    assert canonicalize_record_name(raw) == expected
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        # The relaxation is one leading underscore on a label, and only that: an
+        # underscore in the middle stays as invalid as it is for a domain.
+        "under_score.example.com",
+        "_.example.com",
+        "_acme-challenge",
+        "-leading.example.com",
+        "trailing-.example.com",
+        "exa mple.com",
+        "192.168.1.1",
+        "",
+        " ",
+    ],
+)
+def test_invalid_record_names_are_rejected(raw: str) -> None:
+    with pytest.raises(InvalidName):
+        canonicalize_record_name(raw)
+
+
+def test_a_domain_never_accepts_a_service_label() -> None:
+    # The other half of the split: widening the record-name rule must not widen
+    # what a Domain, a route hostname or an allowlist zone accepts.
+    with pytest.raises(InvalidName):
+        canonicalize_name("_acme-challenge.example.com")
+    assert canonicalize_record_name("_acme-challenge.example.com") == (
+        "_acme-challenge.example.com"
+    )
 
 
 @pytest.mark.parametrize("raw", ["192.168.1.1", "10.0.0.1", "::1", "[2001:db8::1]", "2001:db8::1"])

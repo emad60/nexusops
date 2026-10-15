@@ -366,13 +366,14 @@ class CertificateStatus(StrEnum):
 
     The service computes this from the certificate's current generation (or, before
     the first issuance, from its newest generation), so the row can never claim a
-    state its material does not support. Phase 5.1 can only produce ``PENDING`` and
-    ``FAILED``: every other member names a material-bearing state whose columns
-    arrive in Phase 5.2, and
-    :func:`app.services.certificate_lifecycle.certificate_status_for` refuses to
-    return one. ``REVOKED`` and ``REVOKED_LOCAL_ONLY`` are deliberately distinct —
-    the CA acknowledged the revocation in the first case and never answered in the
-    second.
+    state its material does not support. **Phase 5.1 could only produce ``PENDING``
+    and ``FAILED``** — every other member names a material-bearing state whose
+    columns arrived in Phase 5.2.2 — and since then
+    :func:`app.services.certificate_lifecycle.certificate_status_for` derives this
+    from a generation's state directly, so a generation that holds material reports
+    the member that describes it. Nothing in the tree writes one yet. ``REVOKED``
+    and ``REVOKED_LOCAL_ONLY`` are deliberately distinct — the CA acknowledged the
+    revocation in the first case and never answered in the second.
     """
 
     PENDING = "PENDING"
@@ -404,26 +405,53 @@ class CertificateKeyAlgorithm(StrEnum):
 
 
 class CertificateGenerationState(StrEnum):
-    """Pre-issuance lifecycle of one ACME order + key pair.
+    """Lifecycle of one ACME order + key pair, pre- and post-issuance.
 
-    **The vocabulary is deliberately truncated in Phase 5.1.** Only the states a
-    generation can occupy *before* any material exists are members, so a
-    material-less ``ISSUED`` generation is unrepresentable — at the enum, at the
-    database CHECK and at the API — rather than merely discouraged. The mutable
-    states (:meth:`live_pre_issuance`) are also the predicate of the partial
-    unique index that allows at most one in-flight generation per certificate, so
-    a second concurrent issuance is a database error and not two racing orders.
+    **Phase 5.1 truncated this vocabulary on purpose.** Only the states a
+    generation can occupy *before* any material exists were members, so a
+    material-less ``ISSUED`` generation was unrepresentable — at the enum, at the
+    database CHECK and at the API — rather than merely discouraged. Phase 5.2
+    widens it to the full state machine (phase5-design.md §2.2) **in the same
+    migration that adds the material columns and the organization DEK envelope
+    those states require**, and pairs it with the material guard CHECK
+    (:func:`material_bearing`): a generation in any of the states below cannot
+    exist without ``key_ciphertext``, ``chain_ciphertext``, ``deke_id``,
+    ``issued_at``, ``not_before`` and ``not_after``.
 
-    Phase 5.2 widens this to the full vocabulary (``ISSUED``, ``SUPERSEDED``,
-    ``EXPIRED``, ``SUSPENDED``, the revocation states) in the same migration that
-    adds the key envelope the material-bearing states require.
+    Two classmethods carry the structural predicates, and both the model and the
+    migration derive from them rather than restating a list:
+
+    * :meth:`live_pre_issuance` — the mutable subset, and the predicate of the
+      partial unique index that allows at most one in-flight generation per
+      certificate, so a second concurrent issuance is a database error and not
+      two racing orders. Widening the live set widens the index with it.
+    * :meth:`material_bearing` — the post-issuance subset, which the guard CHECK
+      requires material for. ``SUPERSEDED``, ``SUSPENDED``, ``EXPIRED`` and the
+      revocation states are all material-bearing: a superseded or revoked
+      generation still holds the material the node may still be serving until it
+      is re-delivered or removed (§8.5, §9.3), so dropping the ciphertext for one
+      would be data loss dressed up as cleanup.
+
+    ``REVOKED_LOCAL_ONLY`` is deliberately distinct from ``REVOKED``: the CA
+    acknowledged the revocation in the first case and never answered in the
+    second (see :class:`CertificateRevocationState` for the CA axis).
     """
 
+    # Pre-issuance (5.1): no material exists yet.
     PENDING = "PENDING"
     ORDERING = "ORDERING"
     CHALLENGE_PUBLISHED = "CHALLENGE_PUBLISHED"
     VALIDATING = "VALIDATING"
     FAILED = "FAILED"
+    # Post-issuance (5.2): material is mandatory for every one of these.
+    ISSUED = "ISSUED"
+    SUPERSEDED = "SUPERSEDED"
+    SUSPENDED = "SUSPENDED"
+    EXPIRED = "EXPIRED"
+    REVOCATION_PENDING = "REVOCATION_PENDING"
+    REVOKED = "REVOKED"
+    REVOCATION_FAILED = "REVOCATION_FAILED"
+    REVOKED_LOCAL_ONLY = "REVOKED_LOCAL_ONLY"
 
     @classmethod
     def live_pre_issuance(cls) -> tuple[CertificateGenerationState, ...]:
@@ -434,3 +462,98 @@ class CertificateGenerationState(StrEnum):
         retry must not be blocked by the failed row it replaces.
         """
         return (cls.PENDING, cls.ORDERING, cls.CHALLENGE_PUBLISHED, cls.VALIDATING)
+
+    @classmethod
+    def material_bearing(cls) -> tuple[CertificateGenerationState, ...]:
+        """The states whose rows must carry key material and a DEK generation.
+
+        The complement of :meth:`live_pre_issuance` plus ``FAILED``: a state that
+        has left the pre-issuance lifecycle is one the CA has answered for, and
+        its material (or the record of what it was) outlives the order. The
+        guard CHECK is the *or* branch over exactly this tuple.
+        """
+        pre_issuance = set(cls.live_pre_issuance()) | {cls.FAILED}
+        return tuple(state for state in cls if state not in pre_issuance)
+
+
+class CertificateRevocationState(StrEnum):
+    """The CA conversation about a generation, deliberately a second axis.
+
+    ``state`` answers "is this material usable?" and ``revocation_state`` answers
+    "what did the CA say?". They are separate so that removing material from a
+    node is never gated on the CA (phase5-design.md §2.2, §9.3 Stage 4): a
+    ``REVOCATION_FAILED`` generation can still be ``SUPERSEDED`` and safely absent
+    from every node, and the UI shows ``REVOKED_LOCAL_ONLY`` as a warning with a
+    retry rather than as a success.
+
+    ``FAILED`` and ``REVOKED_LOCAL_ONLY`` are distinct: the first means the CA
+    was reached and refused (or the request was rejected), the second means the
+    CA never answered at all.
+    """
+
+    NOT_REQUESTED = "NOT_REQUESTED"
+    PENDING = "PENDING"
+    REVOKED = "REVOKED"
+    FAILED = "FAILED"
+    REVOKED_LOCAL_ONLY = "REVOKED_LOCAL_ONLY"
+
+
+class AcmeDirectory(StrEnum):
+    """Which certificate authority a per-organization ACME account belongs to.
+
+    A **closed set with its URLs attached**, because the account's identity is
+    ``(organization, directory)`` and staging vs production are two different
+    accounts, not two settings of one (phase5-design.md §5.4). The URL lives on
+    the enum so the schema, the account row and the test fixtures all name the
+    directory the same way; the row stores the URL, which is what a certificate's
+    generation records so a staging certificate can be recognized as staging from
+    its own data.
+
+    Production is a **separate member, never inferred from the environment**: the
+    design's rule is that selecting production requires explicit configuration, so
+    there is no ``default()`` here and no function that reads ``ENVIRONMENT`` to
+    pick one. A caller that has no configured directory has no directory — which
+    fails closed, as the design requires, rather than quietly minting a staging
+    certificate a browser would distrust.
+    """
+
+    STAGING = "staging"
+    PRODUCTION = "production"
+
+    def url(self) -> str:
+        """The directory URL stored on the account row and recorded per issuance."""
+        return _ACME_DIRECTORY_URLS[self]
+
+    @classmethod
+    def from_url(cls, url: str) -> AcmeDirectory | None:
+        """The directory a stored URL names, or ``None`` when it names neither.
+
+        ``None`` rather than a default: an unrecognized directory URL — a future
+        CA, a typo, a hand-edited row — must be visible as unknown instead of being
+        silently treated as one of the two known directories.
+        """
+        for directory, candidate in _ACME_DIRECTORY_URLS.items():
+            if candidate == url:
+                return directory
+        return None
+
+
+#: One URL per directory. Let's Encrypt's published endpoints; a CA swap is a new
+#: member plus an entry here, and every existing row keeps the URL it was made at.
+_ACME_DIRECTORY_URLS: dict[AcmeDirectory, str] = {
+    AcmeDirectory.STAGING: "https://acme-staging-v02.api.letsencrypt.org/directory",
+    AcmeDirectory.PRODUCTION: "https://acme-v02.api.letsencrypt.org/directory",
+}
+
+
+class DnsProviderKind(StrEnum):
+    """Which DNS API a stored credential speaks to.
+
+    One member in v1 (Cloudflare) — the enum, not the column, is the seam: adding
+    Route53 or DigitalOcean later is a new member plus a provider implementation,
+    not a schema change, because ``dns_providers.kind`` is a CHECK over this
+    vocabulary. An unknown value is refused at the database, so a row can never
+    name a provider the control plane cannot actually call.
+    """
+
+    CLOUDFLARE = "cloudflare"

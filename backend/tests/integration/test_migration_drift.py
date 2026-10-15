@@ -71,19 +71,24 @@ def test_operations_type_check_matches_the_enum() -> None:
 
 
 def test_the_certificate_vocabularies_match_the_enums() -> None:
-    """The Phase 5.1 closed vocabularies are the sets the code declares.
+    """The certificate closed vocabularies are the sets the code declares.
 
-    ``certificate_generations.state`` is the important one. The migration spells
-    it as a literal *without* the post-issuance states on purpose, so the database
-    refuses a generation that would have to carry a private key — an enum member
-    the CHECK rejects would be a runtime 500, and a value the CHECK accepts that
-    the enum does not know would be a state with no rules at all.
+    ``certificate_generations.state`` is the important one. Phase 5.1 spelled it
+    as a literal *without* the post-issuance states, so the database refused a
+    generation that would have to carry a private key; Phase 5.2.2 widens it to
+    the full machine **and** adds the material guard, so the property that bought —
+    no material-bearing row without material — is now a constraint instead of a
+    missing column. Both halves are asserted here: an enum member the CHECK rejects
+    would be a runtime 500, and a value the CHECK accepts that the enum does not
+    know would be a state with no rules at all.
     """
     from app.models.enums import (
         CertificateChallengeType,
         CertificateGenerationState,
         CertificateKeyAlgorithm,
+        CertificateRevocationState,
         CertificateStatus,
+        DnsProviderKind,
     )
 
     names = {
@@ -91,6 +96,9 @@ def test_the_certificate_vocabularies_match_the_enums() -> None:
         "challenge_type": "ck_certificates_challenge_type_valid",
         "key_algorithm": "ck_certificates_key_algorithm_valid",
         "state": "ck_certificate_generations_state_valid",
+        "revocation_state": "ck_certificate_generations_revocation_state_valid",
+        "material_guard": "ck_certificate_generations_material_guard",
+        "dns_provider_kind": "ck_dns_providers_kind_valid",
     }
     engine = create_engine(TEST_OWNER_DATABASE_URL)
     try:
@@ -115,18 +123,33 @@ def test_the_certificate_vocabularies_match_the_enums() -> None:
         assert f"'{member}'" in definitions["challenge_type"], member
     for member in CertificateKeyAlgorithm:
         assert f"'{member}'" in definitions["key_algorithm"], member
+    for member in CertificateRevocationState:
+        assert f"'{member}'" in definitions["revocation_state"], member
+    for member in DnsProviderKind:
+        assert f"'{member}'" in definitions["dns_provider_kind"], member
 
-    # Every material-bearing state stays absent: an issued (or superseded,
-    # suspended, expired, revoked) generation cannot be written, so it cannot be
-    # reported, delivered or installed either.
-    for absent in (
-        "ISSUED",
-        "SUPERSEDED",
-        "EXPIRED",
-        "SUSPENDED",
-        "REVOCATION_PENDING",
-        "REVOKED",
-        "REVOCATION_FAILED",
-        "REVOKED_LOCAL_ONLY",
+    # The material guard is the acceptance criterion of 5.2.2 in the schema: the
+    # two branches are the pre-issuance states and the six fields every
+    # material-bearing row must carry. A guard that lost one of them would admit
+    # exactly the row the slice exists to make impossible.
+    guard = definitions["material_guard"]
+    pre_issuance = set(CertificateGenerationState.live_pre_issuance()) | {
+        CertificateGenerationState.FAILED
+    }
+    material_bearing = set(CertificateGenerationState.material_bearing())
+    assert pre_issuance | material_bearing == set(CertificateGenerationState)
+    for state in sorted(pre_issuance, key=str):
+        assert f"'{state}'" in guard, state
+    for state in sorted(material_bearing, key=str):
+        assert f"'{state}'" not in guard, (
+            f"{state} is material-bearing and must not appear in the guard's no-material branch"
+        )
+    for column in (
+        "key_ciphertext",
+        "chain_ciphertext",
+        "deke_id",
+        "issued_at",
+        "not_before",
+        "not_after",
     ):
-        assert f"'{absent}'" not in definitions["state"], absent
+        assert column in guard, column

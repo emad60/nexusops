@@ -2,14 +2,17 @@
 
 Two rules shape every model in this module:
 
-1. **Nothing here can hold key material.** Phase 5.1 has no ciphertext column at
-   all, but the read models are written to stay that way: they enumerate the
-   fields the API exposes instead of dumping the row, so a column added later
-   (a wrapped private key, a chain, a DEK generation) cannot leak by default.
+1. **Nothing here can hold key material.** The read models enumerate the fields
+   the API exposes instead of dumping the row, so a column added later (a wrapped
+   private key, a chain, an ACME account key) cannot leak by default. Since 5.2.2
+   those columns exist and the rule is what keeps them out of every response —
+   ``key_ciphertext``, ``chain_ciphertext`` and ``deke_id`` are simply not named
+   here, and ``order_state`` is excluded on the same grounds (it holds the ACME
+   client's working data, including challenge values).
 2. **A request that has not been issued must not read as if it had.** Statuses
    and their human description are both derived from the generation the
    certificate actually has, and ``issued`` is true only when a generation
-   carrying material is the current one — which Phase 5.1 cannot produce.
+   carrying material is the current one.
 """
 
 from __future__ import annotations
@@ -23,6 +26,7 @@ from app.models.enums import (
     CertificateChallengeType,
     CertificateGenerationState,
     CertificateKeyAlgorithm,
+    CertificateRevocationState,
     CertificateStatus,
 )
 from app.schemas.base import APIModel, OutModel
@@ -34,9 +38,12 @@ class CertificateCreate(APIModel):
     ``identifiers`` is the order's identifier list: the **first** entry is the
     primary common name and the rest are the additional (SAN) identifiers, so an
     apex + wildcard pair is one order (``["example.com", "*.example.com"]``)
-    rather than two certificates. The request body has no ``dns_provider_id`` in
-    Phase 5.1 on purpose: that column arrives with its table in 5.2, and
-    ``extra="forbid"`` makes sending it a 422 rather than a silently ignored key.
+    rather than two certificates.
+
+    ``dns_provider_id`` overrides the credential the DNS-01 challenge is published
+    with; omitted (or null) it inherits the Domain's. The id must name a row in the
+    caller's own organization — a foreign id is a 404, never a stored reference
+    that would later publish a challenge with someone else's credential.
     """
 
     domain_id: UUID
@@ -46,17 +53,27 @@ class CertificateCreate(APIModel):
     challenge_type: str = "dns-01"
     #: Renewal preference the sweep honors (it never overrides it).
     auto_renew: bool = True
+    #: Overrides the Domain's DNS credential for this certificate's challenges.
+    dns_provider_id: UUID | None = None
 
 
 class CertificateUpdate(APIModel):
     """Payload for ``PATCH /certificates/{id}``.
 
-    ``auto_renew`` is the only field a caller may change after creation. Changing
-    the identifiers would change what a *certificate* is, which is a new
-    generation — and issuing one is not something this phase does.
+    Two fields a caller may change after creation. ``auto_renew`` is a preference;
+    ``dns_provider_id`` is which credential may publish this certificate's
+    challenges (null means "inherit the Domain's"). Neither changes what the
+    certificate *is*: different identifiers would be a new generation, and issuing
+    one is not something this phase does.
+
+    The two fields treat an explicit ``null`` differently, and deliberately:
+    ``null`` for ``auto_renew`` is not a value, so it is ignored rather than
+    recorded as a change, while ``null`` for ``dns_provider_id`` is exactly a
+    value — it clears an override.
     """
 
     auto_renew: bool | None = None
+    dns_provider_id: UUID | None = None
 
 
 class CertificateGenerationOut(OutModel):
@@ -64,7 +81,9 @@ class CertificateGenerationOut(OutModel):
 
     ``order_state`` is deliberately absent: it is the ACME client's working data
     (order URLs, key authorizations, DNS record values) and stays internal, so
-    the read model never has to sanitize what a future writer puts in it.
+    the read model never has to sanitize what a future writer puts in it. The
+    material columns (``key_ciphertext``, ``chain_ciphertext``, ``deke_id``) are
+    absent for the stronger reason: they exist now, and no response may carry one.
     """
 
     updated_at: datetime
@@ -80,6 +99,17 @@ class CertificateGenerationOut(OutModel):
     terminal: bool = False
     #: Human-readable, sanitized explanation of ``state``.
     status_detail: str = ""
+    #: The CA's validity window, once issued. Metadata about the material — never
+    #: the material. ``not_after`` is what the renewal sweep reasons about.
+    not_before: datetime | None = None
+    not_after: datetime | None = None
+    issued_at: datetime | None = None
+    #: SHA-256 of the leaf, for display and drift checks (which certificate is
+    #: installed on a node). Never a decryption oracle.
+    fingerprint: str | None = None
+    #: The CA axis, kept separate from ``state`` so "the authority never answered"
+    #: is visible as its own fact rather than folded into the lifecycle.
+    revocation_state: CertificateRevocationState = CertificateRevocationState.NOT_REQUESTED
 
 
 class CertificateOut(OutModel):
@@ -106,10 +136,13 @@ class CertificateOut(OutModel):
     current_generation_id: UUID | None = None
     #: The newest generation (what the status above is derived from).
     latest_generation: CertificateGenerationOut | None = None
-    #: True only when a material-bearing generation is current. Phase 5.1 cannot
-    #: set it; the field exists so no client has to infer issuance from a status
-    #: string that also means "requested".
+    #: True only when a material-bearing generation is current. False while a
+    #: request has only been ordered, so no client has to infer issuance from a
+    #: status string that also means "requested".
     issued: bool = False
+    #: The credential this certificate's challenges may be published with. NULL
+    #: means it inherits its Domain's.
+    dns_provider_id: UUID | None = None
     status_detail: str = ""
 
 

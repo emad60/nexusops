@@ -52,10 +52,13 @@ Three further behaviours are load-bearing:
   schema's own way of saying "no DEK yet" (the pair CHECK makes any other
   combination unrepresentable).
 
-Scope note: this slice creates and unwraps DEKs. It does **not** store a
-certificate key, a DNS credential or an ACME account key — those columns arrive,
-with their own tables, in Phase 5.2.2. Nothing here holds key material in the
-database beyond the wrapped DEK itself.
+Scope note: this module creates and unwraps DEKs, and that is all it does. Phase
+5.2.2 added the tables that store what a DEK protects — a certificate generation's
+key and chain, a DNS credential, an ACME account key — and they encrypt through
+:mod:`app.services.payload_crypto`, which takes the DEK from
+:func:`org_dek_context` for the duration of one write. Neither module holds key
+material in the database beyond the wrapped DEK itself, and the envelope's shape,
+scope rule and compare-and-set rewrap are unchanged by that slice.
 """
 
 from __future__ import annotations
@@ -91,6 +94,21 @@ from app.services.kek import (
 from app.services.kek.factory import get_kek_provider
 
 log = get_logger("nexusops.dek")
+
+
+@dataclass(frozen=True, slots=True)
+class OrgDek:
+    """One organization's DEK for **one operation**, with the generation it came from.
+
+    ``generation`` is the value a Phase-5 row stores as ``deke_id``: it records
+    which DEK encrypted a ciphertext, so a rotation can find the rows it must
+    re-encrypt (§6.3). Exposing it beside the key is what keeps "which key is
+    this?" answerable without any caller reaching into the envelope itself.
+    """
+
+    fernet: Fernet
+    generation: int
+
 
 #: The generation a first-use claim stores. ``0`` stays reserved for "no DEK yet"
 #: by the pair CHECK, so the first real DEK is ``1`` and nothing else may be the
@@ -211,7 +229,7 @@ async def _load(db: AsyncSession, org_id: uuid.UUID) -> tuple[str | None, int]:
 
 async def _claim_first_dek(
     db: AsyncSession, org_id: uuid.UUID, purpose: str, provider: KEKProvider
-) -> bytes:
+) -> tuple[bytes, int]:
     """Generate a DEK, wrap it, and claim the row — or adopt the winner's.
 
     The provider call happens **before** the conditional insert and outside any
@@ -220,6 +238,12 @@ async def _claim_first_dek(
     ``ON CONFLICT (org_id) DO NOTHING`` against the table's unique constraint is
     what makes this a claim rather than an assumption — the loser's row is never
     written, so there is no second generation to reconcile.
+
+    Returns the key **and** the generation it belongs to. Nothing in the tree
+    increments a generation today, so both paths return ``FIRST_GENERATION``; the
+    loser's branch reads it from the envelope it adopted anyway, because a future
+    rotation (§6.3) must not be able to make this function hand back a key that the
+    caller then mislabels as generation 1.
     """
     candidate = Fernet.generate_key()  # CSPRNG, one per organization, never derived
     context = _context(org_id, purpose, FIRST_GENERATION)
@@ -237,13 +261,13 @@ async def _claim_first_dek(
     # zero means another writer claimed the row between our read and our write.
     if int(cast(CursorResult[Any], claimed).rowcount or 0) == 1:
         log.info("org_dek_created", org_id=str(org_id), generation=FIRST_GENERATION)
-        return candidate
+        return candidate, FIRST_GENERATION
     # Another request claimed the row first. Its envelope is the authoritative one;
     # ours is dropped without ever having been stored.
     ciphertext, generation = await _load(db, org_id)
     if ciphertext is None:  # pragma: no cover - only reachable if the row was cleared concurrently
         raise KEKEnvelopeError("another writer removed the DEK while it was being created")
-    return await _unwrap(org_id, purpose, generation, ciphertext, provider)
+    return await _unwrap(org_id, purpose, generation, ciphertext, provider), generation
 
 
 async def _unwrap(
@@ -260,6 +284,57 @@ async def _unwrap(
 
 
 @asynccontextmanager
+async def org_dek_context(
+    db: AsyncSession,
+    org_id: uuid.UUID,
+    *,
+    purpose: str = PURPOSE_ORG_DEK,
+    provider: KEKProvider | None = None,
+) -> AsyncIterator[OrgDek]:
+    """Yield the organization's DEK **and its generation** for one operation.
+
+    This is the primitive; :func:`org_dek` is the narrow view of it. The
+    generation is returned because a Phase-5 write has to record it as
+    ``deke_id`` on the row it encrypts, and deriving it a second time from the
+    envelope would be a second read of key material's coordinates for no reason.
+
+    Usage is deliberately narrow: the caller gets a :class:`Fernet` and cannot
+    reach the raw key bytes, the wrapped value or the provider. When the block
+    exits — normally or by exception — the local references to the key material are
+    cleared, so a traceback or a later inspection of the frame cannot surface a DEK.
+
+    **``purpose`` is the KEK binding of the envelope, not the purpose of what the
+    caller is about to encrypt.** There is one envelope per organization, so every
+    Phase-5 caller leaves it at its ``org-dek`` default; a caller that passed the
+    purpose of its own payload (``dns.credentials``, ``acme.account_key``,
+    ``certificate.key``) would bind the organization's single wrapped DEK to that
+    subsystem, and the next subsystem to ask would fail to unwrap the very same
+    key. Per-purpose separation belongs to
+    :class:`~app.services.payload_crypto.PayloadContext`, which binds the
+    *ciphertext* to ``(organization, purpose, record, generation)``.
+    """
+    _require_envelope_scope(org_id)
+    provider = provider or get_kek_provider()
+    ciphertext, generation = await _load(db, org_id)
+    if ciphertext is None:
+        # The generation a claim settles on, not an assumption that it is the first
+        # one: a claim that lost the race adopts another writer's envelope, and the
+        # caller is about to record this value as ``deke_id`` on the row it
+        # encrypts, so it has to be the generation of the key actually handed out.
+        key, generation = await _claim_first_dek(db, org_id, purpose, provider)
+    else:
+        key = await _unwrap(org_id, purpose, generation, ciphertext, provider)
+    dek = OrgDek(fernet=Fernet(key), generation=generation)
+    try:
+        yield dek
+    finally:
+        # Overwrite the references we control. (Python cannot scrub the bytes
+        # object itself; the point is that nothing keeps it alive or reachable.)
+        key = b""
+        dek = None  # type: ignore[assignment]
+
+
+@asynccontextmanager
 async def org_dek(
     db: AsyncSession,
     org_id: uuid.UUID,
@@ -269,26 +344,14 @@ async def org_dek(
 ) -> AsyncIterator[Fernet]:
     """Yield the organization's DEK for **one operation**, then drop it.
 
-    Usage is deliberately narrow: the caller gets a :class:`Fernet` and cannot
-    reach the raw key bytes, the wrapped value or the provider. When the block
-    exits — normally or by exception — the local references to the key material are
-    cleared, so a traceback or a later inspection of the frame cannot surface a DEK.
+    The key-only view, for callers that encrypt nothing keyed to a generation.
+    Anything that stores what it encrypted must use :func:`org_dek_context`
+    instead, so the row can record the ``deke_id`` that guards it. ``purpose``
+    carries the same meaning — and the same warning — as it does there: it is the
+    envelope's KEK binding, and one DEK per organization means it stays ``org-dek``.
     """
-    _require_envelope_scope(org_id)
-    provider = provider or get_kek_provider()
-    ciphertext, generation = await _load(db, org_id)
-    if ciphertext is None:
-        key = await _claim_first_dek(db, org_id, purpose, provider)
-    else:
-        key = await _unwrap(org_id, purpose, generation, ciphertext, provider)
-    fernet = Fernet(key)
-    try:
-        yield fernet
-    finally:
-        # Overwrite the references we control. (Python cannot scrub the bytes
-        # object itself; the point is that nothing keeps it alive or reachable.)
-        key = b""
-        fernet = None  # type: ignore[assignment]
+    async with org_dek_context(db, org_id, purpose=purpose, provider=provider) as dek:
+        yield dek.fernet
 
 
 async def _rewrap_one(
@@ -429,8 +492,10 @@ async def rewrap_org_deks(
 
 __all__ = [
     "FIRST_GENERATION",
+    "OrgDek",
     "RewrapReport",
     "UnknownOrganizationError",
     "org_dek",
+    "org_dek_context",
     "rewrap_org_deks",
 ]

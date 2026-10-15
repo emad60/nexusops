@@ -1,22 +1,29 @@
-"""The pre-issuance lifecycle is a contract, and Phase 5.1's bound is its shape.
+"""The generation lifecycle is a contract, and its material gating is its shape.
 
-Three things are asserted here rather than trusted:
+Four things are asserted here rather than trusted:
 
-1. **The transition table is closed and acyclic-forward.** Every pre-issuance
-   state has exactly the moves the design gives it, ``FAILED`` is the only state
-   that can go backwards (into a retry), and nothing else can skip a step.
-2. **An issued generation is unrepresentable.** ``ISSUED`` is not an enum member,
-   not a legal target, and not an input any function here accepts — so no code
-   path in this phase can report a certificate as issued or delivered.
+1. **The transition table is closed and acyclic-forward.** Every state in the
+   (now complete) vocabulary has exactly the moves the design gives it,
+   ``FAILED`` is the only state that can go backwards (into a retry), only
+   ``VALIDATING`` may enter ``ISSUED``, and the revocation states are terminal.
+2. **A material-bearing state cannot be reached or written without material.**
+   Phase 5.1 bought that property by truncating the vocabulary — ``ISSUED`` was
+   not an enum member at all. Phase 5.2.2 widens the vocabulary to the full
+   machine, so the property is now carried by the **material guard**: the enum's
+   ``material_bearing()`` decides which states must carry ``key_ciphertext``,
+   ``chain_ciphertext``, ``deke_id``, ``issued_at``, ``not_before`` and
+   ``not_after``, and the model's CHECK is derived from that same tuple. This
+   file asserts the two halves cannot disagree, which is what keeps the widening
+   from reopening the window 5.1 closed.
 3. **The derivation and the schema agree.** The certificate status is derived
    from the generation, the partial unique index that allows one in-flight
    generation is built from the same state tuple, and the read models expose only
-   approved metadata fields.
+   approved metadata fields — the material columns exist now, and none of them may
+   appear in a response model.
 
 The last one is why this module also reads the ORM metadata: the state machine,
-the index predicate and the CHECK constraint are three expressions of one
-vocabulary, and a change to any of them alone is the bug this file exists to
-catch.
+the index predicate and the CHECK constraints are expressions of one vocabulary,
+and a change to any of them alone is the bug this file exists to catch.
 """
 
 from __future__ import annotations
@@ -26,7 +33,12 @@ from pathlib import Path
 
 import pytest
 from app.core.permissions import ALL_CODENAMES, PERMISSIONS, ROLE_MATRIX, WILDCARD
-from app.models.certificate import CertificateGeneration, one_live_generation_predicate
+from app.models.certificate import (
+    Certificate,
+    CertificateGeneration,
+    material_guard_predicate,
+    one_live_generation_predicate,
+)
 from app.models.enums import CertificateGenerationState as State
 from app.models.enums import CertificateStatus
 from app.schemas.certificate import (
@@ -52,6 +64,12 @@ GENERATION_FIELDS = {
     "retryable",
     "terminal",
     "status_detail",
+    # Phase 5.2.2 metadata *about* the material, never the material itself.
+    "not_before",
+    "not_after",
+    "issued_at",
+    "fingerprint",
+    "revocation_state",
 }
 
 #: Every field the certificate read model is allowed to expose.
@@ -73,6 +91,7 @@ CERTIFICATE_FIELDS = {
     "current_generation_id",
     "latest_generation",
     "issued",
+    "dns_provider_id",
     "status_detail",
 }
 
@@ -109,6 +128,23 @@ def test_every_state_has_a_transition_row() -> None:
         (State.CHALLENGE_PUBLISHED, State.FAILED),
         (State.VALIDATING, State.FAILED),
         (State.FAILED, State.ORDERING),
+        # Post-issuance (5.2.2): the material is stored, and these are the only
+        # ways a material-bearing generation moves.
+        (State.VALIDATING, State.ISSUED),
+        (State.ISSUED, State.SUPERSEDED),
+        (State.ISSUED, State.SUSPENDED),
+        (State.ISSUED, State.EXPIRED),
+        (State.ISSUED, State.REVOCATION_PENDING),
+        (State.SUPERSEDED, State.SUSPENDED),
+        # A manual revoke is not blocked by a newer generation (§9.5).
+        (State.SUPERSEDED, State.REVOCATION_PENDING),
+        (State.SUSPENDED, State.REVOCATION_PENDING),
+        # ``notAfter`` passing does not make a key unrevokable.
+        (State.EXPIRED, State.REVOCATION_PENDING),
+        (State.REVOCATION_PENDING, State.REVOKED),
+        (State.REVOCATION_PENDING, State.REVOCATION_FAILED),
+        (State.REVOCATION_FAILED, State.REVOCATION_PENDING),
+        (State.REVOCATION_FAILED, State.REVOKED_LOCAL_ONLY),
     ],
 )
 def test_the_legal_moves_are_the_designs(current: State, target: State) -> None:
@@ -130,6 +166,21 @@ def test_the_legal_moves_are_the_designs(current: State, target: State) -> None:
         # A state cannot move to itself.
         (State.PENDING, State.PENDING),
         (State.FAILED, State.FAILED),
+        # Material cannot be minted by skipping the challenge.
+        (State.PENDING, State.ISSUED),
+        (State.ORDERING, State.ISSUED),
+        (State.CHALLENGE_PUBLISHED, State.ISSUED),
+        # A material-bearing generation cannot walk backwards into ordering.
+        (State.ISSUED, State.VALIDATING),
+        (State.SUPERSEDED, State.ISSUED),
+        (State.EXPIRED, State.ISSUED),
+        # A revocation is not "issued" again, and only the CA conversation can
+        # end a pending revocation.
+        (State.ISSUED, State.REVOKED),
+        (State.REVOCATION_PENDING, State.ISSUED),
+        # Terminal means terminal.
+        (State.REVOKED, State.REVOCATION_PENDING),
+        (State.REVOKED_LOCAL_ONLY, State.REVOCATION_PENDING),
     ],
 )
 def test_every_other_move_is_refused(current: State, target: State) -> None:
@@ -141,46 +192,67 @@ def test_every_other_move_is_refused(current: State, target: State) -> None:
 
 
 def test_unknown_values_are_not_states() -> None:
-    assert lifecycle.coerce_state("ISSUED") is None
+    assert lifecycle.coerce_state("ISSUED_ELSEWHERE") is None
     assert lifecycle.coerce_state("") is None
     assert lifecycle.coerce_state(None) is None
+    assert lifecycle.coerce_state(State.PENDING) is State.PENDING
+    # A state that exists is not automatically a legal target.
     assert lifecycle.can_transition("PENDING", "ISSUED") is False
     assert lifecycle.can_transition("nonsense", "ORDERING") is False
 
 
-# --- 2. an issued generation does not exist in this phase ----------------------
-
-
-def test_issued_is_not_a_generation_state() -> None:
-    values = {str(member) for member in State}
-    assert "ISSUED" not in values
-    # ... and the material-bearing vocabulary in its entirety is absent, not just
-    # the one state: none of these may be written or transitioned into yet.
-    for absent in (
-        "ISSUED",
-        "SUPERSEDED",
-        "SUSPENDED",
-        "EXPIRED",
-        "REVOCATION_PENDING",
-        "REVOKED",
-        "REVOCATION_FAILED",
-        "REVOKED_LOCAL_ONLY",
-    ):
-        assert absent not in values
-        assert lifecycle.coerce_state(absent) is None
-        assert lifecycle.can_transition(State.VALIDATING, absent) is False
-        with pytest.raises(lifecycle.InvalidTransition):
-            lifecycle.require_transition(State.VALIDATING, absent)
-
-
-def test_handing_a_material_state_to_the_lifecycle_is_refused_loudly() -> None:
-    """A newer row read by this phase's code fails rather than being mislabelled."""
+def test_handing_an_unknown_value_to_the_lifecycle_is_refused_loudly() -> None:
+    """A value that names no state fails rather than being mislabelled."""
     with pytest.raises(lifecycle.UnrepresentableState):
-        lifecycle.assert_pre_issuance("ISSUED")
+        lifecycle.assert_state(None)
     with pytest.raises(lifecycle.UnrepresentableState):
-        lifecycle.assert_pre_issuance(None)
+        lifecycle.certificate_status_for("SUPERSEDED_ELSEWHERE")
     with pytest.raises(lifecycle.UnrepresentableState):
-        lifecycle.certificate_status_for("SUPERSEDED")
+        lifecycle.material_required("nonsense")
+
+
+# --- 2. a material-bearing state cannot exist without material -----------------
+
+
+def test_every_state_is_exactly_one_of_pre_issuance_or_material_bearing() -> None:
+    """The two predicates partition the vocabulary — the guard's whole premise."""
+    pre_issuance = set(State.live_pre_issuance()) | {State.FAILED}
+    material_bearing = set(State.material_bearing())
+    assert pre_issuance & material_bearing == set()
+    assert pre_issuance | material_bearing == set(State)
+    # ``FAILED`` is material-less by construction but is *not* live: a retry needs
+    # a row of its own, so ``live_pre_issuance`` must not have grown to include it.
+    assert State.FAILED not in State.live_pre_issuance()
+
+
+def test_the_material_predicate_follows_the_enum() -> None:
+    for state in State:
+        assert lifecycle.material_required(state) is (state in State.material_bearing())
+
+
+def test_the_two_narrowings_refuse_each_others_vocabulary() -> None:
+    """A fresh generation cannot already carry material, and material cannot be
+    written into a state the guard CHECK does not require it for."""
+    for state in State.material_bearing():
+        assert lifecycle.assert_material_bearing(state) is state
+        with pytest.raises(lifecycle.UnrepresentableState):
+            lifecycle.assert_pre_issuance(state)
+    for state in (*State.live_pre_issuance(), State.FAILED):
+        assert lifecycle.assert_pre_issuance(state) is state
+        with pytest.raises(lifecycle.UnrepresentableState):
+            lifecycle.assert_material_bearing(state)
+
+
+def test_every_material_bearing_state_has_a_way_in_and_only_validating_issues() -> None:
+    """No material-bearing state is unreachable, and none is entered by skipping
+    the challenge except through ``VALIDATING``."""
+    for target in State.material_bearing():
+        sources = {state for state in State if lifecycle.can_transition(state, target)}
+        assert sources, f"{target} is unreachable"
+        if target is State.ISSUED:
+            assert sources == {State.VALIDATING}
+        else:
+            assert State.VALIDATING not in sources, target
 
 
 def test_the_initial_state_is_the_one_a_request_starts_in() -> None:
@@ -191,14 +263,47 @@ def test_the_initial_state_is_the_one_a_request_starts_in() -> None:
 # --- 3. derived status and retry policy ---------------------------------------
 
 
-def test_no_pre_issuance_state_ever_derives_an_issued_status() -> None:
+def test_the_status_derivation_is_the_documented_one() -> None:
+    """Every generation state maps to exactly one certificate status.
+
+    Two collapses are deliberate and asserted here, because a silent third one
+    would be the bug this test exists to catch: ``SUPERSEDED`` reads as
+    ``ISSUED`` (the material exists and may still be serving) and
+    ``REVOCATION_FAILED`` reads as ``REVOCATION_PENDING`` (the CA conversation is
+    unfinished, which is what that status says).
+    """
     derived = {lifecycle.certificate_status_for(state) for state in State}
-    assert derived == {CertificateStatus.PENDING, CertificateStatus.FAILED}
-    assert CertificateStatus.ISSUED not in derived
-    # The in-flight states all read as one thing to a client: requested.
+    assert derived == set(CertificateStatus)
+    # Nothing has been issued while the order is still in flight — and a request
+    # that has not produced material must never read as if it had.
     for in_flight in State.live_pre_issuance():
         assert lifecycle.certificate_status_for(in_flight) is CertificateStatus.PENDING
     assert lifecycle.certificate_status_for(State.FAILED) is CertificateStatus.FAILED
+    assert lifecycle.certificate_status_for(State.ISSUED) is CertificateStatus.ISSUED
+    assert lifecycle.certificate_status_for(State.SUPERSEDED) is CertificateStatus.ISSUED
+    assert lifecycle.certificate_status_for(State.SUSPENDED) is CertificateStatus.SUSPENDED
+    assert lifecycle.certificate_status_for(State.EXPIRED) is CertificateStatus.EXPIRED
+    assert (
+        lifecycle.certificate_status_for(State.REVOCATION_FAILED)
+        is CertificateStatus.REVOCATION_PENDING
+    )
+    assert lifecycle.certificate_status_for(State.REVOKED) is CertificateStatus.REVOKED
+    assert (
+        lifecycle.certificate_status_for(State.REVOKED_LOCAL_ONLY)
+        is CertificateStatus.REVOKED_LOCAL_ONLY
+    )
+
+
+def test_only_the_revocation_states_are_terminal() -> None:
+    assert lifecycle.is_terminal(State.REVOKED, 0) is True
+    assert lifecycle.is_terminal(State.REVOKED_LOCAL_ONLY, 0) is True
+    # A superseded or expired generation is still revocable, and a suspension is
+    # a step on the way there — none of them is the end of the machine.
+    for state in State.material_bearing():
+        if state in {State.REVOKED, State.REVOKED_LOCAL_ONLY}:
+            continue
+        assert lifecycle.is_terminal(state, 0) is False, state
+        assert lifecycle.is_retryable(state, 0) is False, state
 
 
 def test_a_failure_is_retryable_until_the_budget_is_spent() -> None:
@@ -230,12 +335,24 @@ def test_backoff_grows_and_is_capped() -> None:
     assert lifecycle.next_attempt_at(0, now=now) == now + timedelta(seconds=first)
 
 
-def test_every_status_detail_says_nothing_has_been_issued() -> None:
-    for state in State:
+def test_every_status_detail_is_non_empty_and_says_what_it_should() -> None:
+    """A request that has not been issued must not read as if it had, and a
+    generation that does hold material must say so rather than staying silent."""
+    for state in (*State.live_pre_issuance(), State.FAILED):
         for attempt in (0, 1, lifecycle.MAX_ISSUE_ATTEMPTS):
             detail = lifecycle.status_detail_for(state, attempt)
             assert detail.strip()
             assert "issued" in detail.lower(), detail
+
+    issued = lifecycle.status_detail_for(State.ISSUED).lower()
+    assert "issued" in issued
+    # The human description and the derived status agree in both directions: a
+    # material-bearing state never claims nothing was issued.
+    for state in State.material_bearing():
+        detail = lifecycle.status_detail_for(state, 0)
+        assert detail.strip(), state
+        assert "nothing is issued" not in detail.lower(), detail
+        assert "no certificate has been issued" not in detail.lower(), detail
 
 
 # --- 4. the derivation, the index and the schema agree -------------------------
@@ -259,15 +376,62 @@ def test_the_one_live_generation_index_covers_exactly_the_live_states() -> None:
 
 
 def test_the_generation_state_check_matches_the_enum() -> None:
-    checks = {
+    """The 5.1 CHECK is widened to the whole machine in the same change as the
+    guard — the vocabulary and the constraint that makes it safe move together."""
+    state_check = _generation_checks()["ck_certificate_generations_state_valid"]
+    for state in State:
+        assert f"'{state.value}'" in state_check
+
+
+def test_the_material_guard_check_is_the_enums_predicate() -> None:
+    """The guard is derived, not restated: it is the pre-issuance branch *or* the
+    six material fields, and it must equal the function the model builds it from.
+
+    A guard that lost a column or admitted a material-bearing state into its
+    first branch would reintroduce exactly the material-less ``ISSUED`` row 5.1
+    made unrepresentable.
+    """
+    guard = _generation_checks()["ck_certificate_generations_material_guard"]
+    assert guard == material_guard_predicate()
+
+    pre_issuance = set(State.live_pre_issuance()) | {State.FAILED}
+    for state in sorted(pre_issuance, key=str):
+        assert f"'{state.value}'" in guard, state
+    for state in State.material_bearing():
+        assert f"'{state.value}'" not in guard, (
+            f"{state.value} is material-bearing and must not appear in the guard's "
+            "no-material branch"
+        )
+    for column in (
+        "key_ciphertext",
+        "chain_ciphertext",
+        "deke_id",
+        "issued_at",
+        "not_before",
+        "not_after",
+    ):
+        assert column in guard, column
+
+
+def test_the_certificate_suspension_pair_is_a_constraint() -> None:
+    """Suspension is set and cleared as one fact (§9.3), at both levels."""
+    for table in (Certificate.__table__, CertificateGeneration.__table__):
+        names = {
+            str(constraint.name): str(constraint.sqltext)
+            for constraint in table.constraints
+            if constraint.__class__.__name__ == "CheckConstraint"
+        }
+        pair = next(text for name, text in names.items() if name.endswith("_suspension_pair_valid"))
+        assert "suspended_at IS NULL" in pair
+        assert "suspension_reason = ''" in pair
+
+
+def _generation_checks() -> dict[str, str]:
+    return {
         str(constraint.name): str(constraint.sqltext)
         for constraint in CertificateGeneration.__table__.constraints
         if constraint.__class__.__name__ == "CheckConstraint"
     }
-    state_check = next(text for name, text in checks.items() if name.endswith("_state_valid"))
-    for state in State:
-        assert f"'{state.value}'" in state_check
-    assert "'ISSUED'" not in state_check
 
 
 def test_the_generation_number_and_attempt_columns_are_bounded_by_the_database() -> None:
@@ -295,13 +459,34 @@ def test_no_response_field_can_hold_key_material(fragment: str) -> None:
     assert offending == [], f"read models must not expose {fragment!r}: {offending}"
 
 
-def test_the_request_body_rejects_fields_this_phase_does_not_have() -> None:
-    """No forward reference: ``dns_provider_id`` arrives with its table in 5.2."""
+def test_the_request_body_accepts_the_credential_override_and_nothing_else() -> None:
+    """``dns_provider_id`` arrived with its table in 5.2.2; the body stays closed.
+
+    The override is a reference the service resolves inside the caller's own
+    organization, so it belongs on the request. Anything the request does not
+    name — including every material column the slice added — is refused rather
+    than ignored.
+    """
+    request = CertificateCreate(
+        domain_id="11111111-1111-1111-1111-111111111111",
+        identifiers=["example.com"],
+        dns_provider_id="22222222-2222-2222-2222-222222222222",
+    )
+    assert request.dns_provider_id is not None
+    # Omitted is a value too: inherit the Domain's credential.
+    assert (
+        CertificateCreate(
+            domain_id="11111111-1111-1111-1111-111111111111",
+            identifiers=["example.com"],
+        ).dns_provider_id
+        is None
+    )
+
     with pytest.raises(ValueError):
         CertificateCreate(
             domain_id="11111111-1111-1111-1111-111111111111",
             identifiers=["example.com"],
-            dns_provider_id="22222222-2222-2222-2222-222222222222",
+            key_ciphertext="not-a-payload-field",
         )
     with pytest.raises(ValueError):
         CertificateCreate(

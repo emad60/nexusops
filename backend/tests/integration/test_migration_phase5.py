@@ -20,6 +20,14 @@ way the earlier phase migrations test theirs:
   new schema and the codenames must disappear, the pre-existing data must
   survive, and a second ``upgrade`` must restore exactly what was removed.
 
+**What is pinned, and what is not.** Statements about *this* revision's schema
+(its columns, its vocabularies, its indexes and foreign keys) migrate to
+``c8d9e0f1a2b3`` and stop there: Phase 5.2.2 adds columns and constraints to both
+tables, so a test that ran to ``head`` and kept the 5.1 expectations would be
+asserting the absence of a later slice rather than the shape of this one. The
+tests that check a *populated instance survives the whole chain* — and the
+downgrade/re-upgrade pair — still run to ``head``, which is where they mean.
+
 Every statement is parameterized — the fixtures are constant, but test SQL that
 interpolates is a habit worth never forming.
 """
@@ -161,9 +169,26 @@ def _seed_phase4(database: str) -> None:
 
 
 def _migrate_from_phase4(database: str) -> None:
+    """A populated Phase 4.2 instance taken all the way to ``head``."""
     _run_migration(database, PRE_PHASE5_REVISION)
     _seed_phase4(database)
     _run_migration(database, "head")
+
+
+def _migrate_to_phase5(database: str) -> None:
+    """The same instance stopped at **this** revision, not at ``head``.
+
+    Phase 5.2.2 (``b8c9d0e1f2a3``) widens the generation vocabulary, adds the
+    material columns and adds ``dns_providers``/``acme_accounts``, so statements
+    about *this* revision's schema have to pin it — running them here would assert
+    the absence of a later slice rather than the shape of this one. There is no
+    ``test_migration_phase522.py``: that revision's vocabularies and its material
+    guard are pinned by ``test_migration_drift.py``, and its tables are exercised
+    through the API by ``test_dns_providers.py`` and ``test_acme_accounts.py``.
+    """
+    _run_migration(database, PRE_PHASE5_REVISION)
+    _seed_phase4(database)
+    _run_migration(database, PHASE5_REVISION)
 
 
 def _integrity_error(database: str, statements: list[Statement]) -> None:
@@ -338,7 +363,7 @@ def test_a_populated_instance_migrates_without_losing_anything(scratch_database:
 
 
 def test_the_two_tables_carry_the_specified_columns(scratch_database: str) -> None:
-    _migrate_from_phase4(scratch_database)
+    _migrate_to_phase5(scratch_database)
 
     assert _columns(scratch_database, "certificates") == {
         "id",
@@ -373,7 +398,7 @@ def test_the_two_tables_carry_the_specified_columns(scratch_database: str) -> No
 
 def test_the_slice_boundary_is_not_forward_referenced(scratch_database: str) -> None:
     """Phase 5.1 introduces no column or table that belongs to a later slice."""
-    _migrate_from_phase4(scratch_database)
+    _migrate_to_phase5(scratch_database)
 
     tables = _tables(scratch_database)
     for later in LATER_SLICE_TABLES:
@@ -387,7 +412,7 @@ def test_the_slice_boundary_is_not_forward_referenced(scratch_database: str) -> 
 
 
 def test_the_closed_vocabularies_are_enforced_by_the_database(scratch_database: str) -> None:
-    _migrate_from_phase4(scratch_database)
+    _migrate_to_phase5(scratch_database)
     _insert_certificate(scratch_database, certificate_id=str(uuid.uuid4()), primary_cn=DOMAIN_NAME)
 
     checks = {
@@ -439,7 +464,10 @@ def test_the_closed_vocabularies_are_enforced_by_the_database(scratch_database: 
 def test_an_issued_generation_is_rejected_and_a_pre_issuance_one_is_not(
     scratch_database: str,
 ) -> None:
-    _migrate_from_phase4(scratch_database)
+    # At *this* revision the rejection is the vocabulary itself. 5.2.2 replaces it
+    # with the material guard — a different mechanism answering a stronger
+    # question — and asserts that in its own module.
+    _migrate_to_phase5(scratch_database)
     certificate_id = str(uuid.uuid4())
     _insert_certificate(scratch_database, certificate_id=certificate_id, primary_cn=DOMAIN_NAME)
 
@@ -549,7 +577,9 @@ def test_the_uniqueness_semantics_are_constraints(scratch_database: str) -> None
 
 
 def test_the_indexes_and_foreign_keys_are_the_specified_ones(scratch_database: str) -> None:
-    _migrate_from_phase4(scratch_database)
+    # Pinned: 5.2.2 adds an index and a foreign key to each table, and this test
+    # asserts the *complete* set rather than a subset.
+    _migrate_to_phase5(scratch_database)
 
     certificate_indexes = _indexes(scratch_database, "certificates")
     for expected in (

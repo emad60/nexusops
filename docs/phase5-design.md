@@ -1,24 +1,36 @@
 # Phase 5 — HTTPS, Certificates and Private-Key Delivery — Design
 
-**Status:** Authoritative Phase 5 design. **Phase 5.1 is shipped; everything else in
-Phase 5 is design only.** Shipped (2026-10-12, `37b7211`): the `certificates` and
-`certificate_generations` tables, the pre-issuance generation lifecycle, the
-`certificate.read`/`certificate.manage` codenames with the role matrix, both tables'
-RLS policies and grants, and the metadata-only certificate API — see §1.1 for the
-verified inventory. **Not shipped:** the organization DEK envelope and its KEK
-provider, DNS-provider credentials, ACME accounts and issuance, private-key delivery,
-HTTPS activation, renewal, expiry monitoring and revocation (§6, §7, §8, §9, §10.1).
+**Status:** Authoritative Phase 5 design. **Phase 5.1, 5.2.1, 5.2.1.2 and 5.2.2 are
+shipped; everything from 5.3 on is design only.** Shipped (2026-10-12, `37b7211`): the
+`certificates` and `certificate_generations` tables, the pre-issuance generation
+lifecycle, the `certificate.read`/`certificate.manage` codenames with the role matrix,
+both tables' RLS policies and grants, and the metadata-only certificate API — see §1.1
+for the verified inventory. Shipped since: the organization DEK envelope and its KEK
+provider (5.2.1, 2026-10-12), the envelope's isolation, rewrap compare-and-set and
+address hygiene (5.2.1.2, 2026-10-14, migration `a7b8c9d0e1f2` — §10.6), and the
+certificate **inputs** of 5.2.2 (2026-10-14, migration `b8c9d0e1f2a3` — §10.7):
+`dns_providers` with its metadata-only API, credential custody under the organization
+DEK and the pre-call zone allowlist; `acme_accounts`, one per organization per
+directory, with its key wrapped under that same DEK; the `certificate_generations`
+material columns with the widened `state` vocabulary and the material guard that keeps
+the widening from re-opening the window 5.1 closed; and `certificates.dns_provider_id`,
+added in the revision that adds the table it references.
+**Not shipped:** ACME issuance (5.3 — no ACME client, no CA contact, no order),
+private-key delivery (5.4), HTTPS activation (5.5), renewal, expiry monitoring and
+revocation (5.6) — §7, §8, §9, §10.1. Nothing in the tree signs a CSR, stores a
+customer certificate or private key, publishes a challenge record, or delivers
+anything to a node.
 **Key-management gate closed 2026-10-12:** the KEK provider direction is approved (§6.7)
-and its operational custody specified (§6.9), which unblocks 5.2.1 — the provider adapter
-and the organization DEK envelope, planned in §10.5. Approved is not implemented: no
-provider, adapter, key or envelope column exists in the tree.
-Every schema, endpoint, operation type and agent behavior below outside the §1.1
-Phase 5.1 block is labelled *design* and is not implemented; the documents that
+and its operational custody specified (§6.9), which unblocked 5.2.1 — the provider adapter
+and the organization DEK envelope, planned in §10.5 and shipped; §10.6 records the audit
+remediation that followed it.
+Every schema, endpoint, operation type and agent behavior below outside the shipped
+blocks (§1.1, §10.5–§10.7) is labelled *design* and is not implemented; the documents that
 describe the other shipped subsystems — domains/routes/nginx (Phase 4) and the
 operation control plane (Phase 1/3) — are [domain-routing.md](domain-routing.md) and
 [node-agent-architecture.md](node-agent-architecture.md).
-**Date:** 2026-10-12 (implementation status reconciled with the shipped tree; KEK
-key-management decision approved)
+**Date:** 2026-10-14 (implementation status reconciled with the shipped tree through
+5.2.2; KEK key-management decision approved 2026-10-12)
 **Baseline:** Phase 4.4 `ddd9727` (the Phase 4 starting point recorded in §1.1) +
 **Phase 5.1 `37b7211`** (certificate metadata, pre-issuance lifecycle, org-scoped
 metadata API — the current baseline for every later slice).
@@ -80,6 +92,23 @@ point for 5.2, verified at `37b7211`).
 | `certificate.read` / `certificate.manage` are registered with the approved role matrix (Owner wildcard, Admin/Operator read+manage, Developer/Viewer read) | `backend/app/core/permissions.py`; `test_the_registry_and_the_committed_role_matrix_agree` |
 | The metadata API exists: `POST`/`GET`/`GET {id}`/`PATCH`/`DELETE /certificates`, metadata-only, no material fields in any response schema | `backend/app/api/v1/certificates.py`, `backend/app/schemas/certificate.py`, [api.md](api.md) |
 | **Not** shipped in 5.1: `organizations.dek_ciphertext`/`dek_generation`, the KEK provider, `dns_providers`, `acme_accounts`, `certificates.dns_provider_id`, the generation material columns and `deke_id`, the widened `state` vocabulary, the material guard CHECK, `routes.certificate_id`, the agent `certificate.*` handlers, and every worker/beat task | verified by `backend/tests/integration/test_migration_phase5.py` (`test_the_slice_boundary_is_not_forward_referenced`) |
+
+**Phase 5.2 (key custody and the certificate inputs) — shipped, verified against the
+tree at migration `b8c9d0e1f2a3` (the 5.2.2 tip):**
+
+| Fact | Ground |
+|---|---|
+| The organization DEK lives in `organization_dek_envelopes`, a tenant table behind the same two RLS policies as every other tenant table — **not** on the RLS-exempt `organizations` row (5.2.1.2, F1) | `backend/app/models/tenancy.py`, `backend/alembic/versions/20261014_1200-a7b8c9d0e1f2_isolate_org_dek_envelopes.py` |
+| `org_dek_context(db, org_id)` yields the DEK **and** the generation it came from, for one operation, and drops both on exit; `org_dek()` is the key-only view of it | `backend/app/services/dek_envelope.py` |
+| The envelope's KEK binding is `org-dek` for **every** caller, because there is one envelope per organization: a subsystem that bound it to its own purpose would make the next subsystem unable to unwrap the same key. Purpose separation lives on the ciphertext instead | `backend/app/services/dek_envelope.py` (`org_dek_context`), §6.7 |
+| Every Phase-5 secret is stored as `nxp1:<org>:<purpose>:<record>:<generation>:<token>` — the binding is present twice, once as a header checked before decryption and once as an authenticated framing line inside the Fernet plaintext | `backend/app/services/payload_crypto.py` |
+| `dns_providers` exists as a tenant table: Fernet(org DEK) credential + `deke_id`, `zone_allowlist`, `kind` CHECK, `uq_dns_providers_org_name`; **no** read path returns `credentials_ciphertext` | `backend/app/models/dns_provider.py`, `backend/alembic/versions/20261014_1600-b8c9d0e1f2a3_phase522_providers_acme_material.py` |
+| The DNS-provider API is metadata-only (`POST`/`GET`/`GET {id}`/`PATCH`/`DELETE`/`POST {id}/verify`), and `verify_creds` is the only provider call this slice makes — no record is published | `backend/app/api/v1/dns_providers.py`, `backend/app/providers/dns/`, `backend/tests/integration/test_dns_providers.py` |
+| `acme_accounts` exists as a tenant table, one row per **(organization, directory)** (`uq_acme_accounts_org_directory`), key Fernet(org DEK) with `deke_id >= 1`; the directory URL is stored on the row rather than inferred from `ENVIRONMENT`, and an unknown directory is a 422 | `backend/app/models/acme.py`, `backend/app/services/acme_account_service.py` |
+| There is **no** ACME route and no CA contact: `account_for()` creates the account locally, `account_url` (the JWS `kid`) stays NULL until 5.3 calls `record_registration()` | `backend/app/services/acme_account_service.py` |
+| The generation `state` vocabulary is the full lifecycle, **paired** with `ck_certificate_generations_material_guard`: a generation is either pre-issuance or it carries key, chain, `deke_id`, `issued_at`, `not_before` and `not_after` | the 5.2.2 migration; `backend/app/models/certificate.py`; `backend/tests/integration/test_migration_drift.py` |
+| `certificates.dns_provider_id` exists with its FK (`ON DELETE RESTRICT`) and the suspension pair CHECK — added in the revision that adds `dns_providers`, so the reference is always satisfiable | same migration; `backend/app/models/certificate.py` |
+| **Not** shipped in 5.2: the ACME client, any CA contact, order/challenge/validate/finalize, key generation for a *certificate*, issuance tasks, `certificate_deliveries`, `routes.certificate_id`, the agent `certificate.*` handlers, and every worker/beat task | `backend/tests/integration/test_migration_phase521.py`, `test_migration_phase5212.py` (the slice boundary is not forward-referenced) |
 
 ### 1.2 Phase 5 in one sentence
 
@@ -1490,7 +1519,7 @@ so an operator is never told a certificate is revoked when it is not.
 |---|---|---|---|
 | **5.1 — Certificate metadata & lifecycle foundations — SHIPPED 2026-10-12 (`37b7211`)** | `certificates` + `certificate_generations` **first** migration (identity + pre-issuance lifecycle only — **no `dns_provider_id`, no material columns, no `deke_id`**), `certificate.read`/`certificate.manage` codenames **+ the role matrix (§4.1, O3 resolved)**, RLS/grant pattern from the Phase 4 migration, metadata-only CRUD (no issuance) | Migration + API + IDOR cases | A `certificates` row is org-scoped; a foreign id is 404; `GET` returns no ciphertext field; the one-live-generation unique index rejects a second concurrent issuance; **the generation `state` CHECK is limited to pre-issuance states, so an `ISSUED` row is rejected** (no forward dependency on 5.2); no `dns_providers` table exists yet and nothing references one; no `deke_id` column exists, so no placeholder can be written; role matrix matches §4.1; drift test green. |
 | **5.2.1 — KEK provider and organization DEK envelope — SHIPPED 2026-10-12 (`06e8c52`); storage relocated by **5.2.1.2** (`a7b8c9d0e1f2`, §10.6)* | The `KEKProvider` seam with the **Vault Transit** adapter and the deterministic test provider; the organization envelope (`organization_dek_envelopes.dek_ciphertext` / `dek_generation` — the plan put these on `organizations`; §10.6 moved them); org-DEK create/wrap/unwrap/rewrap; provider configuration + fail-fast startup validation; operation-scoped unwrap (no LRU) | Migration (`organization_dek_envelopes` + the `organizations` columns it retires) + provider module + envelope service + config + tests | A production configuration cannot select or fall back to a non-production provider (abort at import); the KEK never reaches application code, the DB plaintext, logs or responses; a wrap/unwrap round-trip is bound to `(org_id, purpose, dek_generation)` so a moved ciphertext is rejected; `rewrap_dek` leaves no plaintext DEK in the application; provider outage fails closed with a named error while the API stays up; **no certificate/DNS material column exists yet, so nothing can be written with a placeholder key** |
-| **5.2.2 — Providers, ACME accounts and material columns** — *after 5.2.1* | `dns_providers` + its metadata-only API and credential storage, `acme_accounts`, the generation material columns + `deke_id`, `certificates.dns_provider_id` **FK added with its target table**, widened `state` vocabulary, **material guard CHECK**; `verify_creds` + zone allowlist | Migration + service + write-only API | **An issued (or superseded/suspended/expired/revoked) generation cannot exist without `key_ciphertext`, `chain_ciphertext`, `deke_id`, `issued_at` and `not_after`** (guard CHECK rejects it); `dns_provider_id` FK resolves to a real row (no artificial provider); DNS credential never returned by any endpoint; a challenge outside `zone_allowlist` is refused; DEK rotation re-encrypts only Phase-5 rows; no existing secret re-encrypted; a `decrypt_str` mismatch fails closed |
+| **5.2.2 — Providers, ACME accounts and material columns — SHIPPED 2026-10-14 (migration `b8c9d0e1f2a3`, single head; §10.7 records what landed and its evidence)** | `dns_providers` + its metadata-only API and credential storage, `acme_accounts`, the generation material columns + `deke_id`, `certificates.dns_provider_id` **FK added with its target table**, widened `state` vocabulary, **material guard CHECK**; `verify_creds` + zone allowlist | Migration + two services + write-only API + the payload-framing primitive | **An issued (or superseded/suspended/expired/revoked) generation cannot exist without `key_ciphertext`, `chain_ciphertext`, `deke_id`, `issued_at` and `not_after`** (guard CHECK rejects it); `dns_provider_id` FK resolves to a real row (no artificial provider); DNS credential never returned by any endpoint; a challenge outside `zone_allowlist` is refused; DEK rotation re-encrypts only Phase-5 rows; no existing secret re-encrypted; a `decrypt_str` mismatch fails closed |
 | **5.3 — ACME issuance (staging + pebble)** | `acme`/`josepy` dependency behind `AcmeProvider`; per-org account; DNS-01 order → publish → propagate → validate → finalize → store; state machine; backoff | Worker task + tests against pebble | Issue a certificate for a name whose TXT record the test publishes; generation reaches `ISSUED` with `not_after` set; retry/backoff and stuck-state sweep pinned; **no production CA traffic in tests** |
 | **5.4 — Secure delivery** | `certificate_deliveries`, `POST /agent/certificates/{id}/material`, `certificate.install`/`.remove` op types + agent handlers, content-addressed paths, fingerprint check, no-store response policy | Endpoint + op types + agent + contract tests | **No certificate private key or chain appears in operation params, results, audit metadata, events or logs** (asserted by tests over each path, §7.6); a foreign node's delivery is 404; a superseded generation is refused; a duplicate claim is idempotent; interrupted delivery recovers within the window and not after. **Non-production only until C1–C6 (§6.6) are met.** |
 | **5.5 — HTTPS activation & verification** | Renderer TLS block, allowlisted `tls` paths, `routes.certificate_id` + widen `scheme`, `proxy_state.tls`, activation endpoint, control-plane HTTPS probe | Migration + renderer + API | HTTP keeps serving until the probe succeeds; a bad cert path fails `nginx -t` and rolls back to the HTTP tree; `scheme` flips to `https` only after `VERIFIED_ACTIVE`; content-addressed path change ⇒ different `bundle_id` ⇒ drift detected |
@@ -1506,9 +1535,9 @@ here is claimed on the strength of the migration alone.
 |---|---|
 | A `certificates` row is organization-scoped | `tests/integration/test_certificates.py::test_a_certificate_is_tenant_owned_and_unreachable_without_a_scope`; `::test_both_new_tables_carry_a_tenant_and_a_system_policy` |
 | A foreign id is 404 (no existence oracle, no 403) | `::test_a_foreign_certificate_id_is_the_same_404_as_a_random_one`; `::test_listing_and_filtering_never_cross_tenants`; `::test_rls_blocks_cross_tenant_certificate_reads_without_the_orm` |
-| `GET` returns no ciphertext field (nor key material, nor an internal cursor) | `tests/unit/test_certificate_lifecycle.py::test_the_response_models_expose_exactly_the_approved_fields`; `::test_no_response_field_can_hold_key_material`; `::test_the_request_body_rejects_fields_this_phase_does_not_have` |
+| `GET` returns no ciphertext field (nor key material, nor an internal cursor) | `tests/unit/test_certificate_lifecycle.py::test_the_response_models_expose_exactly_the_approved_fields`; `::test_no_response_field_can_hold_key_material`; `::test_the_request_body_accepts_the_credential_override_and_nothing_else` |
 | The one-live-generation unique index rejects a second concurrent issuance | `tests/integration/test_certificates.py::test_a_second_in_flight_generation_is_refused_but_a_failed_one_is_not`; `::test_duplicate_requests_are_refused`; `tests/unit/test_certificate_lifecycle.py::test_the_one_live_generation_index_covers_exactly_the_live_states` |
-| The generation `state` CHECK is limited to pre-issuance states, so an `ISSUED` row is rejected | `tests/integration/test_migration_phase5.py::test_an_issued_generation_is_rejected_and_a_pre_issuance_one_is_not`; `tests/integration/test_certificates.py::test_an_issued_generation_is_unrepresentable`; `tests/unit/test_certificate_lifecycle.py::test_issued_is_not_a_generation_state`; `::test_handing_a_material_state_to_the_lifecycle_is_refused_loudly` |
+| The generation `state` CHECK is limited to pre-issuance states, so an `ISSUED` row is rejected | `tests/integration/test_migration_phase5.py::test_an_issued_generation_is_rejected_and_a_pre_issuance_one_is_not` (pinned to `c8d9e0f1a2b3`, where the vocabulary *is* the mechanism); `tests/integration/test_certificates.py::test_a_material_bearing_generation_cannot_be_written_without_material` and `tests/unit/test_certificate_lifecycle.py::test_the_two_narrowings_refuse_each_others_vocabulary` — the two sites 5.2.2 re-pointed at the material guard, since the state it refuses now exists (§10.7) |
 | No `dns_providers` table exists and nothing references one; no `deke_id` column exists, so no placeholder can be written | `tests/integration/test_migration_phase5.py::test_the_slice_boundary_is_not_forward_referenced`; `::test_the_two_tables_carry_the_specified_columns` |
 | The role matrix matches §4.1, and `certificate.read` alone grants nothing else | `tests/unit/test_certificate_lifecycle.py::test_the_registry_and_the_committed_role_matrix_agree`; `::test_certificate_read_does_not_carry_management_authority`; `::test_the_registry_adds_exactly_the_two_certificate_codenames`; `tests/integration/test_migration_phase5.py::test_the_codenames_and_their_grants_land_with_the_migration`; `tests/integration/test_certificates.py::test_certificate_read_alone_does_not_authorize_management` |
 | Migration upgrade/downgrade on a populated instance, and a single Alembic head | `tests/integration/test_migration_phase5.py::test_a_populated_instance_migrates_without_losing_anything`; `::test_the_migration_is_reversible_and_reappliable`; `::test_the_phase5_revision_extends_the_phase4_chain` |
@@ -1754,6 +1783,75 @@ sites).
 **Not in this slice, and unchanged by it:** no certificate material column, no
 dns_providers credential, no ACME account key, no issuance, no delivery. 5.2.2 remains the
 next step, and this slice is the precondition for it rather than a part of it.
+
+### 10.7 Phase 5.2.2 — DNS credentials, ACME accounts and the certificate material columns (shipped)
+
+**Scope.** The certificate **inputs**: the DNS credential and the ACME account that
+issuance (5.3) will use, plus the material columns an issued generation will occupy. One
+migration from `a7b8c9d0e1f2` (`b8c9d0e1f2a3`, single head). **Out of scope,
+deliberately:** any CA contact, any order or challenge, any delivery, and any agent
+change — nothing in this slice can issue, publish a record, deliver a key or activate
+HTTPS, and the acceptance tests for the previous slices still assert that boundary rather
+than the other way round.
+
+| Area | What shipped |
+|---|---|
+| `dns_providers` | Dedicated tenant table (§5.3) — **not** a reuse of the deployable secret store, because that store's values are delivered *to nodes* and a customer's DNS token is control-plane-only. `credentials_ciphertext` is Fernet(org DEK) with `deke_id` beside it, `kind` is a CHECK over `DnsProviderKind`, names are unique per organization, `zone_allowlist` is bounded JSON, `auto_cleanup` is operator-controlled, and tenancy comes from `OrgScoped` (session guard + RLS + grants) |
+| DNS-provider API | `POST`/`GET`/`GET {id}`/`PATCH`/`DELETE` plus `POST {id}/verify`, metadata-only, `certificate.read` for reads and `certificate.manage` for every mutation (L4 — no codename of its own in v1). No response, audit entry or event carries the credential; the read model is an explicit field map and the fingerprint is a domain-separated SHA-256 over the canonical serialization of the plaintext (`acme_accounts.key_fingerprint` differs: it is over the **public** half of the account key) |
+| `verify_creds` seam | `app/providers/dns/` with Cloudflare as the one implementation in v1: `verify_creds` returns a verdict plus the zones the token can see. Verification happens **before** the row is written (no transaction held across network I/O) and its verdict is recorded, never used to reject a save — the operator's next step is to read `verify_error`, not to resubmit |
+| Zone allowlist | Canonicalized (`Example.COM.` → `example.com`, `*.sub.example.com` → `sub.example.com`) and checked **before** any provider call, by the same function the issuance path will use. An empty allowlist authorizes nothing; a zone the token cannot see is a recorded warning, because the operator may be about to grant it |
+| `acme_accounts` | Tenant table, one row per **(organization, directory)** (`uq_acme_accounts_org_directory`), key Fernet(org DEK) with `deke_id >= 1`, `key_fingerprint` over the **public** half, `key_algorithm` fixed at P-256 and never client-chosen. The directory URL is stored per row (so staging is recognizable from the data), an unknown directory is a 422 naming the closed set, and there is no default direction (§5.4) |
+| ACME service | `account_for()` creates the account *locally* under a savepoint, so two concurrent issuance attempts converge on one row instead of registering two accounts; `account_key()` decrypts for one operation and is reachable from no route; `record_registration()` records the CA's `kid` once and refuses a repoint. **Registration itself is 5.3** |
+| Generation material | `key_ciphertext`, `chain_ciphertext`, `fingerprint`, `not_before`/`not_after`, `deke_id`, `issued_at`, `revoked_at`, `revocation_state` and the generation-level suspension pair — the columns 5.1 deliberately left out |
+| `state` widening **paired** with the guard | The vocabulary is now the full lifecycle *and* `ck_certificate_generations_material_guard` requires key, chain, `deke_id`, `issued_at`, `not_before` and `not_after` the moment the state stops being pre-issuance. Widening the vocabulary alone would have re-opened exactly the window 5.1's truncated CHECK closed, so the two changes ship together |
+| `certificates.dns_provider_id` | Added **with** the table it references, `ON DELETE RESTRICT` (a credential a certificate still names cannot be deleted), plus `suspended_at`/`suspension_reason` and the suspension pair CHECK |
+| Event vocabulary | `DNS_PROVIDER_CREATED`/`_VERIFIED`/`_VERIFICATION_FAILED`/`_DELETED` and `ACME_ACCOUNT_CREATED`/`_REGISTERED` in the registry *and* the `/meta` list (the coherence test asserts they agree). Each says a stored input changed; none is an issuance, a delivery or an activation, and none carries a secret |
+
+#### 10.7.1 One envelope per organization, one purpose per ciphertext
+
+This slice is where the two levels of purpose separation first had to coexist, and the
+first implementation got it wrong in a way worth recording. The envelope's `purpose`
+argument is the **KEK binding of the wrapped DEK**, not the purpose of the payload being
+encrypted. Passing a subsystem's payload purpose there (`dns.credentials`,
+`acme.account_key`) bound the organization's single envelope to whichever subsystem stored
+something first, so the next subsystem failed to unwrap the *same* DEK — an organization
+that stored a DNS credential could not create an ACME account, and vice versa. The rule is
+now stated on the primitive itself: every Phase-5 caller leaves the envelope purpose at
+`org-dek`, because there is one envelope per organization (§6.7), and separation is
+enforced one layer down, on the ciphertext.
+
+The layer that does the work is `app/services/payload_crypto.py`: a stored value is
+`nxp1:<org>:<purpose>:<record>:<generation>:<token>`, with the same header again inside the
+Fernet plaintext as an authenticated framing line. The header is compared before any
+decryption (a moved value is a *placement* error, cheap and precise), and the
+authenticated copy decides afterwards, because Fernet has no associated-data input — the
+honest limitation is stated in that module's docstring rather than implied. What that buys
+is the property the design actually promises: sharing one DEK across purposes does not make
+one purpose's secret readable as another's.
+
+Two second-order defects were found by the same test pass and fixed with it: `summary()`
+reported the enum member name (`STAGING`) where the audit entry and the event payload for
+the same account report the stored value (`staging`), so one field had two spellings; and
+`org_dek_context` did not return the generation it had just claimed, which forced a second
+read of the envelope to learn the `deke_id` the row must record.
+
+#### 10.7.2 Verification
+
+| Module | What it asserts |
+|---|---|
+| `backend/tests/integration/test_dns_providers.py` | the whole credential surface through the real API and database: metadata-only reads (single, list, detail, verify), the credential absent from bodies, audit rows and event payloads while a service-level read-back proves it is stored, the canonical allowlist, an empty allowlist authorizing nothing, a failing verification recorded and re-verifiable, the certificate reference blocking deletion, tenant scoping with a foreign id, read-only roles refused every mutation, and a `deke_id` the row has moved past raising the named rotation-pending error |
+| `backend/tests/integration/test_acme_accounts.py` | account custody (fingerprint over the public half, ciphertext in the column, PEM only through `account_key`), idempotent creation, staging and production as two accounts, the payload refused under another purpose/record/generation/organization, the named rotation-pending failure, the unknown directory refused with nothing created, registration recorded once and repointed never, and **the shared-envelope claim in both orders** — credential-then-account and account-then-credential — with one envelope row and one `deke_id` for both |
+| `backend/tests/unit/test_payload_crypto.py` | the binding itself, without a database: round trip, non-deterministic ciphertext, a moved ciphertext refused *before* decryption (asserted with the wrong key, so the refusal cannot depend on having the right one), the wrong key distinguished from the wrong context, a re-labelled header caught by the authenticated copy, strict parsing of malformed envelopes, generation `0`/negative generations and undeclared purposes refused at construction, and the fingerprint's domain separation |
+| `test_migration_phase5.py`, `test_migration_phase521.py`, `test_migration_phase5212.py`, `test_migration_drift.py` | the widened `state` vocabulary, the `revocation_state` and `dns_providers.kind` vocabularies and the material guard's SQL text (drift: model↔migration, including the guard predicate derived from the enum); the previous slices' "not forward-referenced" boundary assertions re-pinned to their own revisions rather than to `head`. **No `test_migration_phase522.py` exists** — this revision's own column/index/RLS shape is asserted by the drift test and by the DNS/ACME suites using the tables, not by a dedicated migration-shape module |
+| `test_certificates.py`, `test_certificate_lifecycle.py` | the metadata API and lifecycle unchanged where they should be, and the widened vocabulary with the material guard where the state stops being pre-issuance |
+
+#### 10.7.3 Not in this slice, and unchanged by it
+
+No ACME client, no CA contact, no order, no challenge publication, no certificate key
+generation, no delivery, no `routes.certificate_id`, no `certificate.*` agent handler, and
+no worker or beat task. The material columns exist and are guarded; they are **empty** —
+nothing in this slice writes a `key_ciphertext`, which is why the guard can be a CHECK
+rather than a convention. 5.3 is the first slice that will write one.
 
 ---
 

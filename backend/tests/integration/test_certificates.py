@@ -7,13 +7,18 @@ What this module exists to prove:
   ``issued`` is False, ``current_generation_id`` is NULL, ``expires_at`` is NULL
   and the status detail says so, so no client can read a request as a live
   certificate.
-* **The exclusions hold.** No ``dns_provider_id`` in the body, no key material in
-  any response or audit entry, and no way to write an ``ISSUED`` generation — the
-  database CHECK refuses it, so it is unrepresentable rather than unimplemented.
+* **The exclusions hold.** No key material in any response or audit entry, and no
+  way to write a material-bearing generation without its material: since 5.2.2 the
+  vocabulary has those states, and the **material guard** CHECK — not the absence
+  of the column — is what refuses a metadata-only ``ISSUED`` row.
 * **The database, not the API, keeps the invariants.** One in-flight generation
   per certificate, one certificate row per name per organization, and one
   generation number per certificate are constraints; the tests below break them
   with raw SQL/ORM writes and expect a refusal.
+* **The credential override is resolved, never stored blind.** ``dns_provider_id``
+  is a field of the request now, and naming a provider another tenant owns (or
+  none at all) is a 404 rather than a reference the platform would later publish a
+  challenge with.
 * **Authorization and tenancy are two different gates.** A read-only role is a
   403 and a foreign tenant is a 404 — including without the ORM, as the
   application role with only the RLS GUC for company.
@@ -26,6 +31,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
 
 import psycopg
 import pytest
@@ -75,6 +81,9 @@ CERTIFICATE_FIELDS = {
     "current_generation_id",
     "latest_generation",
     "issued",
+    # Which credential may publish this certificate's challenges (5.2.2), and a
+    # *reference* — never the credential itself.
+    "dns_provider_id",
     "status_detail",
 }
 GENERATION_FIELDS = {
@@ -90,6 +99,13 @@ GENERATION_FIELDS = {
     "retryable",
     "terminal",
     "status_detail",
+    # Metadata *about* the material (5.2.2): the CA's validity window, when it was
+    # issued, the leaf fingerprint and the separate CA axis.
+    "not_before",
+    "not_after",
+    "issued_at",
+    "fingerprint",
+    "revocation_state",
 }
 
 
@@ -379,19 +395,42 @@ async def test_http_01_is_refused(client, owner) -> None:
     assert_error_code(response.json(), "CHALLENGE_TYPE_UNSUPPORTED")
 
 
-async def test_a_field_from_a_later_slice_is_rejected(client, owner) -> None:
-    """``dns_provider_id`` arrives with its table in 5.2; sending it is a 422."""
+async def test_the_credential_override_must_be_one_that_exists(client, owner) -> None:
+    """A provider id the caller's organization does not have is a 404, not a 422.
+
+    The reference is resolvable — the column and the table exist — so an unknown id
+    is a lookup failure, and a foreign one must be indistinguishable from a
+    random one. Anything looser would store an id that later publishes a challenge
+    with another tenant's credential.
+    """
+    unknown = "11111111-1111-1111-1111-111111111111"
     domain = await _create_domain(client, owner, "forward-ref.example.com")
     response = await _request_certificate(
-        client,
-        owner["headers"],
-        domain,
-        "forward-ref.example.com",
-        dns_provider_id="11111111-1111-1111-1111-111111111111",
+        client, owner["headers"], domain, "forward-ref.example.com", dns_provider_id=unknown
     )
-    assert response.status_code == 422, response.text
+    assert response.status_code == 404, response.text
+    assert_error_code(response.json(), "DNS_PROVIDER_NOT_FOUND")
+
+    # The same on the update path, and a malformed id is still a body error.
+    created = await _created_certificate(client, owner, domain)
+    patched = await client.patch(
+        f"{API}/certificates/{created['id']}",
+        headers=owner["headers"],
+        json={"dns_provider_id": unknown},
+    )
+    assert patched.status_code == 404, patched.text
+    assert_error_code(patched.json(), "DNS_PROVIDER_NOT_FOUND")
+
+    malformed = await client.patch(
+        f"{API}/certificates/{created['id']}",
+        headers=owner["headers"],
+        json={"dns_provider_id": "not-a-uuid"},
+    )
+    assert malformed.status_code == 422, malformed.text
     assert_error_code(
-        response.json(), "VALIDATION_ERROR", exact_keys={"code", "message", "request_id", "details"}
+        malformed.json(),
+        "VALIDATION_ERROR",
+        exact_keys={"code", "message", "request_id", "details"},
     )
 
 
@@ -457,24 +496,62 @@ async def test_a_second_in_flight_generation_is_refused_but_a_failed_one_is_not(
     await org_db.rollback()
 
 
-async def test_an_issued_generation_is_unrepresentable(client, owner, org_db) -> None:
-    """No issued generation can be written, so none can be reported."""
+async def test_a_material_bearing_generation_cannot_be_written_without_material(
+    client, owner, org_db
+) -> None:
+    """The guard CHECK, not the vocabulary, is what refuses a metadata-only issuance.
+
+    Phase 5.1 bought "an issued generation without material is unrepresentable" by
+    not having the state. 5.2.2 has the state, so the property is carried by the
+    constraint instead — and this is the test that says so: the same row *with* its
+    material is accepted, so the guard is precise rather than a blanket refusal.
+    """
     domain = await _create_domain(client, owner, "unrepresentable.example.com")
     created = await _created_certificate(client, owner, domain)
 
     for state in ("ISSUED", "SUPERSEDED", "REVOKED_LOCAL_ONLY"):
         with pytest.raises(Exception) as exc:
             await _insert_generation(org_db, created["id"], generation=9, state=state)
-        assert "state_valid" in str(exc.value), state
+        assert "material_guard" in str(exc.value), state
         await org_db.rollback()
 
-    # The API cannot report one either: the request still reads as a request.
+    # Nothing was reported as issued either: the request still reads as a request.
     detail = await client.get(f"{API}/certificates/{created['id']}", headers=owner["headers"])
     assert detail.json()["issued"] is False
     assert detail.json()["status"] == "PENDING"
 
+    # The positive control. The values are not real key material — they are the
+    # *shape* the guard requires, and 5.3 is what will write them for real.
+    issued_at = datetime.now(UTC)
+    org_db.add(
+        CertificateGeneration(
+            id=uuid.uuid4(),
+            certificate_id=uuid.UUID(created["id"]),
+            generation=9,
+            state="ISSUED",
+            order_state={},
+            last_error="",
+            attempt_count=0,
+            key_ciphertext="shape-only-not-a-key",
+            chain_ciphertext="shape-only-not-a-chain",
+            deke_id=1,
+            issued_at=issued_at,
+            not_before=issued_at,
+            not_after=issued_at + timedelta(days=90),
+            fingerprint="0" * 64,
+        )
+    )
+    await org_db.flush()
 
-async def test_the_renewal_preference_is_the_only_updatable_field(client, owner, org_db) -> None:
+
+async def test_only_the_preferences_are_writable_through_patch(client, owner, org_db) -> None:
+    """``auto_renew`` and ``dns_provider_id`` are preferences; nothing else is.
+
+    Changing what a certificate *is* — its identifiers, its status, its expiry —
+    is a new generation, and issuing one is 5.3. The credential override is a
+    reference rather than a fact about the certificate, which is why it is here
+    and its resolution is asserted above.
+    """
     domain = await _create_domain(client, owner, "patchable.example.com")
     created = await _created_certificate(client, owner, domain)
 

@@ -5,12 +5,16 @@ reconciliation hardened 2026-10-10; reconciliation candidate discovery and
 result handling hardened 2026-10-11). **No certificate issuance, no TLS listener and
 no HTTPS redirect exist yet.** Certificate *metadata* shipped in Phase 5.1
 (`certificates`/`certificate_generations`, request/list/inspect API —
-[phase5-design.md](phase5-design.md) §1.1), so certificate rows now exist, but nothing
+[phase5-design.md](phase5-design.md) §1.1) and 5.2.2 added the inputs issuance will
+consume (DNS credentials, the per-org ACME account, the material columns — empty and
+guarded), so certificate rows now exist and could carry material while nothing writes
+it, but nothing
 serves TLS: a route still cannot reference a certificate. Every remaining
 certificate-related shape in this document is **Phase 5 target design**, labelled as
 such below (authoritative spec: [phase5-design.md](phase5-design.md)), and post-deploy
 route sync remains Phase 6 target design.
-**Date:** 2026-09-21 (status updated 2026-10-12: Phase 5.1 metadata shipped)
+**Date:** 2026-09-21 (status updated 2026-10-14: Phase 5.1 metadata shipped
+2026-10-12; the certificate inputs of 5.2.2 shipped 2026-10-14)
 **Companions:** [platform-vision.md](platform-vision.md) · [domain-model.md](domain-model.md) · [multi-tenancy.md](multi-tenancy.md) · [authorization.md](authorization.md) · [node-agent-architecture.md](node-agent-architecture.md) · [certificate-management.md](certificate-management.md) · [phase5-design.md](phase5-design.md)
 
 ## 1. Scope and current state

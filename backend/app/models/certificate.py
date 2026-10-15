@@ -3,23 +3,30 @@
 Two tenant-owned tables, one relationship spine:
 **Organization → Domain → Certificate → CertificateGeneration**.
 
-Phase 5.1 ships the *identity and lifecycle* half of the certificate subsystem
-and nothing else. No ACME client, no DNS provider, no key envelope, no key
-material, no delivered configuration: those are the later slices (5.2 to 5.5),
-and the schema says so rather than describing them:
+Phase 5.1 shipped the *identity and lifecycle* half of the certificate subsystem;
+Phase 5.2.2 adds the material half. Nothing is issued yet — no ACME client, no CA
+contact, no delivery — but the columns and the constraints that will hold what
+issuance produces now exist, so a partially working path cannot be smuggled in
+later:
 
 * ``certificates`` carries the identity — which verified domain the certificate
   is for, its primary common name, its additional identifiers, the challenge
-  type, the renewal preference — plus a **derived** status and the denormalized
-  expiry the list/sweep reads.
+  type, the renewal preference — plus a **derived** status, the denormalized
+  expiry the list/sweep reads, the DNS credential that may override its Domain's
+  (5.2.2, added *with* the table it references), and the suspension pair set when
+  ownership of an identifier is lost.
 * ``certificate_generations`` carries one ACME order + one key pair. Its ``state``
-  CHECK is limited to the pre-issuance vocabulary
-  (:class:`~app.models.enums.CertificateGenerationState`), so an ``ISSUED``
-  generation — one that would have to carry a private key — cannot exist before
-  the envelope that protects the material does. There is no ``deke_id`` column
-  and no placeholder value for one.
+  CHECK is now the **full** vocabulary
+  (:class:`~app.models.enums.CertificateGenerationState`), because the envelope
+  that protects the material exists (5.2.1) and the material columns ship in the
+  same migration as the widening. The two halves are tied together by the
+  **material guard CHECK**: a generation in any post-issuance state must carry
+  ``key_ciphertext``, ``chain_ciphertext``, ``deke_id``, ``issued_at``,
+  ``not_before`` and ``not_after``, so a material-less ``ISSUED`` row is
+  unrepresentable rather than merely discouraged, and ``deke_id`` is never a
+  placeholder for a key that is not there.
 
-Three structural promises live in the schema rather than in prose:
+Four structural promises live in the schema rather than in prose:
 
 * ``uq_certificates_org_cn`` — one certificate row per name per organization;
   renewal reuses the row with a new generation.
@@ -28,11 +35,15 @@ Three structural promises live in the schema rather than in prose:
   requests are a database error instead of two racing orders.
 * ``uq_certificate_generations_cert_number`` — generation numbers are unique and
   monotonic per certificate, so a rewound or duplicated renewal is refused.
+* ``ck_certificate_generations_material_guard`` — material and ``deke_id`` are
+  mandatory in every state that outlives the order (see above).
 
 Deletion: a generation is removed only with its certificate (``ON DELETE
-CASCADE``), and a domain that still has certificates cannot be deleted at all
+CASCADE``); a domain that still has certificates cannot be deleted at all
 (``ON DELETE RESTRICT``) — withdrawing the name a certificate was issued for
-would strand material that the CA still considers valid.
+would strand material that the CA still considers valid — and neither can a DNS
+provider a certificate still names, for the same reason: silently falling back to
+the Domain's credential would change which token the platform signs with.
 """
 
 from __future__ import annotations
@@ -49,6 +60,7 @@ from sqlalchemy import (
     Index,
     Integer,
     String,
+    Text,
     UniqueConstraint,
     text,
 )
@@ -67,11 +79,15 @@ from app.models.enums import (
     CertificateChallengeType,
     CertificateGenerationState,
     CertificateKeyAlgorithm,
+    CertificateRevocationState,
     CertificateStatus,
 )
 
 #: Longest identifier list we accept on one order (mirrors the design's bound).
 MAX_IDENTIFIERS = 100
+
+#: Length of a lower-case hex SHA-256 fingerprint of an issued leaf certificate.
+FINGERPRINT_LENGTH = 64
 
 
 def one_live_generation_predicate() -> str:
@@ -85,6 +101,42 @@ def one_live_generation_predicate() -> str:
         f"'{state.value}'" for state in CertificateGenerationState.live_pre_issuance()
     )
     return f"state IN ({states})"
+
+
+def pre_issuance_predicate() -> str:
+    """The states in which a generation carries no material *by construction*.
+
+    :meth:`live_pre_issuance` plus ``FAILED``: a spent attempt has no material
+    either. Every other state is material-bearing, so the guard CHECK's ``OR``
+    branch is exactly :meth:`CertificateGenerationState.material_bearing`.
+    """
+    states = ", ".join(
+        f"'{state.value}'"
+        for state in (
+            *CertificateGenerationState.live_pre_issuance(),
+            CertificateGenerationState.FAILED,
+        )
+    )
+    return f"state IN ({states})"
+
+
+def material_guard_predicate() -> str:
+    """The SQL of ``ck_certificate_generations_material_guard``.
+
+    Derived from the enum so the two cannot drift: a generation is either in a
+    pre-issuance state (no material expected) or it must carry its private key,
+    its chain, the DEK generation that encrypted them and the validity window the
+    CA returned. This is the constraint the migration sequence relies on
+    (phase5-design.md §3.7): ``deke_id`` is nullable because pre-issuance rows
+    legitimately have none, and it is *mandatory* the moment the state stops
+    being pre-issuance — so there is no window in which an issued generation can
+    lack its key material or its DEK generation.
+    """
+    return (
+        f"{pre_issuance_predicate()} OR (key_ciphertext IS NOT NULL "
+        "AND chain_ciphertext IS NOT NULL AND deke_id IS NOT NULL "
+        "AND issued_at IS NOT NULL AND not_before IS NOT NULL AND not_after IS NOT NULL)"
+    )
 
 
 class Certificate(OrgScoped, TimestampMixin, Base):
@@ -107,10 +159,20 @@ class Certificate(OrgScoped, TimestampMixin, Base):
             "jsonb_typeof(sans) = 'array' AND jsonb_array_length(sans) <= 100",
             name="sans_shape",
         ),
+        # The suspension pair is set and cleared as one fact (§9.3): a suspension
+        # without a reason is an incident nobody can explain later, and a reason
+        # without a timestamp is a note pretending to be state.
+        CheckConstraint(
+            "(suspended_at IS NULL) = (suspension_reason = '')",
+            name="suspension_pair_valid",
+        ),
         Index("ix_certificates_domain_id", "domain_id"),
         Index("ix_certificates_org_status", "org_id", "status"),
         # The renewal sweep: which issued certificates are close to expiry.
         Index("ix_certificates_expiry_sweep", "status", "expires_at"),
+        # Which certificates a DNS credential is in use by (also the lookup the
+        # provider's RESTRICT delete consults).
+        Index("ix_certificates_dns_provider_id", "dns_provider_id"),
     )
 
     id: Mapped[uuid.UUID] = uuid_pk()
@@ -165,6 +227,20 @@ class Certificate(OrgScoped, TimestampMixin, Base):
     #: Sanitized, bounded reason the newest generation failed. Never key material,
     #: never an ACME account key, never another organization's data.
     last_error: Mapped[str] = mapped_column(String(500), default="", nullable=False)
+    #: Overrides the Domain's DNS provider for this certificate's challenges.
+    #: Nullable by design: a certificate that names none inherits its Domain's.
+    #: ``RESTRICT`` because deleting a credential a certificate still names would
+    #: silently change which token the platform signs with — the renewal would
+    #: keep working, against a different zone, which is the worst kind of failure.
+    dns_provider_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("dns_providers.id", ondelete="RESTRICT"), nullable=True
+    )
+    #: Set when ownership of an identifier is lost (``domain_ownership_lost``) or
+    #: an operator suspends the certificate, cleared when it is rebound or
+    #: revoked. Suspension is *not* deletion: the material stays, the identifiers
+    #: stop being served, and the reason is recoverable from the row.
+    suspended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    suspension_reason: Mapped[str] = mapped_column(String(64), default="", nullable=False)
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
         return f"<Certificate {self.primary_cn} {self.status}>"
@@ -181,6 +257,7 @@ class CertificateGeneration(OrgScoped, TimestampMixin, Base):
     __tablename__ = "certificate_generations"
     __table_args__ = (
         status_check("state", CertificateGenerationState),
+        status_check("revocation_state", CertificateRevocationState),
         # Generation numbers are monotonic per certificate; this is the backstop
         # against a rewound or duplicated renewal.
         UniqueConstraint(
@@ -196,8 +273,36 @@ class CertificateGeneration(OrgScoped, TimestampMixin, Base):
         ),
         # The retry/sweep cursor: which generation is due an attempt next.
         Index("ix_certificate_generations_sweep", "state", "next_attempt_at"),
+        # The DEK-rotation lookup (§6.3): which rows are still encrypted at a
+        # generation the rotation has to revisit.
+        Index("ix_certificate_generations_deke_id", "deke_id"),
         CheckConstraint("generation >= 1", name="generation_positive"),
         CheckConstraint("attempt_count >= 0", name="attempt_count_non_negative"),
+        # The constraint this whole slice exists to make true: material cannot be
+        # absent in a state that outlives the order.
+        CheckConstraint(material_guard_predicate(), name="material_guard"),
+        # ``deke_id`` is nullable (pre-issuance rows have none) but is never 0: a
+        # real DEK is generation 1 or later, and the guard already requires it for
+        # every material-bearing state.
+        CheckConstraint("deke_id IS NULL OR deke_id >= 1", name="deke_id_positive"),
+        CheckConstraint(
+            f"fingerprint IS NULL OR char_length(fingerprint) = {FINGERPRINT_LENGTH}",
+            name="fingerprint_length",
+        ),
+        # A validity window that ends before it starts is not a certificate; it is
+        # a corrupted row that would make the expiry sweep fire immediately.
+        CheckConstraint(
+            "not_after IS NULL OR not_before IS NULL OR not_after > not_before",
+            name="validity_window",
+        ),
+        # Generation-level suspension is set and cleared as one fact, like the
+        # certificate's pair (§9.3): a generation suspended without a reason is an
+        # incident nobody can explain, and a reason without a timestamp is a note
+        # pretending to be state.
+        CheckConstraint(
+            "(suspended_at IS NULL) = (suspension_reason = '')",
+            name="suspension_pair_valid",
+        ),
     )
 
     id: Mapped[uuid.UUID] = uuid_pk()
@@ -206,19 +311,62 @@ class CertificateGeneration(OrgScoped, TimestampMixin, Base):
     )
     #: Monotonic per certificate; what a delivery binds to.
     generation: Mapped[int] = mapped_column(Integer, nullable=False)
-    #: Pre-issuance only in Phase 5.1. See
+    #: The full state machine since Phase 5.2.2. Post-issuance states are
+    #: material-bearing, which the guard CHECK enforces. See
     #: :class:`~app.models.enums.CertificateGenerationState`.
     state: Mapped[CertificateGenerationState] = mapped_column(
         String(24), default=CertificateGenerationState.PENDING, nullable=False
     )
     #: ACME order/challenge URLs, key authorizations, DNS record names/values —
     #: **public ACME data only, never the account key**. Populated by the
-    #: issuance slice (5.3); always ``{}`` in 5.1.
+    #: issuance slice (5.3); empty until then.
     order_state: Mapped[dict[str, Any]] = json_column()
     last_error: Mapped[str] = mapped_column(String(500), default="", nullable=False)
     #: Bounded backoff cursors of *this* generation's attempts.
     next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     attempt_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+    # --- material (Phase 5.2.2) ----------------------------------------------
+    # Everything below is written by issuance (5.3) and read by delivery (5.4).
+    # None of it is exposed by a read model: ``certificate.read`` returns
+    # metadata, and material leaves the control plane only through a delivery
+    # claim response (§7.2), never through this table's serializers.
+
+    #: Fernet(org DEK) of the PKCS#8 private key.
+    key_ciphertext: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: Fernet(org DEK) of the full chain.
+    chain_ciphertext: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: SHA-256 of the leaf DER — display and change detection (bundle identity,
+    #: drift), never a decryption oracle.
+    fingerprint: Mapped[str | None] = mapped_column(String(FINGERPRINT_LENGTH), nullable=True)
+    #: The CA's validity window, copied from the issued material. ``not_after`` is
+    #: what the renewal sweep and the expiry monitor reason about.
+    not_before: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    not_after: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    #: Which organization-DEK generation encrypted the material, so a DEK rotation
+    #: can find the rows it must re-encrypt (§6.3) — and so a row states which key
+    #: guards it without the key itself being readable. Never a placeholder: the
+    #: guard CHECK requires it in every state that has material.
+    deke_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    #: When the CA returned the chain.
+    issued_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    #: When the CA acknowledged the revocation (``state = REVOKED``).
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    #: The CA axis, deliberately separate from ``state`` (§2.2): the
+    #: security-relevant step (stop serving this material) is never gated on the
+    #: CA answering, so a ``REVOCATION_FAILED`` generation can still be superseded
+    #: and removed from every node.
+    revocation_state: Mapped[CertificateRevocationState] = mapped_column(
+        String(24),
+        default=CertificateRevocationState.NOT_REQUESTED,
+        nullable=False,
+        server_default=CertificateRevocationState.NOT_REQUESTED.value,
+    )
+    #: Generation-level suspension: a shared generation may be suspended for some
+    #: of its identifiers only (§9.3). Set and cleared together, like the
+    #: certificate's pair.
+    suspended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    suspension_reason: Mapped[str] = mapped_column(String(64), default="", nullable=False)
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
         return f"<CertificateGeneration #{self.generation} {self.state}>"

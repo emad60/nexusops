@@ -1,11 +1,14 @@
 """Certificate metadata: request, list, inspect, update. **No issuance.**
 
-Phase 5.1 is the identity and lifecycle half of the certificate subsystem, so
+Phase 5.1 shipped the identity and lifecycle half of the certificate subsystem, so
 everything in this module is about *what was asked for* and *how far the request
 has got* — never about a key. Creating a certificate here records an intent: the
 row, its first generation in ``PENDING``, an audit entry and an event. It does not
-contact a CA, does not queue a worker, and cannot produce material, because a
-material-bearing generation state does not exist yet in this phase's schema.
+contact a CA, does not queue a worker, and **cannot produce material**: 5.2.2
+owned the material columns, the guard CHECK that requires them in every
+post-issuance state, and the credential a challenge will be published with — but
+nothing in this module writes any of them, and no serializer here emits one. The
+states that *would* carry material exist now; the code that fills them is 5.3.
 
 Rules enforced here rather than in the API layer, so a worker-initiated call
 obeys them identically:
@@ -46,10 +49,11 @@ from app.core.dnsname import InvalidName, apex_of, canonicalize_name, hostname_i
 from app.core.errors import Conflict, NotFound, UnprocessableEntity
 from app.core.logging import get_logger
 from app.core.pagination import PageParams, paginate
-from app.models import Certificate, CertificateGeneration, Domain
+from app.models import Certificate, CertificateGeneration, DnsProvider, Domain
 from app.models.enums import (
     ActorType,
     CertificateChallengeType,
+    CertificateGenerationState,
     CertificateKeyAlgorithm,
     CertificateStatus,
     DomainStatus,
@@ -67,9 +71,6 @@ log = get_logger("nexusops.certificates")
 #: Challenge types this phase can serve. DNS-01 only: it is the sole challenge
 #: that works for NAT-ed nodes and for wildcards (phase5-design.md §5.2).
 SUPPORTED_CHALLENGE_TYPES: tuple[str, ...] = (CertificateChallengeType.DNS_01.value,)
-
-#: Only ``auto_renew`` is updatable, so this is the whole list of mutable fields.
-_MUTABLE_FIELDS = ("auto_renew",)
 
 
 def _utcnow() -> datetime:
@@ -114,6 +115,27 @@ async def _resolve_domain(db: AsyncSession, domain_id: uuid.UUID) -> Domain:
     if domain is None:
         raise NotFound("Domain not found", code="DOMAIN_NOT_FOUND")
     return domain
+
+
+async def _resolve_dns_provider(db: AsyncSession, provider_id: uuid.UUID) -> DnsProvider:
+    """The credential a challenge may be published with, or a 404.
+
+    Same shape as the domain lookup, and for the same reason: a provider id from
+    another tenant must be indistinguishable from a random one, because storing a
+    foreign reference here would later publish this certificate's challenge with
+    another organization's token — in a zone that organization allowlisted, which
+    is precisely the write the allowlist exists to prevent. ``ON DELETE RESTRICT``
+    on the column keeps the reference valid afterwards.
+
+    A stored credential is *not* required to be currently verified: verification
+    is a recorded result an operator re-runs, and refusing to bind an unverified
+    credential would make "the token expired last week" block every rebind. The
+    issuance path is where a credential that cannot authenticate stops an order.
+    """
+    provider = await db.get(DnsProvider, provider_id)
+    if provider is None:
+        raise NotFound("DNS provider not found", code="DNS_PROVIDER_NOT_FOUND")
+    return provider
 
 
 def _canonical_identifiers(payload: CertificateCreate) -> tuple[str, list[str]]:
@@ -165,6 +187,11 @@ async def create_certificate(
     primary_cn, sans = _canonical_identifiers(payload)
     challenge_type = _challenge_type(payload)
     domain = await _resolve_domain(db, payload.domain_id)
+    dns_provider = (
+        await _resolve_dns_provider(db, payload.dns_provider_id)
+        if payload.dns_provider_id is not None
+        else None
+    )
     if DomainStatus(domain.status) is not DomainStatus.VERIFIED:
         raise Conflict(
             f"Domain '{domain.name}' is {DomainStatus(domain.status).value.lower()}. A "
@@ -202,6 +229,11 @@ async def create_certificate(
         key_algorithm=CertificateKeyAlgorithm.ECDSA_P256,
         expires_at=None,
         last_error="",
+        # NULL is a value here, not a missing one: it means "inherit the Domain's
+        # credential", which is what a certificate that names none does.
+        dns_provider_id=dns_provider.id if dns_provider is not None else None,
+        suspended_at=None,
+        suspension_reason="",
     )
     db.add(certificate)
     try:
@@ -240,6 +272,10 @@ async def create_certificate(
             "identifiers": [primary_cn, *sans],
             "challenge_type": challenge_type.value,
             "generation": generation.generation,
+            # The provider's name and id, never its credential: an audit entry may
+            # say which credential was chosen and must never say what it holds.
+            "dns_provider": dns_provider.name if dns_provider is not None else None,
+            "dns_provider_source": ("certificate" if dns_provider is not None else "domain"),
         },
         request=request,
     )
@@ -299,19 +335,37 @@ async def update_certificate(
     payload: CertificateUpdate,
     request: Request | None = None,
 ) -> Certificate:
-    """Update the one mutable preference: whether renewal should run.
+    """Update ``auto_renew`` and the DNS credential override.
 
     Nothing here touches identifiers, status, expiry or generations — changing
     what a certificate *is* is a new generation, and issuing one is not something
     this phase does.
+
+    The two fields read an explicit ``null`` differently on purpose. For
+    ``auto_renew``, null is the absence of a value and is ignored; for
+    ``dns_provider_id``, null *is* the value — it clears the override so the
+    certificate inherits its Domain's credential again.
     """
     certificate = await get_certificate(db, certificate_id)
     data = payload.model_dump(exclude_unset=True)
-    # An explicit ``null`` is not a value for a boolean preference: it is the
-    # absence of one, and must not be recorded as a change.
-    changed = sorted(field for field in _MUTABLE_FIELDS if data.get(field) is not None)
-    if "auto_renew" in changed:
+    changed: list[str] = []
+
+    if data.get("auto_renew") is not None:
         certificate.auto_renew = bool(data["auto_renew"])
+        changed.append("auto_renew")
+
+    # ``"dns_provider_id" in data`` rather than a truthiness test: clearing the
+    # override sends null, and a null that is dropped would leave the old
+    # credential bound while the caller believes it cleared it.
+    if "dns_provider_id" in data:
+        requested = data["dns_provider_id"]
+        if requested is None:
+            certificate.dns_provider_id = None
+        else:
+            provider = await _resolve_dns_provider(db, requested)
+            certificate.dns_provider_id = provider.id
+        changed.append("dns_provider_id")
+
     await db.flush()
     await audit_service.record(
         db,
@@ -336,23 +390,45 @@ async def delete_certificate(
 
     The design's deletion rule (phase5-design.md §3.1) is that a certificate row
     is removed only when it is orphaned *and* no generation is issued. The second
-    half is what is checked here, through ``current_generation_id``: that pointer
-    only ever names an issued generation — it is what a new bind would reference —
-    so a non-NULL value means material exists and the certificate is not merely a
-    request.
+    half is checked twice, because two different things mean "issued" and either
+    one alone would leave a hole now that material exists:
 
-    The first half (no ``routes.certificate_id`` references it) has nothing to
-    check yet: that column arrives with the binding slice (5.5), and the FK there
-    is ``ON DELETE RESTRICT``, so the database will refuse a delete that a bound
-    route makes invalid rather than this function guessing.
+    * ``current_generation_id`` — the generation a new bind would reference; and
+    * **any** generation in a material-bearing state, which is the stronger fact:
+      a certificate whose current generation is NULL but which still holds a
+      ``SUPERSEDED`` or ``REVOKED`` generation would cascade that row away, and
+      deleting a private key the CA still considers valid is destruction of
+      evidence rather than cleanup. Phase 5.1 could not tell the difference
+      because every generation was pre-issuance by construction.
 
-    Generations are removed with their certificate (``ON DELETE CASCADE``); a
-    pre-issuance generation carries no material, so nothing is stranded by this.
+    The first half of the rule (no ``routes.certificate_id`` references it) has
+    nothing to check yet: that column arrives with the binding slice (5.5), and the
+    FK there is ``ON DELETE RESTRICT``, so the database will refuse a delete that a
+    bound route makes invalid rather than this function guessing.
+
+    A pre-issuance generation carries no material, so removing a certificate that
+    merely *asked* for one strands nothing — which is what keeps this endpoint
+    useful.
     """
     certificate = await get_certificate(db, certificate_id)
     if certificate.current_generation_id is not None:
         raise Conflict(
             "This certificate has an issued generation and cannot be deleted; revoke it first",
+            code="CERTIFICATE_HAS_ISSUED_GENERATION",
+        )
+    issued_generation = await db.scalar(
+        select(CertificateGeneration.generation)
+        .where(
+            CertificateGeneration.certificate_id == certificate.id,
+            CertificateGeneration.state.in_(CertificateGenerationState.material_bearing()),
+        )
+        .order_by(CertificateGeneration.generation.asc())
+        .limit(1)
+    )
+    if issued_generation is not None:
+        raise Conflict(
+            "This certificate has a generation that carries key material and cannot be "
+            "deleted; revoke it first",
             code="CERTIFICATE_HAS_ISSUED_GENERATION",
         )
     primary_cn = certificate.primary_cn

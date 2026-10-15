@@ -60,6 +60,15 @@ EVENT_TYPES: dict[str, str] = {
     # this type never stands in for one of them.
     "CERTIFICATE_REQUESTED": "Certificate requested for a verified domain; nothing has been issued yet",
     "CERTIFICATE_DELETED": "Certificate request deleted (no certificate had been issued)",
+    # certificate inputs (Phase 5.2.2) — the credentials and accounts issuance will
+    # use. Each of these says only that a stored input changed; none of them is an
+    # issuance, a delivery or an activation event, and none carries a secret.
+    "DNS_PROVIDER_CREATED": "DNS credential stored (its value is never included)",
+    "DNS_PROVIDER_VERIFIED": "DNS credential verified against its provider",
+    "DNS_PROVIDER_VERIFICATION_FAILED": "DNS credential could not be verified against its provider",
+    "DNS_PROVIDER_DELETED": "DNS credential deleted",
+    "ACME_ACCOUNT_CREATED": "ACME account created for an organization and directory",
+    "ACME_ACCOUNT_REGISTERED": "ACME account registered with the certificate authority",
     # secrets & notifications
     "SECRET_UPDATED": "Secret created, rotated or deleted (value never included)",
     "CHANNEL_TESTED": "Notification channel test sent",

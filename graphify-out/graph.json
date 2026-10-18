@@ -7359,7 +7359,7 @@
       "file_type": "code",
       "norm_label": "dnsproviderkind",
       "source_file": "backend/app/models/enums.py",
-      "source_location": "L608"
+      "source_location": "L610"
     },
     {
       "id": "backend_app_providers_dns_cloudflare_ambiguous",
@@ -27728,7 +27728,7 @@
       "file_type": "code",
       "norm_label": ".url()",
       "source_file": "backend/app/models/enums.py",
-      "source_location": "L544"
+      "source_location": "L546"
     },
     {
       "id": "backend_app_services_acme_init_authorizationstate_pending",
@@ -31088,7 +31088,7 @@
       "file_type": "code",
       "norm_label": ".from_url()",
       "source_file": "backend/app/models/enums.py",
-      "source_location": "L576"
+      "source_location": "L578"
     },
     {
       "id": "backend_app_models_enums_acmedirectory_is_production",
@@ -31100,7 +31100,7 @@
       "file_type": "code",
       "norm_label": ".is_production()",
       "source_file": "backend/app/models/enums.py",
-      "source_location": "L549"
+      "source_location": "L551"
     },
     {
       "id": "backend_app_models_enums_acmedirectory_is_publicly_trusted",
@@ -31112,7 +31112,7 @@
       "file_type": "code",
       "norm_label": ".is_publicly_trusted()",
       "source_file": "backend/app/models/enums.py",
-      "source_location": "L561"
+      "source_location": "L563"
     },
     {
       "id": "backend_app_models_enums_acmedirectory_label",
@@ -31124,7 +31124,7 @@
       "file_type": "code",
       "norm_label": ".label()",
       "source_file": "backend/app/models/enums.py",
-      "source_location": "L571"
+      "source_location": "L573"
     },
     {
       "id": "backend_app_services_acme_directory_acmedirectoryerror_init",
@@ -68348,7 +68348,7 @@
       "source_location": "L319"
     },
     {
-      "id": "backend_app_models_enums_rationale_545",
+      "id": "backend_app_models_enums_rationale_547",
       "label": "The directory URL stored on the account row and recorded per issuance.",
       "_origin": "ast",
       "community": 24,
@@ -68356,7 +68356,7 @@
       "file_type": "rationale",
       "norm_label": "the directory url stored on the account row and recorded per issuance.",
       "source_file": "backend/app/models/enums.py",
-      "source_location": "L545"
+      "source_location": "L547"
     },
     {
       "id": "backend_app_api_v1_auth_rationale_36",
@@ -71537,7 +71537,7 @@
       "source_location": "L502"
     },
     {
-      "id": "backend_app_models_enums_rationale_550",
+      "id": "backend_app_models_enums_rationale_552",
       "label": "Whether this directory issues publicly trusted certificates. The single\u2026",
       "_origin": "ast",
       "community": 32,
@@ -71545,10 +71545,10 @@
       "file_type": "rationale",
       "norm_label": "whether this directory issues publicly trusted certificates. the single...",
       "source_file": "backend/app/models/enums.py",
-      "source_location": "L550"
+      "source_location": "L552"
     },
     {
-      "id": "backend_app_models_enums_rationale_562",
+      "id": "backend_app_models_enums_rationale_564",
       "label": "Whether a certificate from this directory is trusted by a browser. False for\u2026",
       "_origin": "ast",
       "community": 32,
@@ -71556,10 +71556,10 @@
       "file_type": "rationale",
       "norm_label": "whether a certificate from this directory is trusted by a browser. false for...",
       "source_file": "backend/app/models/enums.py",
-      "source_location": "L562"
+      "source_location": "L564"
     },
     {
-      "id": "backend_app_models_enums_rationale_572",
+      "id": "backend_app_models_enums_rationale_574",
       "label": "Short operator-facing name, stored in metadata and shown in the API.",
       "_origin": "ast",
       "community": 32,
@@ -71567,10 +71567,10 @@
       "file_type": "rationale",
       "norm_label": "short operator-facing name, stored in metadata and shown in the api.",
       "source_file": "backend/app/models/enums.py",
-      "source_location": "L572"
+      "source_location": "L574"
     },
     {
-      "id": "backend_app_models_enums_rationale_577",
+      "id": "backend_app_models_enums_rationale_579",
       "label": "The directory a stored URL names, or ``None`` when it names none. ``None``\u2026",
       "_origin": "ast",
       "community": 32,
@@ -71578,7 +71578,7 @@
       "file_type": "rationale",
       "norm_label": "the directory a stored url names, or ``none`` when it names none. ``none``...",
       "source_file": "backend/app/models/enums.py",
-      "source_location": "L577"
+      "source_location": "L579"
     },
     {
       "id": "backend_app_services_acme_directory_rationale_1",
@@ -87238,7 +87238,7 @@
       "source_location": "L67"
     },
     {
-      "id": "backend_app_models_enums_rationale_609",
+      "id": "backend_app_models_enums_rationale_611",
       "label": "Which DNS API a stored credential speaks to. One member in v1 (Cloudflare) \u2014\u2026",
       "_origin": "ast",
       "community": 91,
@@ -87246,7 +87246,7 @@
       "file_type": "rationale",
       "norm_label": "which dns api a stored credential speaks to. one member in v1 (cloudflare) \u2014...",
       "source_file": "backend/app/models/enums.py",
-      "source_location": "L609"
+      "source_location": "L611"
     },
     {
       "id": "backend_app_providers_dns_cloudflare_rationale_1",
@@ -90636,6 +90636,18 @@
       "type": "external"
     },
     {
+      "id": "dns_resolver",
+      "label": "dns_resolver",
+      "_origin": "semantic",
+      "community": 30,
+      "community_name": "test_certificate_pebble.py",
+      "external": true,
+      "file_type": "concept",
+      "norm_label": "dns_resolver",
+      "source_file": "",
+      "type": "external"
+    },
+    {
       "id": "shutil",
       "label": "shutil",
       "_origin": "semantic",
@@ -91172,17 +91184,6 @@
       "external": true,
       "file_type": "concept",
       "norm_label": "stat",
-      "source_file": "",
-      "type": "external"
-    },
-    {
-      "id": "dns_resolver",
-      "label": "dns_resolver",
-      "community": 30,
-      "community_name": "test_certificate_pebble.py",
-      "external": true,
-      "file_type": "concept",
-      "norm_label": "dns_resolver",
       "source_file": "",
       "type": "external"
     }
@@ -267486,7 +267487,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "backend/app/models/enums.py",
-      "source_location": "L608",
+      "source_location": "L610",
       "weight": 1.0
     },
     {
@@ -305312,7 +305313,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "backend/app/models/enums.py",
-      "source_location": "L608",
+      "source_location": "L610",
       "weight": 1.0
     },
     {
@@ -309404,7 +309405,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "backend/app/models/enums.py",
-      "source_location": "L544",
+      "source_location": "L546",
       "weight": 1.0
     },
     {
@@ -309415,7 +309416,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "backend/app/models/enums.py",
-      "source_location": "L549",
+      "source_location": "L551",
       "weight": 1.0
     },
     {
@@ -309426,7 +309427,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "backend/app/models/enums.py",
-      "source_location": "L561",
+      "source_location": "L563",
       "weight": 1.0
     },
     {
@@ -309437,7 +309438,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "backend/app/models/enums.py",
-      "source_location": "L571",
+      "source_location": "L573",
       "weight": 1.0
     },
     {
@@ -309448,7 +309449,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "backend/app/models/enums.py",
-      "source_location": "L576",
+      "source_location": "L578",
       "weight": 1.0
     },
     {
@@ -318164,69 +318165,69 @@
       "weight": 1.0
     },
     {
-      "source": "backend_app_models_enums_rationale_545",
+      "source": "backend_app_models_enums_rationale_547",
       "target": "backend_app_models_enums_acmedirectory_url",
       "relation": "rationale_for",
       "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "backend/app/models/enums.py",
-      "source_location": "L545",
+      "source_location": "L547",
       "weight": 1.0
     },
     {
-      "source": "backend_app_models_enums_rationale_550",
+      "source": "backend_app_models_enums_rationale_552",
       "target": "backend_app_models_enums_acmedirectory_is_production",
       "relation": "rationale_for",
       "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "backend/app/models/enums.py",
-      "source_location": "L550",
+      "source_location": "L552",
       "weight": 1.0
     },
     {
-      "source": "backend_app_models_enums_rationale_562",
+      "source": "backend_app_models_enums_rationale_564",
       "target": "backend_app_models_enums_acmedirectory_is_publicly_trusted",
       "relation": "rationale_for",
       "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "backend/app/models/enums.py",
-      "source_location": "L562",
+      "source_location": "L564",
       "weight": 1.0
     },
     {
-      "source": "backend_app_models_enums_rationale_572",
+      "source": "backend_app_models_enums_rationale_574",
       "target": "backend_app_models_enums_acmedirectory_label",
       "relation": "rationale_for",
       "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "backend/app/models/enums.py",
-      "source_location": "L572",
+      "source_location": "L574",
       "weight": 1.0
     },
     {
-      "source": "backend_app_models_enums_rationale_577",
+      "source": "backend_app_models_enums_rationale_579",
       "target": "backend_app_models_enums_acmedirectory_from_url",
       "relation": "rationale_for",
       "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "backend/app/models/enums.py",
-      "source_location": "L577",
+      "source_location": "L579",
       "weight": 1.0
     },
     {
-      "source": "backend_app_models_enums_rationale_609",
+      "source": "backend_app_models_enums_rationale_611",
       "target": "backend_app_models_enums_dnsproviderkind",
       "relation": "rationale_for",
       "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "backend/app/models/enums.py",
-      "source_location": "L609",
+      "source_location": "L611",
       "weight": 1.0
     },
     {
@@ -359391,5 +359392,5 @@
       "source_file": "docs/architecture.md"
     }
   ],
-  "built_at_commit": "c0c76f57f689d7bda45a71b1d9382cf0876b549e"
+  "built_at_commit": "63728ee9736686cdd176829eca55f8aaa30b46b6"
 }

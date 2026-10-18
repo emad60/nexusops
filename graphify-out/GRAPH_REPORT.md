@@ -1,7 +1,7 @@
 # Graph Report - nexusops  (2026-10-18)
 
 ## Corpus Check
-- 409 files · ~518,281 words
+- 409 files · ~518,298 words
 - Verdict: corpus is large enough that graph structure adds value.
 - Unclassified: 18 file(s) not represented in the graph (top: (none) 10, .example 1, .service 1)
 
@@ -11,7 +11,7 @@
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `c0c76f57`
+- Built from commit: `63728ee9`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 

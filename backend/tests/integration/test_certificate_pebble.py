@@ -1,11 +1,14 @@
-"""Phase 5.3.1 — issuance through the **real** ACME protocol, against Pebble.
+"""Phase 5.3.1 and 5.3.2 — issuance through the **real** ACME protocol, against Pebble.
 
-The other issuance integration test proves the flow against its seams: a fake
+The other issuance integration tests prove the flows against their seams: a fake
 session, a fake zone, a fake resolver. That is the right test for the state
 machine, but it cannot show that the production adapter speaks RFC 8555 or that
 the platform's own DNS observation is what lets a real CA validate. This module
 is that second claim: one CA, one zone, the real client, the real propagation
-code and the real persistence path.
+code and the real persistence path. Since 5.3.2 it also carries the **manual
+DNS-01** workflow through that same real CA: the operator publishes the record by
+hand at the isolated authoritative servers, so no provider is constructed and no
+credential exists anywhere in the flow.
 
 Infrastructure (started by :func:`pebble_stack` when it is not already running)
 lives in ``docker-compose.pebble.yml`` as project ``nexusops-pebble``, on Linux
@@ -33,6 +36,9 @@ other integration tests need.
 
 from __future__ import annotations
 
+import asyncio
+import json
+import logging
 import re
 import shutil
 import subprocess
@@ -40,7 +46,7 @@ import time
 import uuid
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -51,10 +57,11 @@ from app.core.config import get_settings
 from app.core.tenancy import apply_scope_to_session, org_scope
 from app.models import Certificate, CertificateGeneration, SystemEvent
 from app.models.enums import AcmeDirectory, DomainStatus
+from app.models.observability import AuditLog
 from app.providers.dns import CredentialCheck, TxtRecord, ZoneRef, ZoneResolution
-from app.services import certificate_order, dns_provider_service, dns_verifier
+from app.services import certificate_order, dns_propagation, dns_provider_service, dns_verifier
 from app.services.acme import open_acme_session
-from app.services.certificate_issuance import issue_generation
+from app.services.certificate_issuance import CODE_AWAITING_MANUAL, issue_generation
 from app.services.dek_envelope import org_dek_context
 from app.services.dns_verifier import (
     STATUS_NO_TXT,
@@ -839,3 +846,661 @@ async def test_pebble_rejects_a_challenge_whose_txt_record_is_absent(
     # Nothing was published, so nothing should need cleaning up — but the zone must
     # still be empty, which the next test's setup relies on.
     assert all(view.txt(record_name) == () for view in views.values())
+
+
+# === Phase 5.3.2 — the manual workflow against the same real CA =================
+
+
+class _Setups:
+    """The manual request's rows, reloaded when a test needs the current document.
+
+    The confirmation endpoint writes the challenge document from its own session,
+    so the instance a test loaded at setup time would keep the document it was
+    loaded with — and the resume attempt would then act on a stale view. This is
+    the same trap the fake-CA suite documents; here it matters even more, because
+    the thing being reloaded decides whether a real CA is allowed to validate.
+    """
+
+    def __init__(self, db: Any, setup: dict[str, Any]) -> None:
+        self.db = db
+        self.setup = setup
+
+    async def rows(self) -> tuple[Any, Any]:
+        async with _scoped(self.db, self.setup["org_id"]):
+            generation = await self.db.get(
+                CertificateGeneration, uuid.UUID(self.setup["generation_id"])
+            )
+            certificate = await self.db.get(Certificate, uuid.UUID(self.setup["certificate"]["id"]))
+            assert generation is not None and certificate is not None
+            await self.db.refresh(generation)
+            await self.db.refresh(certificate)
+            return generation, certificate
+
+    async def generation(self) -> Any:
+        return (await self.rows())[0]
+
+
+def _forbidden_provider(kind: Any) -> Any:
+    """A manual certificate has no automated publisher; constructing one is a defect."""
+    raise AssertionError(f"the manual DNS-01 flow must not construct a DNS provider ({kind})")
+
+
+@pytest.fixture
+def manual_dns(monkeypatch: pytest.MonkeyPatch) -> list[TxtObservation]:
+    """The confirmation endpoint observes through the **real** authoritative servers.
+
+    ``check_once`` reads ``dns_propagation.observe_txt_record`` as its default
+    observer. Replacing that default with the bootstrap-resolver wrapper keeps the
+    wire path real — the delegation comes from ``127.0.0.2`` and the answers come
+    from the two authoritative servers — and only supplies the one fact a test
+    host cannot know: that ``pebble.test`` is delegated to those views.
+    """
+    observer, seen = _recording_observer()
+    monkeypatch.setattr(dns_propagation, "observe_txt_record", observer)
+    return seen
+
+
+class _TaskRecorder:
+    """Records the worker handoff instead of performing it, like the deployments suite."""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def delay(self, generation_id: str) -> None:
+        self.calls.append(generation_id)
+
+
+@asynccontextmanager
+async def _manual_request(
+    client: Any,
+    owner: dict,
+    org_db: Any,
+    state: dict[str, Any],
+    *,
+    name: str,
+) -> AsyncIterator[dict[str, Any]]:
+    """A verified domain and a **manual** certificate request with no credential."""
+    domain = await _create_domain(client, owner, state, name)
+    created = await client.post(
+        f"{API}/certificates",
+        headers=owner["headers"],
+        json={"domain_id": domain["id"], "identifiers": [name], "dns_mode": "manual"},
+    )
+    assert created.status_code == 201, created.text
+    certificate = created.json()
+    org_id = uuid.UUID(owner["active_organization_id"])
+    async with _scoped(org_db, org_id):
+        generation = await org_db.get(
+            CertificateGeneration, uuid.UUID(certificate["latest_generation"]["id"])
+        )
+        certificate_row = await org_db.get(Certificate, uuid.UUID(certificate["id"]))
+        assert generation is not None and certificate_row is not None
+    yield {
+        "org_id": org_id,
+        "domain": domain,
+        "certificate": certificate,
+        "certificate_row": certificate_row,
+        "generation": generation,
+        "generation_id": certificate["latest_generation"]["id"],
+    }
+
+
+async def _issue_manual(
+    db: Any,
+    setup: dict[str, Any],
+    *,
+    observer: Any,
+    now: datetime | None = None,
+) -> Any:
+    """One attempt through the real manual flow, with the provider seam forbidden."""
+    generation, certificate = await _Setups(db, setup).rows()
+    with org_scope(setup["org_id"]):
+        await apply_scope_to_session(db)
+        result = await issue_generation(
+            db,
+            generation,
+            certificate=certificate,
+            settings=_pebble_settings(),
+            now=now or datetime.now(UTC),
+            provider_factory=_forbidden_provider,
+            observer=observer,
+            checkpoint=db.commit,
+        )
+        await db.commit()
+    return result
+
+
+def _publish_views(views: dict[str, _View], name: str, value: str) -> None:
+    """The operator's own act: a TXT record, written outside this platform."""
+    for view in views.values():
+        view.publish(name, value)
+
+
+def _challenge_url(setup: dict[str, Any]) -> str:
+    return f"{API}/certificates/{setup['certificate']['id']}/challenge"
+
+
+def _assert_no_material(text: str, value: str) -> None:
+    """No private key, certificate PEM, challenge value or DNS credential in *text*."""
+    assert "PRIVATE KEY" not in text
+    assert "BEGIN CERTIFICATE" not in text
+    assert value not in text
+    assert TOKEN not in text
+
+
+async def _settled() -> None:
+    """Let a post-commit handoff run: ``after_commit`` schedules it, never awaits it.
+
+    The handoff is a task created on the running loop when the request's transaction
+    commits, so it lands one iteration after the request returns. Yielding twice is
+    enough for the loop to run it — and if it were never scheduled, the assertions
+    after this call would see an empty list rather than a stale one.
+    """
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+
+# --- 5. the manual workflow, one real CA, no credential ------------------------
+
+
+async def test_pebble_issues_a_manual_certificate_without_any_dns_credential(
+    client: Any,
+    owner: dict,
+    org_db: Any,
+    pebble_stack: dict[str, Any],
+    ownership: dict,
+    manual_dns: list[TxtObservation],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The whole manual path through Pebble: wait, publish, confirm, resume, issue.
+
+    One test again, because the ten claims are one fact: the operator-published
+    record is what a real CA validated, and the artifacts left behind are the ones
+    the design says the workflow produces. ``provider_factory`` raises on *any*
+    call, so the successful issuance below is also the proof that manual mode does
+    not construct, let alone call, an automated DNS provider.
+    """
+    caplog.set_level(logging.INFO)
+    views = _view_map()
+    _reset_zone(views)
+    observer, _seen = _recording_observer()
+    name = f"manual.{ZONE}"
+    record_name = f"_acme-challenge.{name}"
+
+    from app.tasks import certificates as certificate_tasks
+
+    tasks = _TaskRecorder()
+    monkeypatch.setattr(certificate_tasks, "issue_certificate", tasks)
+
+    async with _manual_request(client, owner, org_db, ownership, name=name) as setup:
+        # Creating a request hands its first attempt to the worker. That handoff is
+        # not what this test counts, so it is drained and forgotten first.
+        await _settled()
+        tasks.calls.clear()
+
+        # (1) No credential is attached, and the row says the customer publishes.
+        assert setup["certificate_row"].dns_provider_id is None
+        assert _state(setup["certificate_row"].dns_mode) == "manual"
+        assert setup["certificate"]["dns_mode"] == "manual"
+
+        # (2) The first attempt places the order at Pebble and stops.
+        first = await _issue_manual(org_db, setup, observer=observer)
+        assert first.ok is False
+        assert first.waiting is True
+        assert first.code == CODE_AWAITING_MANUAL
+        assert _state(first.state) == "AWAITING_MANUAL"
+
+        setups = _Setups(org_db, setup)
+        generation = await setups.generation()
+        assert generation.attempt_count == 1
+        assert generation.next_attempt_at is None
+        assert generation.last_error == ""
+        assert generation.key_ciphertext is None and generation.chain_ciphertext is None
+        assert generation.directory_url == pebble_stack["directory"]
+        document = certificate_order.load(generation)
+        order_url = document["order_url"]
+        assert order_url.startswith("https://localhost:14000/")
+
+        instructions = certificate_order.manual_instructions(document)
+        assert len(instructions) == 1
+        value = instructions[0]["record_value"]
+        assert re.fullmatch(r"[A-Za-z0-9_-]{43}", value), value
+        assert instructions[0]["record_name"] == record_name
+        assert instructions[0]["problem"] == ""
+
+        # (3) The authenticated, organization-scoped endpoint returns the record and
+        # nothing else that is secret.
+        shown = await client.get(_challenge_url(setup), headers=owner["headers"])
+        assert shown.status_code == 200, shown.text
+        body = shown.json()
+        assert body["records"][0]["record_name"] == record_name
+        assert body["records"][0]["record_value"] == value
+        assert body["records"][0]["confirmed"] is False
+        assert body["ready"] is False
+        assert body["cleanup"]["required"] is False, "nothing is obsolete while waiting"
+        # The value appears exactly where an operator needs it — as the record to
+        # publish, and in the (not yet required) cleanup instruction naming what to
+        # remove afterwards — and nowhere else in the document.
+        remainder = shown.json()
+        remainder["records"][0]["record_value"] = ""
+        for record in remainder["cleanup"]["records"]:
+            record["remove_values"] = []
+        assert value not in json.dumps(remainder)
+        assert "PRIVATE KEY" not in shown.text
+        assert "BEGIN CERTIFICATE" not in shown.text
+        assert TOKEN not in shown.text
+
+        # (4) Confirming while the record is absent cannot advance anything: no
+        # attempt, no CA answer, no second order.
+        absent = await client.post(
+            f"{_challenge_url(setup)}/confirm", headers=owner["headers"], json={}
+        )
+        assert absent.status_code == 202, absent.text
+        absent_body = absent.json()
+        assert absent_body["ready"] is False
+        assert absent_body["resume_requested"] is False
+        assert absent_body["records"][0]["observed"] is False
+        assert absent_body["records"][0]["confirmed"] is True
+        assert tasks.calls == [], "an unobserved confirmation must not queue an attempt"
+        assert all(view.txt(record_name) == () for view in views.values())
+        generation = await setups.generation()
+        assert _state(generation.state) == "AWAITING_MANUAL"
+        assert generation.attempt_count == 1
+        assert certificate_order.load(generation)["order_url"] == order_url
+
+        # (5) The operator publishes, outside this platform, at both authorities.
+        _publish_views(views, record_name, value)
+        assert all(view.txt(record_name) == (value,) for view in views.values())
+
+        # (6) Confirmation re-observes for real, and a repeat is idempotent.
+        confirmed = await client.post(
+            f"{_challenge_url(setup)}/confirm", headers=owner["headers"], json={}
+        )
+        assert confirmed.status_code == 202, confirmed.text
+        confirmed_body = confirmed.json()
+        assert confirmed_body["ready"] is True
+        assert confirmed_body["resume_requested"] is True
+        assert confirmed_body["records"][0]["observed"] is True
+        assert confirmed_body["records"][0]["validated"] is False, "only the CA validates"
+        stamp = confirmed_body["records"][0]["confirmed_at"]
+        assert stamp
+        await _settled()
+        assert tasks.calls == [setup["generation_id"]]
+
+        repeated = await client.post(
+            f"{_challenge_url(setup)}/confirm", headers=owner["headers"], json={}
+        )
+        assert repeated.status_code == 202, repeated.text
+        assert repeated.json()["records"][0]["confirmed_at"] == stamp
+        assert repeated.json()["ready"] is True
+        # Every handoff carries the generation id and nothing else — no value, no key.
+        assert all(call == setup["generation_id"] for call in tasks.calls)
+
+        # The confirmation observed the record at both real servers, over DNS.
+        agreeing = [
+            observation
+            for observation in manual_dns
+            if observation.status == STATUS_OK
+            and len(observation.server_answers) == 2
+            and all(answer.status == STATUS_OK for answer in observation.server_answers)
+        ]
+        assert agreeing, [observation.server_answers for observation in manual_dns]
+
+        # (7) The resume finishes the **same** order through Pebble's validation and
+        # finalization. The order URL is recorded across the pause, so this is also
+        # the proof that no second order was placed.
+        second = await _issue_manual(org_db, setup, observer=observer)
+        assert second.ok is True, (second.code, second.message)
+        assert _state(second.state) == "ISSUED"
+        assert "pebble" in second.message.lower()
+
+        generation = await setups.generation()
+        certificate = (await setups.rows())[1]
+        assert certificate_order.load(generation)["order_url"] == order_url
+        assert generation.attempt_count == 2, "the resume is the second attempt"
+
+        # (8, 9) Encrypted persistence with the DEK generation, provenance and
+        # validity metadata — and a chain that answers the key that was generated.
+        assert _state(generation.state) == "ISSUED"
+        assert generation.fingerprint and len(generation.fingerprint) == 64
+        assert generation.issued_at is not None
+        assert generation.not_before is not None and generation.not_after > generation.not_before
+        assert generation.last_error == ""
+        assert generation.deke_id is not None and generation.deke_id >= 1
+        assert generation.directory_url == pebble_stack["directory"]
+        assert generation.key_ciphertext and generation.chain_ciphertext
+        for stored in (generation.key_ciphertext, generation.chain_ciphertext):
+            assert "PRIVATE KEY" not in stored
+            assert "BEGIN CERTIFICATE" not in stored
+
+        async with _scoped(org_db, setup["org_id"]):
+            async with org_dek_context(org_db, setup["org_id"]) as dek:
+                key_pem = _decrypted(
+                    dek,
+                    setup["org_id"],
+                    generation,
+                    PURPOSE_CERTIFICATE_KEY,
+                    generation.key_ciphertext,
+                )
+                fullchain = _decrypted(
+                    dek,
+                    setup["org_id"],
+                    generation,
+                    PURPOSE_CERTIFICATE_CHAIN,
+                    generation.chain_ciphertext,
+                )
+
+        blocks = _pem_blocks(fullchain)
+        assert len(blocks) >= 2, "a real CA returns the leaf and its issuer"
+        leaf = x509.load_pem_x509_certificate(blocks[0].encode())
+        issuer = x509.load_pem_x509_certificate(blocks[1].encode())
+        assert leaf.issuer == issuer.subject
+        issuer.public_key().verify(
+            leaf.signature, leaf.tbs_certificate_bytes, ec.ECDSA(leaf.signature_hash_algorithm)
+        )
+        assert "Pebble" in issuer.subject.rfc4514_string()
+        key = serialization.load_pem_private_key(key_pem.encode(), password=None)
+        assert leaf.public_key().public_numbers() == key.public_key().public_numbers()
+        sans = leaf.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
+        assert tuple(sans.get_values_for_type(x509.DNSName)) == (name,)
+
+        # (10) The generation is `ISSUED` only after the chain was verified and
+        # stored: the row above is the post-persistence view, and the certificate
+        # points at it.
+        assert certificate.current_generation_id == generation.id
+        assert certificate.expires_at == generation.not_after
+        assert _state(certificate.status) == "ISSUED"
+
+        document = certificate_order.load(generation)
+        entries = certificate_order.entries(document)
+        assert entries and all(entry["mode"] == certificate_order.MODE_MANUAL for entry in entries)
+        assert all(entry["validated_at"] for entry in entries)
+        assert all(entry["cleanup"] == certificate_order.CLEANUP_NOT_REQUIRED for entry in entries)
+        assert certificate_order.pending_cleanup(document) == []
+        assert certificate_order.cleanup_incomplete(document) == []
+
+    # Cleanup never deletes: the record is the customer's, and it is still there.
+    assert all(view.txt(record_name) == (value,) for view in views.values())
+
+    after = await client.get(_challenge_url(setup), headers=owner["headers"])
+    assert after.status_code == 200, after.text
+    cleanup = after.json()["cleanup"]
+    assert cleanup["required"] is True
+    assert cleanup["records"][0]["record_name"] == record_name
+    assert cleanup["records"][0]["remove_values"] == [value]
+    assert "did not create" in cleanup["note"]
+
+    # The read models: issued, Pebble-labelled, not publicly trusted, no value.
+    detail = await client.get(
+        f"{API}/certificates/{setup['certificate']['id']}", headers=owner["headers"]
+    )
+    assert detail.status_code == 200, detail.text
+    detail_body = detail.json()
+    assert detail_body["issued"] is True
+    assert detail_body["status"] == "ISSUED"
+    assert detail_body["latest_generation"]["directory"] == "pebble"
+    assert detail_body["latest_generation"]["publicly_trusted"] is False
+    listed = await client.get(f"{API}/certificates", headers=owner["headers"])
+    assert listed.status_code == 200, listed.text
+    for response in (detail, listed):
+        _assert_no_material(response.text, value)
+
+    # The audit trail names the action, not the record's value or any material.
+    async with _scoped(org_db, setup["org_id"]):
+        audit_rows = list(
+            (
+                await org_db.execute(
+                    select(AuditLog).where(AuditLog.action == "certificate.challenge_confirmed")
+                )
+            ).scalars()
+        )
+    assert audit_rows
+    for row in audit_rows:
+        _assert_no_material(repr(dict(row.metadata_ or {})), value)
+
+    # The waiting event names the record, and neither it nor the confirmation or
+    # issuance events carries the value, a key or a credential.
+    awaiting = await _events(org_db, setup["org_id"], "CERTIFICATE_AWAITING_MANUAL")
+    confirmed_events = await _events(org_db, setup["org_id"], "CERTIFICATE_CHALLENGE_CONFIRMED")
+    issued_events = await _events(org_db, setup["org_id"], "CERTIFICATE_ISSUED")
+    assert len(awaiting) == 1
+    assert awaiting[0].data["record_names"] == [record_name]
+    assert confirmed_events and len(issued_events) == 1
+    for event in (*awaiting, *confirmed_events, *issued_events):
+        _assert_no_material(repr(dict(event.data)), value)
+
+    # And the logs: structured events carry identifiers and statuses only.
+    _assert_no_material(caplog.text, value)
+
+
+# --- 6. a wrong or absent record never authorizes issuance ---------------------
+
+
+async def test_a_wrong_manual_value_never_authorizes_the_order(
+    client: Any,
+    owner: dict,
+    org_db: Any,
+    pebble_stack: dict[str, Any],
+    ownership: dict,
+    manual_dns: list[TxtObservation],
+) -> None:
+    """A wrong TXT value is observed as absent, not trusted as "published".
+
+    The confirmation is a request to look; what the platform looks at is the
+    challenge digest the CA produced. A record with the right name and the wrong
+    value changes nothing: not ready, no attempt spent, no CA answer, one order.
+    Once the right value is published, the same order resumes and issues.
+    """
+    views = _view_map()
+    _reset_zone(views)
+    observer, _seen = _recording_observer()
+    name = f"wrong.{ZONE}"
+    record_name = f"_acme-challenge.{name}"
+    wrong = "A" * 43
+
+    async with _manual_request(client, owner, org_db, ownership, name=name) as setup:
+        first = await _issue_manual(org_db, setup, observer=observer)
+        assert first.waiting is True
+
+        setups = _Setups(org_db, setup)
+        document = certificate_order.load(await setups.generation())
+        value = certificate_order.manual_instructions(document)[0]["record_value"]
+        order_url = document["order_url"]
+
+        _publish_views(views, record_name, wrong)
+        observed_wrong = await client.post(
+            f"{_challenge_url(setup)}/confirm", headers=owner["headers"], json={}
+        )
+        assert observed_wrong.status_code == 202, observed_wrong.text
+        body = observed_wrong.json()
+        assert body["ready"] is False
+        assert body["resume_requested"] is False
+        assert body["records"][0]["confirmed"] is True
+        assert body["records"][0]["observed"] is False
+        assert all(
+            answer["serves_expected"] is False for answer in body["observation"]["nameservers"]
+        )
+
+        # A dispatch that arrives anyway is refused without spending an attempt
+        # and without touching the open order.
+        again = await _issue_manual(org_db, setup, observer=observer)
+        assert again.ok is False
+        assert again.code == CODE_AWAITING_MANUAL
+        generation = await setups.generation()
+        assert generation.attempt_count == 1
+        assert _state(generation.state) == "AWAITING_MANUAL"
+        assert certificate_order.load(generation)["order_url"] == order_url
+
+        # The correct value, and only it, makes the order resumable.
+        for view in views.values():
+            view.remove(record_name, wrong)
+        _publish_views(views, record_name, value)
+        ready = await client.post(
+            f"{_challenge_url(setup)}/confirm", headers=owner["headers"], json={}
+        )
+        assert ready.status_code == 202, ready.text
+        assert ready.json()["ready"] is True
+        assert ready.json()["resume_requested"] is True
+
+        second = await _issue_manual(org_db, setup, observer=observer)
+        assert second.ok is True, (second.code, second.message)
+        assert _state(second.state) == "ISSUED"
+        assert certificate_order.load(await setups.generation())["order_url"] == order_url
+
+    # Manual cleanup is an instruction: the value the operator published is still
+    # in the zone until they remove it.
+    assert all(view.txt(record_name) == (value,) for view in views.values())
+
+
+# --- 7. one stale authority is enough to delay the CA -------------------------
+
+
+async def test_one_stale_authority_delays_the_manual_validation(
+    client: Any,
+    owner: dict,
+    org_db: Any,
+    pebble_stack: dict[str, Any],
+    ownership: dict,
+    manual_dns: list[TxtObservation],
+) -> None:
+    """The manual path inherits the automated policy: every server that answers.
+
+    A zone mid-propagation is exactly the state a manual operator creates: their
+    provider accepted the write, one authority has it, one does not. Confirming
+    then must not tell Pebble the challenge is ready; it must say what it saw. The
+    same attempt resumes once both servers agree.
+    """
+    views = _view_map()
+    _reset_zone(views)
+    observer, _seen = _recording_observer()
+    name = f"stale-manual.{ZONE}"
+    record_name = f"_acme-challenge.{name}"
+    addresses = {address for address, _control in VIEWS.values()}
+
+    async with _manual_request(client, owner, org_db, ownership, name=name) as setup:
+        first = await _issue_manual(org_db, setup, observer=observer)
+        assert first.waiting is True
+
+        setups = _Setups(org_db, setup)
+        document = certificate_order.load(await setups.generation())
+        value = certificate_order.manual_instructions(document)[0]["record_value"]
+        order_url = document["order_url"]
+
+        # Only one authority has it: publish there, leave the other empty.
+        views["ns-a"].publish(record_name, value)
+        assert views["ns-a"].txt(record_name) == (value,)
+        assert views["ns-b"].txt(record_name) == ()
+
+        partial = await client.post(
+            f"{_challenge_url(setup)}/confirm", headers=owner["headers"], json={}
+        )
+        assert partial.status_code == 202, partial.text
+        body = partial.json()
+        assert body["ready"] is False
+        assert body["resume_requested"] is False
+        summary = {answer["server"]: answer for answer in body["observation"]["nameservers"]}
+        assert set(summary) == addresses
+        serving = {address for address, answer in summary.items() if answer["serves_expected"]}
+        assert serving == {"127.0.0.2"}
+
+        # The disagreement was observed over DNS, not inferred from the response.
+        assert any(
+            {answer.server: answer.status for answer in observation.server_answers}
+            == {"127.0.0.2": STATUS_OK, "127.0.0.3": STATUS_NO_TXT}
+            for observation in manual_dns
+        ), [observation.server_answers for observation in manual_dns]
+
+        # And the CA was not told: still waiting, still the first attempt, same order.
+        generation = await setups.generation()
+        assert _state(generation.state) == "AWAITING_MANUAL"
+        assert generation.attempt_count == 1
+        assert certificate_order.load(generation)["order_url"] == order_url
+
+        # Publication reaches the second authority; the same order now resumes.
+        views["ns-b"].publish(record_name, value)
+        agreed = await client.post(
+            f"{_challenge_url(setup)}/confirm", headers=owner["headers"], json={}
+        )
+        assert agreed.status_code == 202, agreed.text
+        assert agreed.json()["ready"] is True
+        assert all(
+            answer["serves_expected"] for answer in agreed.json()["observation"]["nameservers"]
+        )
+
+        second = await _issue_manual(org_db, setup, observer=observer)
+        assert second.ok is True, (second.code, second.message)
+        assert _state(second.state) == "ISSUED"
+        assert certificate_order.load(await setups.generation())["order_url"] == order_url
+
+
+# --- 8. an interrupted resume recovers the persisted order ---------------------
+
+
+async def test_an_interrupted_manual_resume_recovers_without_a_second_order(
+    client: Any,
+    owner: dict,
+    org_db: Any,
+    pebble_stack: dict[str, Any],
+    ownership: dict,
+    manual_dns: list[TxtObservation],
+) -> None:
+    """A worker that died mid-attempt is lost work; the order it held is resumable.
+
+    The stamp is the only thing that distinguishes "a worker is on it" from "a
+    worker died on it". Recovery must count the lost attempt and resume the order
+    the operator was already answering — placing a second order would change the
+    challenge value underneath them and invalidate the record they published.
+    """
+    views = _view_map()
+    _reset_zone(views)
+    observer, _seen = _recording_observer()
+    name = f"recover.{ZONE}"
+    record_name = f"_acme-challenge.{name}"
+
+    async with _manual_request(client, owner, org_db, ownership, name=name) as setup:
+        first = await _issue_manual(org_db, setup, observer=observer)
+        assert first.waiting is True
+
+        setups = _Setups(org_db, setup)
+        generation = await setups.generation()
+        document = certificate_order.load(generation)
+        value = certificate_order.manual_instructions(document)[0]["record_value"]
+        order_url = document["order_url"]
+
+        # A stamp a worker left behind when it died, with no finish time.
+        document["attempt_started_at"] = (datetime.now(UTC) - timedelta(days=2)).isoformat()
+        document["attempt_finished_at"] = ""
+        async with _scoped(org_db, setup["org_id"]):
+            row = await org_db.get(CertificateGeneration, uuid.UUID(setup["generation_id"]))
+            assert row is not None
+            certificate_order.store(row, document)
+            await org_db.commit()
+
+        recovered = await _issue_manual(org_db, setup, observer=observer)
+        assert recovered.ok is False
+        assert recovered.waiting is True
+        assert recovered.code == CODE_AWAITING_MANUAL
+
+        generation = await setups.generation()
+        document = certificate_order.load(generation)
+        assert _state(generation.state) == "AWAITING_MANUAL"
+        assert generation.attempt_count == 2, "the lost attempt is counted, then retried"
+        assert certificate_order.attempt_unfinished(document) is False
+        assert document["order_url"] == order_url, "recovery resumed, it did not re-order"
+        assert certificate_order.manual_instructions(document)[0]["record_value"] == value
+
+        # The operator's record is still the one the open order expects.
+        _publish_views(views, record_name, value)
+        ready = await client.post(
+            f"{_challenge_url(setup)}/confirm", headers=owner["headers"], json={}
+        )
+        assert ready.status_code == 202, ready.text
+        assert ready.json()["ready"] is True
+
+        finished = await _issue_manual(org_db, setup, observer=observer)
+        assert finished.ok is True, (finished.code, finished.message)
+        assert _state(finished.state) == "ISSUED"
+        assert certificate_order.load(await setups.generation())["order_url"] == order_url
+
+    assert all(view.txt(record_name) == (value,) for view in views.values())

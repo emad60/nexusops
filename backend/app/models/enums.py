@@ -398,6 +398,27 @@ class CertificateChallengeType(StrEnum):
     DNS_01 = "dns-01"
 
 
+class CertificateDnsMode(StrEnum):
+    """Who publishes the DNS-01 challenge record.
+
+    ``automated`` means the platform writes the TXT record into the customer's zone
+    through the DNS credential the certificate names, waits for its own
+    authoritative observation, and deletes it afterwards. ``manual`` means the
+    customer publishes it: the platform issues the instruction, the operator puts
+    the record in place and confirms, and the platform's authoritative observation
+    — not the confirmation — decides when the CA is told the challenge is ready
+    (phase5-design.md §5.3).
+
+    Deliberately explicit and stored on the certificate rather than inferred from a
+    missing credential: "no credential attached" is also the state of a request
+    whose credential was never chosen, and a platform that guessed "manual" from
+    that would strand an automated certificate in a workflow nobody asked for.
+    """
+
+    AUTOMATED = "automated"
+    MANUAL = "manual"
+
+
 class CertificateKeyAlgorithm(StrEnum):
     """The key type generated for a generation. Fixed in v1; never client-chosen."""
 
@@ -417,6 +438,11 @@ class CertificateGenerationState(StrEnum):
     (:func:`material_bearing`): a generation in any of the states below cannot
     exist without ``key_ciphertext``, ``chain_ciphertext``, ``deke_id``,
     ``issued_at``, ``not_before`` and ``not_after``.
+
+    ``AWAITING_MANUAL`` is Phase 5.3.2's addition and sits on the **manual** DNS-01
+    path: the order exists, an operator has been handed the record to publish, and
+    the attempt that placed the order stopped on purpose rather than crashing. It
+    is a live state (an open order, resumable) but not material-bearing.
 
     Two classmethods carry the structural predicates, and both the model and the
     migration derive from them rather than restating a list:
@@ -440,6 +466,11 @@ class CertificateGenerationState(StrEnum):
     # Pre-issuance (5.1): no material exists yet.
     PENDING = "PENDING"
     ORDERING = "ORDERING"
+    # Pre-issuance (5.3.2): the order is placed and an operator has to publish the
+    # challenge record. A live state like the others — the generation has an open
+    # order and may be resumed — but the attempt that would act on it is not
+    # running: it stopped deliberately, waiting for a human.
+    AWAITING_MANUAL = "AWAITING_MANUAL"
     CHALLENGE_PUBLISHED = "CHALLENGE_PUBLISHED"
     VALIDATING = "VALIDATING"
     FAILED = "FAILED"
@@ -461,7 +492,13 @@ class CertificateGenerationState(StrEnum):
         deliberately **not** one of them: a spent attempt may be retried, and a
         retry must not be blocked by the failed row it replaces.
         """
-        return (cls.PENDING, cls.ORDERING, cls.CHALLENGE_PUBLISHED, cls.VALIDATING)
+        return (
+            cls.PENDING,
+            cls.ORDERING,
+            cls.AWAITING_MANUAL,
+            cls.CHALLENGE_PUBLISHED,
+            cls.VALIDATING,
+        )
 
     @classmethod
     def material_bearing(cls) -> tuple[CertificateGenerationState, ...]:

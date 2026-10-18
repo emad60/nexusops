@@ -264,8 +264,16 @@ def test_pending_cleanup_includes_unresolved_but_requires_a_record() -> None:
 
 
 def test_manual_instructions_are_public_only() -> None:
+    # A realistic TXT value: the persisted instruction is validated before it is
+    # shown, and ``txt-value`` is not a DNS-01 digest.
+    digest = "A" * 43
     document = order.set_order({}, directory_url="d", order_url="o", mode="manual")
-    order.record_challenges(document, (_challenge(wildcard=True),), mode="manual", order_url="o")
+    order.record_challenges(
+        document,
+        (_challenge(wildcard=True, value=digest),),
+        mode="manual",
+        order_url="o",
+    )
 
     instructions = order.manual_instructions(document)
     assert len(instructions) == 1
@@ -275,11 +283,22 @@ def test_manual_instructions_are_public_only() -> None:
         "wildcard",
         "record_name",
         "record_value",
+        "recommended_ttl",
+        # Three different facts, kept apart on purpose: the operator said it is
+        # published, this platform saw it, and the CA accepted it.
         "confirmed",
+        "confirmed_at",
+        "observed",
+        "observed_at",
         "validated",
+        "validated_at",
+        "problem",
     }
     assert instructions[0]["wildcard"] is True
     assert instructions[0]["confirmed"] is False
+    assert instructions[0]["observed"] is False
+    # Nothing in a fresh instruction is a problem, and a documented one is empty.
+    assert instructions[0]["problem"] == ""
 
 
 def test_public_view_is_an_allowlist() -> None:
@@ -309,6 +328,7 @@ def test_public_view_is_an_allowlist() -> None:
         "mode",
         "published",
         "confirmed_at",
+        "observed_at",
         "validated_at",
         "cleanup",
         "error",

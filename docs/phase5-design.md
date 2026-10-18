@@ -1958,7 +1958,95 @@ material endpoint, no `certificate.install`/`.remove` op type, no agent handler 
 activation (5.5), renewal and expiry monitoring (5.6), revocation (5.6), and manual
 challenge publication. Nothing outside the control plane's own database has seen a
 private key, and the certificate material columns are the only place one is stored
-(encrypted under the organization DEK, with `deke_id` beside them).
+(encrypted under the organization DEK, with `deke_id` beside them). Manual challenge
+publication is the one item of that list 5.3.2 has since shipped (§10.9); the rest stand.
+
+### 10.9 Phase 5.3.2 — manual DNS-01 (shipped 2026-10-18)
+
+**Scope.** The workflow for a certificate whose customer publishes the DNS-01 record
+themselves: an explicit publisher mode, a live state in which the attempt stops, the two
+endpoints that hand out the record and accept a confirmation, the observation that decides
+whether a resume is worth dispatching, and the cleanup that is an instruction rather than
+a delete. One migration from `c9d0e1f2a3b4` (`d0e1f2a3b4c5`, single head). **Out of
+scope, deliberately:** any change to the automated flow's order, propagation rule or
+failure vocabulary; delivery (5.4), activation (5.5), renewal, expiry monitoring and
+revocation (5.6).
+
+| Area | What shipped |
+|---|---|
+| Publisher mode | `certificates.dns_mode` (`automated` \| `manual`), CHECK-constrained and **explicit** on `POST /certificates`. Never inferred from a missing credential, because that is also the state of an automated request whose credential has not been stored. `ck_certificates_manual_mode_has_no_provider` refuses the contradictory row (`manual` + a provider); `PATCH` refuses to attach one later, and the service reports both as `CERTIFICATE_MANUAL_WITH_PROVIDER` |
+| Lifecycle | `AWAITING_MANUAL`, a **live pre-issuance** state: the order is open and resumable, so the one-live-generation partial index and the abandoned-attempt recovery both include it, while the material guard's no-material branch accepts it. The attempt stopped **deliberately** (`finish_attempt`), so `next_attempt_at` is NULL and `last_error` is empty — waiting is not failing, and no attempt is spent. The state CHECK, the material guard and the unique index are widened together in one transaction, because a state between "order placed" and "challenge answered" must not exist under only one of them |
+| Manual order | `_place_manual_order` records each challenge (token, key authorization, TXT name/value, wildcard flag) in the order document with `mode: manual` and returns without answering the CA. The CSR that opened the order is used only to name the identifiers and its key is discarded, so a waiting generation stores no material — which is what the material guard requires and what keeps the manual path from persisting a private key before anything is issued. An open, unexpired order is **resumed**, not replaced; an expired or replaced one is re-ordered and the old instructions stop being current |
+| Resumption | `manual_ready` (every current challenge confirmed **and** observed) gates both the dispatch and the attempt. The resume re-observes immediately before answering the CA, so a record removed after the confirmation is caught; only then does the generation move to `CHALLENGE_PUBLISHED`, answer, validate and finalize. A dispatch that arrives while the record is not ready is refused with `CERTIFICATE_AWAITING_MANUAL` without touching the row, so it cannot spend an attempt or place a second order |
+| Observation without a deadline | `dns_propagation.check_once` runs the **same** judging code as the automated wait (`evaluate`, every answering authority must serve every expected value), once, with no polling loop and no worker held — which is what makes it usable from a request. `nameserver_summary` reduces the round to `(address, status, serves_every_expected_value)` per server, so the order document keeps a summary of public DNS rather than a second copy of the zone's TXT values |
+| Orders document | `manual_current`, `manual_entry_problem` (validates the reference, URLs, record name and 43-character DNS-01 digest before an instruction is shown or acted on), `manual_instructions` (public allowlist: record name/value, reference, TTL, three separate timestamps), `confirm_published` (idempotent first stamp), `record_observation`, `observation`, `manual_ready`, `order_expires`/`order_expired`, `cleanup_instructions`, `attempt_unfinished`. `load` returns a **deep copy**: callers edit the document in place and hand it back through `store`, and the ORM's committed JSONB value is the very object it was loaded into — sharing nested challenge dicts would mutate the "before" value too and leave the write invisible to the dirty check |
+| API | `GET /certificates/{id}/challenge` and `POST /certificates/{id}/challenge/confirm` (`certificate.manage`, caller's organization; a foreign id is the same 404 a random uuid gets). The GET is read-only and contacts no DNS; the POST answers `202`, takes an optional `references[]`, and reports the fresh observation, `ready` and `resume_requested` without claiming a verdict. Named refusals: `CERTIFICATE_MANUAL_CHALLENGE_NOT_PENDING`, `CERTIFICATE_NO_GENERATION`, `CERTIFICATE_CONTEXT_INCOMPLETE`, `CERTIFICATE_ORDER_LOST`, `CERTIFICATE_CHALLENGE_NOT_FOUND`, `CERTIFICATE_MANUAL_CHALLENGE_INVALID`, `CERTIFICATE_MANUAL_WITH_PROVIDER`, `CERTIFICATE_DNS_MODE_UNSUPPORTED`. The read models gained `dns_mode` and nothing else; the challenge value appears in no listing, detail, event payload, audit entry or log line |
+| Cleanup | **Never a delete.** The platform created none of these records and holds no provider reference, so `cleanup_instructions` names the exact values to remove and says to keep everything else at the name (apex + wildcard share one name and differ only in value). While waiting or retrying it says to keep them. Manual entries carry `cleanup: not_required`, so the automated cleanup path never runs for them |
+| Sweep and recovery | `nx.sweep_certificates` counts `awaiting_manual` and dispatches nothing for it — a dispatch would only buy the same refusal every tick and a fresh attempt stamp would make a deliberate wait indistinguishable from a lost worker. A **stamped but unfinished** attempt under `AWAITING_MANUAL` is still recovered as lost work, which is why the state is left out of the abandoned-attempt branch only when nothing is stamped |
+| Events and audit | `CERTIFICATE_AWAITING_MANUAL` (waiting; names and count only, never a value) and `CERTIFICATE_CHALLENGE_CONFIRMED` (the operator confirmed and DNS was rechecked; references and judged status only), plus the audit action `certificate.challenge_confirmed`. Both events are informational, not alerts |
+
+#### 10.9.1 Decisions this slice fixed against the alternative
+
+| Decision | Alternative rejected | Why |
+|---|---|---|
+| `dns_mode` is its own validated column, written explicitly by the request (defaulting to `automated`, never inferred) | Infer manual mode from `dns_provider_id IS NULL` | "No credential yet" and "customer publishes" are indistinguishable in that column; inferring would move an automated request into a workflow nobody chose, waiting for a human who was never told |
+| A dedicated `AWAITING_MANUAL` state | Leave the generation in `ORDERING` and let the sweep skip it | `ORDERING` means a worker has an order in flight; reusing it would make a deliberate wait look like a lost worker and the abandoned-attempt recovery would fail it. A state that says what is true is also what the API can report |
+| Confirmation observes DNS; it does not trust the claim | Mark the challenge ready when the operator confirms | The operator says they published it; propagation routinely lags, and trusting the claim would spend an attempt failing. Observing also means the resume is dispatched only when the platform itself saw the value |
+| The resume observes again immediately before answering the CA | Reuse the confirmation's observation | Time passes between them, and a record removed in between would fail the CA's validation for a reason already observable |
+| Cleanup is an instruction | Delete by record name | The platform has no record reference and the name may hold other services' TXT records (SPF, verification); a delete by name could destroy a customer's DNS. `delete_txt` needs the reference the automated path got from `create_txt` |
+| The value leaves only through the challenge endpoints | Include it in the waiting event or the certificate detail | Events are readable by every subscriber and detail is a `certificate.read` grant; publishing the wrong value is a live issuance step, so the exit is `certificate.manage`, one organization, and nowhere else |
+
+#### 10.9.2 Verification
+
+| Module | What it asserts |
+|---|---|
+| `backend/tests/integration/test_certificate_manual_issuance.py` | the whole workflow with a fake CA and a resolver stub: a manual certificate is issued with **no credential and no provider call** (a provider factory that fails the test is injected); the first attempt stops at `AWAITING_MANUAL` with no key, no schedule and no error; the instructions are exactly the CA's challenge values; publish → confirm (`ready`, `resume_requested`, `observed`, not `validated`) → resume reuses the order, answers the CA and issues; cleanup is instructions naming the obsolete value and nothing was deleted; confirming while absent records the confirmation, leaves `ready` false, spends no attempt and places no second order; a repeat confirmation keeps the first timestamp; a tampered instruction is reported as `problem` and refused with `CERTIFICATE_MANUAL_CHALLENGE_INVALID`; the value is in the challenge endpoint and in no listing, event payload or audit entry, and another organization's id is a 404; an interrupted resume (`AWAITING_MANUAL` with a stamped attempt) is recovered as lost work while a merely waiting generation is not |
+| `backend/tests/integration/test_certificate_pebble.py` (`make test-pebble`) | **interoperability for the manual workflow** (added 2026-10-19, §10.9.4): the same isolated Pebble CA and two-view authoritative zone, with a manual certificate that has no credential and a `provider_factory` that raises if constructed. The suite pins the operator's record reaching a real CA: first attempt stops at `AWAITING_MANUAL` with the order open and no material; `GET .../challenge` shows exactly the CA's record name/value and nothing else secret; confirming while absent queues nothing and spends no attempt; publishing at both authorities makes the confirmation `ready` and dispatches **one** resume; the resume finishes the **same** order through Pebble's validation and finalization, and the issued chain is verified against the key generated in that attempt, persisted encrypted under the generation's DEK and marked `ISSUED` only afterwards. Also pinned: a wrong TXT value is observed as absent (and a dispatch that arrives anyway is refused), one stale authority keeps the CA unaware until both agree, an interrupted resume recovers the stamped attempt without placing a second order, cleanup never deletes the customer's record and returns removal instructions after issuance, and no key, chain, challenge value or DNS credential appears in the API, events, audit rows or logs |
+| `backend/tests/unit/test_certificate_order.py` | the manual instruction allowlist (three separate timestamps, `problem`), `manual_ready`, `confirm_published` idempotence, the digest/name/reference validation, `order_expires`/`order_expired`, and `cleanup_instructions` for the waiting and finished cases |
+| `backend/tests/unit/test_certificate_lifecycle.py` | `dns_mode` on the schema and the lifecycle's treatment of `AWAITING_MANUAL` as live and not material-bearing; the request body's explicit default |
+| `backend/tests/unit/test_acme_library.py` | the adapter contracts a fake session cannot check: the finalization deadline is naive, statuses are normalised, and **finalization carries this attempt's CSR** — the regression that the manual resume exposed (§10.9.4) |
+| `backend/tests/unit/test_dns_propagation.py` | `check_once` runs exactly one round, uses the same agreement rule as the wait, and returns the same result shape (including per-server answers) |
+| `backend/tests/integration/test_migration_drift.py` · `test_migration_phase532.py` | the state CHECK, the material guard and the `dns_mode` pair derive from the vocabulary (a manual row naming a provider is refused by the database); the one-live index names `AWAITING_MANUAL`, an awaiting generation needs no material but must name the directory it ordered at, and a second live generation is refused; existing rows are backfilled to `automated`; and the downgrade refuses while a certificate is manual or a generation is awaiting, leaving the data intact |
+| `test_certificates.py` | the read model gained `dns_mode` and nothing else; a manual request naming a credential is refused at create and at `PATCH`; no response model carries material or a ciphertext |
+
+#### 10.9.3 Acceptance boundaries
+
+The workflow's claim is **the platform still decides**: it places the order, observes
+authoritative DNS itself, answers the CA only from its own observation, and verifies the
+issued chain against the attempt's key and identifiers exactly as the automated path does.
+What manual mode changes is only who writes the TXT record. The challenge value's single
+exit is the authenticated, organization-scoped endpoint, and cleanup never touches the
+customer's zone. Still design, unchanged: delivery (5.4), activation (5.5), renewal and
+expiry monitoring (5.6), revocation (5.6), and the whole HTTP-01 fallback.
+
+#### 10.9.4 Verified against a real CA (2026-10-19)
+
+The 5.3.2 closeout said plainly that the Pebble suite had not been run. It has now been
+extended and run, and the gap it was hiding was a real defect rather than a missing test.
+
+**The defect.** `_LibrarySession._finalize_order` finalized the order resource the session
+held. That resource is fine on the fresh-order path (the client fills in the CSR it was
+handed), but a **resumed** manual order is re-read from the CA by URL and therefore has no
+CSR at all — and the key/CSR for a manual order is generated *after* validation, in the
+resume attempt. The library parses the resource's empty CSR and raises `ValueError` before
+the CA is asked, so every manual resume that reached finalization failed with
+`ACME_REQUEST_FAILED` while the fake CA (which accepts any CSR it is given) reported
+success. Finalization now attaches this attempt's CSR to the resource; the unit test
+`test_finalize_order_sends_this_attempts_csr` pins it without a CA, and the Pebble test
+proves the path end to end.
+
+**What a green `make test-pebble` says (8 passed).** The four pre-existing automated tests
+are unchanged and still pass. The four manual tests are the claims in §10.9.2's Pebble
+row; they run against the same isolated stack (Pebble plus the two authoritative views),
+the production client adapter, and the real `issue_generation()`. No production CA endpoint
+and no customer DNS credential is involved: `AcmeDirectory.PEBBLE` is a fixed local URL, and
+the manual path is exercised with `provider_factory` raising on any call.
+
+**What it does not say.** The Pebble stack is Linux-only (host networking on
+`127.0.0.2`/`127.0.0.3`) and is not part of `make test`. Manual-mode *terminal failure*
+cleanup instructions (as opposed to the post-issuance case the Pebble test asserts) remain
+covered only by the fake-CA suite, which owns the failure vocabulary a real CA cannot be
+made to produce on demand.
 
 ---
 

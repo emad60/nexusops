@@ -84,6 +84,9 @@ CERTIFICATE_FIELDS = {
     # Which credential may publish this certificate's challenges (5.2.2), and a
     # *reference* — never the credential itself.
     "dns_provider_id",
+    # Who publishes them (5.3.2). A workflow fact, not a secret: an operator reads
+    # it to know whether the next step is theirs.
+    "dns_mode",
     "status_detail",
 }
 GENERATION_FIELDS = {

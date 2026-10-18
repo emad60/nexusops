@@ -51,7 +51,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -72,6 +72,7 @@ from app.models import Certificate, CertificateGeneration, DnsProvider, Domain
 from app.models.enums import (
     AcmeDirectory,
     ActorType,
+    CertificateDnsMode,
     CertificateGenerationState,
     DnsProviderKind,
     DomainStatus,
@@ -160,6 +161,16 @@ CODE_NOT_DUE = "CERTIFICATE_NOT_DUE"
 CODE_WORKER_LOST = "CERTIFICATE_WORKER_LOST"
 #: No further attempt is possible for this generation.
 CODE_ATTEMPTS_EXHAUSTED = "CERTIFICATE_ATTEMPTS_EXHAUSTED"
+#: The attempt placed a manual order and stopped: an operator has to publish the
+#: DNS-01 record before anything else may happen. Not a failure and not an
+#: issuance — the third outcome of a dispatch (:data:`IssuanceAttempt.waiting`).
+CODE_AWAITING_MANUAL = "CERTIFICATE_AWAITING_MANUAL"
+#: A manual confirmation arrived for a certificate that is not waiting for one.
+CODE_MANUAL_NOT_PENDING = "CERTIFICATE_MANUAL_CHALLENGE_NOT_PENDING"
+#: A persisted manual challenge cannot be handed to an operator or acted on.
+CODE_MANUAL_CHALLENGE_INVALID = "CERTIFICATE_MANUAL_CHALLENGE_INVALID"
+#: The CA's order no longer carries the challenges this platform recorded.
+CODE_ORDER_SUPERSEDED = "CERTIFICATE_ORDER_SUPERSEDED"
 
 #: ``last_error`` is a bounded column; the failure text respects it here.
 _MAX_ERROR_TEXT = 500
@@ -190,6 +201,10 @@ class IssuanceAttempt:
     retryable: bool = False
     terminal: bool = False
     next_attempt_at: datetime | None = None
+    #: The attempt stopped because a human has to act (a manual DNS-01 record has
+    #: to be published). Distinct from ``ok`` and from every failure: nothing has
+    #: gone wrong, and nothing will happen until an operator confirms.
+    waiting: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -239,11 +254,57 @@ class _AttemptFailure(Exception):
         return text[:_MAX_ERROR_TEXT]
 
 
+@dataclass(frozen=True, slots=True)
+class ManualChallengeStatus:
+    """What one manual DNS-01 certificate currently needs from an operator.
+
+    ``document`` is the carrier because the *shape* of an instruction belongs to
+    :mod:`app.services.certificate_order`, and the API serialises it through that
+    module's helpers rather than this one's. It holds only public ACME data — the
+    record name and the TXT value that has to be published — and it is returned
+    exactly once per request, only from the two org-scoped challenge endpoints.
+    """
+
+    generation_id: Any
+    generation: int
+    state: CertificateGenerationState
+    certificate_id: Any
+    document: dict[str, Any]
+    #: The identifiers the certificate requests — what the challenge set authorizes,
+    #: echoed from the request rather than from the CA's answer.
+    identifiers: tuple[str, ...] = ()
+    #: Whether this generation is finished with its records: issued, or failed for
+    #: good. Only then are the customer's TXT values obsolete, and only then may the
+    #: operator be told they can be removed.
+    finished: bool = False
+    #: The last authoritative observation recorded for this order, if any.
+    observation: dict[str, Any] | None = None
+    #: Whether a resume attempt was handed to the worker by this call.
+    resume_requested: bool = False
+
+
 # --- Small helpers -------------------------------------------------------------
 
 
 def _utcnow() -> datetime:
     return datetime.now(UTC)
+
+
+def _dns_mode(certificate: Certificate) -> CertificateDnsMode | None:
+    """The certificate's recorded publisher, or ``None`` when it names none.
+
+    ``None`` rather than a default: a stored value this version cannot read must
+    never be treated as either mode. Guessing ``automated`` would try to publish a
+    customer's record through a credential that may not exist; guessing ``manual``
+    would hand an operator instructions for a certificate the platform was supposed
+    to publish itself.
+    """
+    raw = getattr(certificate, "dns_mode", None)
+    text = str(getattr(raw, "value", raw) or "")
+    for mode in CertificateDnsMode:
+        if mode.value == text:
+            return mode
+    return None
 
 
 def _actor(ctx: AuthContext | None) -> tuple[uuid.UUID | None, ActorType]:
@@ -476,13 +537,18 @@ async def _resolve_context(
     certificate: Certificate,
     *,
     settings: Settings,
-) -> tuple[Domain, DnsProvider, dict[str, str], tuple[str, ...], AcmeDirectory]:
+) -> tuple[Domain, DnsProvider | None, dict[str, str], tuple[str, ...], AcmeDirectory]:
     """Everything an attempt needs before it may touch a CA or a customer's zone.
 
     Resolved *inside* the attempt (never before it is stamped), because a certificate
     whose credential was removed, whose domain lost its proof, or whose directory
     moved is an attempt that failed — and the row has to say so rather than look like
     a dispatch that never happened.
+
+    The DNS credential is resolved **only for automated certificates**. A manual one
+    publishes its challenges through the customer, so it needs no credential and is
+    refused if it names one: the row would describe two publishers, and picking one
+    here would hide that contradiction instead of reporting it.
     """
     domain = await db.get(Domain, certificate.domain_id)
     if domain is None:
@@ -502,18 +568,36 @@ async def _resolve_context(
     # wording is corrected in phase5-design.md §10.8 rather than guessed at here.
     # A certificate with none is a request that cannot be attempted yet — not a row
     # that quietly signs with a credential nobody selected.
-    provider_row: DnsProvider | None = None
-    if certificate.dns_provider_id is not None:
-        provider_row = await db.get(DnsProvider, certificate.dns_provider_id)
-    if provider_row is None:
+    mode = _dns_mode(certificate)
+    if mode is None:
         raise _AttemptFailure(
-            "this certificate has no DNS credential: attach one before it can be issued",
-            code=CODE_DNS_CREDENTIAL_MISSING,
+            "this certificate records no DNS publishing mode this version understands",
+            code=CODE_CONTEXT_INCOMPLETE,
         )
-
-    # Decrypted once, for this attempt, and passed to the provider calls that need
-    # it — nothing stores, caches or logs it.
-    credentials = await credentials_for_use(db, provider_row)
+    provider_row: DnsProvider | None = None
+    credentials: dict[str, str] = {}
+    if mode is CertificateDnsMode.MANUAL:
+        # The customer publishes; nothing here may reach into their zone. A manual
+        # row that still names a credential is refused rather than resolved-and-
+        # ignored, because a cleared override and a contradictory row are different
+        # facts and only one of them is worth attempting.
+        if certificate.dns_provider_id is not None:
+            raise _AttemptFailure(
+                "this certificate is manual but names a DNS credential; the row describes "
+                "two publishers and neither may be chosen for it",
+                code=CODE_CONTEXT_INCOMPLETE,
+            )
+    else:
+        if certificate.dns_provider_id is not None:
+            provider_row = await db.get(DnsProvider, certificate.dns_provider_id)
+        if provider_row is None:
+            raise _AttemptFailure(
+                "this certificate has no DNS credential: attach one before it can be issued",
+                code=CODE_DNS_CREDENTIAL_MISSING,
+            )
+        # Decrypted once, for this attempt, and passed to the provider calls that
+        # need it — nothing stores, caches or logs it.
+        credentials = await credentials_for_use(db, provider_row)
     identifiers = _identifiers(certificate)
 
     selected = directory_for_settings(settings)
@@ -584,6 +668,9 @@ class _Attempt:
         self.identifiers: tuple[str, ...] = ()
         self.directory: AcmeDirectory | None = None
         self._api_cache: dict[str, DnsRecordProvider] = {}
+        #: Set when the attempt stopped because an operator has to publish a record.
+        #: :func:`issue_generation` turns it into a waiting outcome, not a failure.
+        self.waiting = False
 
     # -- durability -----------------------------------------------------------
 
@@ -616,15 +703,25 @@ class _Attempt:
         self.certificate.status = certificate_lifecycle.certificate_status_for(target)
 
     async def begin(self) -> None:
-        """Enter ``ORDERING`` and stamp the attempt as running, durably.
+        """Stamp the attempt as running, durably, and enter ``ORDERING``.
 
         The stamp is what lets a second dispatch tell "another worker is running
         this" from "the worker that ran this is gone", so it has to be visible to
         another transaction — which is why it is the first thing checkpointed. The
         previous attempt's ``last_error`` is cleared here rather than kept: while an
         attempt is running, the newest fact about the generation is that one is.
+
+        A generation already in ``AWAITING_MANUAL`` stays there. Its attempt is a
+        *resume of the order it is waiting on*, and moving the row to ``ORDERING``
+        for the duration would say an order is being placed when none is — and a
+        worker killed in that window would look like a lost order rather than a
+        waiting one. The attempt stamp is what tells the two apart.
         """
-        self._transition(CertificateGenerationState.ORDERING)
+        if (
+            certificate_lifecycle.coerce_state(self.generation.state)
+            is not CertificateGenerationState.AWAITING_MANUAL
+        ):
+            self._transition(CertificateGenerationState.ORDERING)
         self.generation.attempt_count = self.attempt
         self.generation.next_attempt_at = None
         self.generation.last_error = ""
@@ -635,13 +732,22 @@ class _Attempt:
 
     # -- the flow --------------------------------------------------------------
 
-    async def run(self) -> _Material:
-        """Drive one attempt to material. Raises :class:`_AttemptFailure` to fail."""
+    async def run(self) -> _Material | None:
+        """Drive one attempt to material — or to the point where a human must act.
+
+        ``None`` with :attr:`waiting` set is the manual DNS-01 stop: the order is
+        placed, the instructions are stored, and the attempt ends *deliberately*
+        because publishing the record is the customer's act (see :meth:`_run_manual`).
+        Everything else that returns ``None`` without ``waiting`` is a bug the
+        caller records as a failure.
+        """
         # (1) Anything an earlier attempt of this generation left behind, deleted
         #     before this attempt publishes anything at the same names. It does not
         #     need the context below, and it must run even when the context turns
         #     out to be unusable — an orphaned record is owed regardless.
         await self.cleanup()
+        if self._is_manual():
+            return await self._run_manual()
         certificate_order.reset_challenges(self.document)
         self._store()
 
@@ -725,6 +831,19 @@ class _Attempt:
     async def _create_order(self, session: AcmeSession, csr_pem: bytes) -> AcmeOrder:
         """Place the order, and record it before anything is published for it."""
         order = await session.create_order(csr_pem=csr_pem, identifiers=self.identifiers)
+        return await self._record_order(session, order, mode=certificate_order.MODE_AUTOMATED)
+
+    async def _record_order(
+        self, session: AcmeSession, order: AcmeOrder, *, mode: str
+    ) -> AcmeOrder:
+        """Check the CA's answer, then store the order and its challenges, durably.
+
+        Shared by both publishing modes: whether the record is written by this
+        platform or by the customer, an order for a different identifier set or an
+        order with no dns-01 challenge is refused before anything is recorded — and
+        what gets recorded has to be the *same* shape either way, so a resumed
+        attempt reads one document format.
+        """
         requested = {name.lower() for name in self.identifiers}
         accepted = {name.lower() for name in order.identifiers}
         if accepted and accepted != requested:
@@ -748,15 +867,16 @@ class _Attempt:
             self.document,
             directory_url=directory_url,
             order_url=order.order_url,
-            mode=certificate_order.MODE_AUTOMATED,
+            mode=mode,
             expires_at=order.expires_at,
+            # For an automated challenge this is the TTL of the record this
+            # platform creates. For a manual one it is only a *recommendation*
+            # shown to the operator: the record is theirs, and the platform neither
+            # sets nor changes it.
             txt_ttl=self.settings.certificate_dns_ttl_seconds,
         )
         certificate_order.record_challenges(
-            self.document,
-            order.challenges,
-            mode=certificate_order.MODE_AUTOMATED,
-            order_url=order.order_url,
+            self.document, order.challenges, mode=mode, order_url=order.order_url
         )
         self._store()
         if not certificate_order.current_entries(self.document):
@@ -765,6 +885,214 @@ class _Attempt:
             )
         await self._checkpoint()
         return order
+
+    # -- manual DNS-01 ---------------------------------------------------------
+
+    def _is_manual(self) -> bool:
+        """Whether the customer publishes this certificate's challenges.
+
+        Read from the certificate on every attempt rather than from the document:
+        the document records who published a *challenge* (and is what cleanup must
+        obey), while the certificate records who publishes this certificate's
+        challenges *now*, which is the question the flow branches on.
+        """
+        return _dns_mode(self.certificate) is CertificateDnsMode.MANUAL
+
+    async def _run_manual(self) -> _Material | None:
+        """Place an order and stop, or finish an order the operator has answered.
+
+        The manual path is one attempt split in two by a human act, and the split is
+        forced rather than chosen: the key pair that will be certified exists only in
+        the attempt that generated it, and the material guard forbids storing it for
+        a generation nothing has issued yet. So the attempt that places the order
+        cannot be the attempt that finalizes it, and the order — pure, public ACME
+        data — is the only thing carried between them (:meth:`_resume_manual_order`).
+
+        Nothing here ever writes to, or deletes from, the customer's zone: the record
+        is theirs, published with their own tooling, and the platform's only role is
+        to say (truthfully) when the authoritative servers agree it is there.
+        """
+        (
+            self.domain,
+            self.provider,
+            self.credentials,
+            self.identifiers,
+            self.directory,
+        ) = await _resolve_context(
+            self.db, self.generation, self.certificate, settings=self.settings
+        )
+        directory = self.directory
+        assert directory is not None  # set by _resolve_context
+
+        account = await acme_account_service.account_for(
+            self.db, None, org_id=self.generation.org_id, directory=directory
+        )
+        session = self.session_factory(
+            directory=directory,
+            account_key_pem=await acme_account_service.account_key(self.db, account),
+            account_url=account.account_url,
+        )
+        key: ec.EllipticCurvePrivateKey | None = None
+        key_pem = ""
+        chain: IssuedChain | None = None
+        async with session as acme:
+            await acme_account_service.mark_used(self.db, account)
+            if account.account_url is None:
+                account_url = await acme.register_account(
+                    contact_email=self.settings.acme_account_email or None
+                )
+                await acme_account_service.record_registration(
+                    self.db, account, account_url=account_url
+                )
+            order = await self._resume_manual_order(acme)
+            if order is None:
+                # Fresh instructions were just written. Stop, deliberately.
+                return await self._await_operator()
+            if not certificate_order.manual_ready(self.document):
+                # The order is open, but this attempt has nothing it may do: the
+                # confirmation is incomplete (a retry that arrived after a failed
+                # observation, or a dispatch that raced the operator). Re-ordering
+                # here would throw away a record the customer already published.
+                return await self._await_operator()
+            # The authoritative observation, and the only thing that lets the CA be
+            # told this challenge is ready. ``manual_ready`` said an observation had
+            # passed at some point; this is the one immediately before the answer.
+            await self._confirm_propagation()
+            self._transition(CertificateGenerationState.CHALLENGE_PUBLISHED)
+            self._store()
+            await self._checkpoint()
+
+            await self._answer(acme)
+            self._transition(CertificateGenerationState.VALIDATING)
+            self._store()
+            await self._checkpoint()
+            await self._await_validation(acme)
+
+            # The key is generated *here*, after validation: the CSR that opened the
+            # order was a throwaway used only to name the identifiers, and the key
+            # that will sign for the certificate has no reason to exist before the
+            # order is ready to be finalized.
+            key, key_pem, csr_pem = _generate_key_and_csr(self.identifiers)
+            chain = await acme.finalize_order(
+                csr_pem=csr_pem,
+                timeout_seconds=float(self.settings.certificate_finalization_timeout_seconds),
+            )
+
+        if chain is None or key is None:  # pragma: no cover - the session finalizes or raises
+            raise _AttemptFailure(
+                "the certificate authority returned no chain", code=CODE_MATERIAL_MISMATCH
+            )
+        material = await self._store_material(chain.fullchain_pem, key=key, key_pem=key_pem)
+        await self._checkpoint()
+        # Deliberately *no* provider cleanup: every record of this order was created
+        # by the customer, and the order document says so (``cleanup`` is
+        # ``not_required`` for a manual entry). The operator is given removal
+        # instructions instead — see ``certificate_order.cleanup_instructions``.
+        return material
+
+    async def _await_operator(self) -> _Material | None:
+        """End the attempt waiting for a human, holding no worker and no CA session.
+
+        ``AWAITING_MANUAL`` is a live state: the order is open and the generation is
+        resumable. It is also the state that makes ``next_attempt_at`` irrelevant —
+        nothing is scheduled, because the thing that has to happen next is not the
+        platform's to do.
+        """
+        if (
+            certificate_lifecycle.coerce_state(self.generation.state)
+            is not CertificateGenerationState.AWAITING_MANUAL
+        ):
+            self._transition(CertificateGenerationState.AWAITING_MANUAL)
+        certificate_order.finish_attempt(self.document)
+        self.generation.next_attempt_at = None
+        self.generation.last_error = ""
+        self.certificate.last_error = ""
+        self.certificate.status = certificate_lifecycle.certificate_status_for(
+            CertificateGenerationState.AWAITING_MANUAL
+        )
+        self._store()
+        await self._checkpoint()
+        self.waiting = True
+        return None
+
+    async def _place_manual_order(self, acme: AcmeSession) -> AcmeOrder:
+        """Place the order the operator will publish for, and record its challenges.
+
+        The CSR sent to the CA exists only to name the identifiers: RFC 8555 derives
+        an order's identifier list from it and this client offers no other way to
+        ask. Its key is discarded immediately, so an order waiting for an operator
+        stores no material at all — which is what the generation's material guard
+        requires, and what keeps the manual path from becoming a way to persist a
+        private key before anything has been issued.
+        """
+        if certificate_order.current_entries(self.document):
+            # A replaced or expired order's instructions can no longer be answered.
+            # Nothing is owed for them: this platform never created those records.
+            certificate_order.reset_challenges(self.document)
+            self._store()
+        _discarded_key, _discarded_pem, csr_pem = _generate_key_and_csr(self.identifiers)
+        order = await acme.create_order(csr_pem=csr_pem, identifiers=self.identifiers)
+        await self._record_order(acme, order, mode=certificate_order.MODE_MANUAL)
+        for entry in certificate_order.manual_current(self.document):
+            problem = certificate_order.manual_entry_problem(entry)
+            if problem:
+                raise _AttemptFailure(
+                    "the certificate authority returned a challenge this workflow cannot "
+                    f"ask an operator to publish: {problem}",
+                    code=CODE_MANUAL_CHALLENGE_INVALID,
+                )
+        return order
+
+    async def _resume_manual_order(self, acme: AcmeSession) -> AcmeOrder | None:
+        """The order this generation is waiting on, if it can still be finished.
+
+        ``None`` means a new order was placed (and its instructions are now the ones
+        in the document). An order whose challenge set differs from the recorded one
+        is re-placed rather than resumed: the operator answered a specific question,
+        and answering a different one would report success for a record they never
+        published.
+
+        Only an order the CA *refuses as unusable* is replaced quietly. A transport
+        failure is not: it propagates, the attempt is recorded as failed, and the
+        retry resumes the same order from the same document.
+        """
+        stored = certificate_order.manual_current(self.document)
+        order_url = str(self.document.get("order_url") or "")
+        if (
+            not stored
+            or not order_url
+            or certificate_order.order_expired(self.document, now=self.now)
+            or any(certificate_order.manual_entry_problem(entry) for entry in stored)
+        ):
+            await self._place_manual_order(acme)
+            return None
+        try:
+            resumed = await acme.resume_order(order_url=order_url)
+        except AcmeError as exc:
+            if exc.code != "ACME_ORDER_UNUSABLE":
+                raise
+            await self._place_manual_order(acme)
+            return None
+
+        expected = {name.lower() for name in self.identifiers}
+        if resumed.identifiers and {name.lower() for name in resumed.identifiers} != expected:
+            raise _AttemptFailure(
+                "the certificate authority's order no longer covers this certificate's identifiers",
+                code=CODE_ORDER_MISMATCH,
+            )
+        recorded = {str(entry.get("challenge_url") or ""): entry for entry in stored}
+        current = {challenge.challenge_url: challenge for challenge in resumed.challenges}
+        if set(recorded) != set(current) or any(
+            str(recorded[url].get("record_value") or "") != current[url].record_value
+            for url in recorded
+        ):
+            certificate_order.reset_challenges(self.document)
+            await self._place_manual_order(acme)
+            return None
+        if resumed.expires_at is not None:
+            self.document["order_expires_at"] = resumed.expires_at.isoformat()
+            self._store()
+        return resumed
 
     async def _publish(self) -> None:
         """Create one TXT record per current-order challenge, durably referenced.
@@ -876,10 +1204,25 @@ class _Attempt:
             ref = str(entry.get("ref") or "")
             if str(entry.get("record_name") or "") in unsatisfied:
                 certificate_order.update_challenge(self.document, ref, error=result.detail)
+            elif entry.get("mode") == certificate_order.MODE_MANUAL:
+                # ``observed_at`` only. The operator's confirmation is a different
+                # fact and is written only by the confirmation endpoint; deriving it
+                # from our own observation would erase the distinction the design
+                # rests on (§5.3) and make a retry look like a fresh request.
+                certificate_order.update_challenge(
+                    self.document, ref, observed_at=certificate_order.now_iso(), error=""
+                )
             elif not entry.get("confirmed_at"):
                 certificate_order.update_challenge(
                     self.document, ref, confirmed_at=certificate_order.now_iso()
                 )
+        certificate_order.record_observation(
+            self.document,
+            status=result.status,
+            detail=result.detail,
+            attempts=result.attempts,
+            nameservers=dns_propagation.nameserver_summary(result),
+        )
         self._store()
         if result.ok:
             return
@@ -1309,7 +1652,16 @@ async def issue_generation(
                 code=CODE_ATTEMPT_IN_FLIGHT,
                 message="another worker is running an attempt for this generation",
             )
-        if state is not CertificateGenerationState.PENDING:
+        if state is not CertificateGenerationState.PENDING and (
+            # Everything except the manual wait: a live state with no running
+            # attempt is a worker that stopped holding it.
+            state is not CertificateGenerationState.AWAITING_MANUAL
+            # The manual wait is the exception, and only when nothing is stamped:
+            # its attempt ended deliberately (``finish_attempt``) because the next
+            # move is the operator's. A *stamped* attempt under it is a resume whose
+            # worker died, which is exactly the loss this branch exists to recover.
+            or certificate_order.attempt_unfinished(document)
+        ):
             # A live state with no running attempt: the worker that entered it
             # stopped. The attempt it began is already counted, so this is a failure
             # to record, and the order it left is replaced by the next attempt's.
@@ -1329,6 +1681,27 @@ async def issue_generation(
                     ),
                     terminal=True,
                 )
+
+    if state is CertificateGenerationState.AWAITING_MANUAL and not certificate_order.manual_ready(
+        document
+    ):
+        # The order is open and nothing is due: the record has not been confirmed as
+        # published (or has not been *seen* published) yet. An attempt here would
+        # wait out a whole propagation deadline and then spend one of five attempts
+        # failing, for a record the operator is still about to create — so the
+        # dispatch is refused without touching the row.
+        return IssuanceAttempt(
+            generation_id=generation.id,
+            ok=False,
+            state=state,
+            attempt=generation.attempt_count,
+            code=CODE_AWAITING_MANUAL,
+            message=(
+                "this generation is waiting for an operator to publish its dns-01 challenge "
+                "record; nothing is attempted until it is confirmed and observed"
+            ),
+            waiting=True,
+        )
 
     if generation.next_attempt_at is not None and generation.next_attempt_at > now:
         return IssuanceAttempt(
@@ -1380,6 +1753,26 @@ async def issue_generation(
             retryable=True,
         )
 
+    if material is None and runner.waiting:
+        # The manual stop: the order is placed and the instructions are durable, so
+        # this is an outcome with information for an operator rather than a failure.
+        # Nothing is scheduled — the next move is theirs.
+        await _publish_awaiting_manual(
+            db, certificate, generation, attempt=runner.attempt, document=runner.document
+        )
+        return IssuanceAttempt(
+            generation_id=generation.id,
+            ok=False,
+            state=CertificateGenerationState.AWAITING_MANUAL,
+            attempt=runner.attempt,
+            code=CODE_AWAITING_MANUAL,
+            message=(
+                "the order is placed and waiting for its dns-01 challenge record to be "
+                "published and confirmed"
+            ),
+            waiting=True,
+        )
+
     if failure is not None or material is None:
         failure = failure or _AttemptFailure(
             "the attempt produced no result", code=CODE_ATTEMPT_ERROR, retryable=True
@@ -1419,6 +1812,225 @@ async def issue_generation(
         state=CertificateGenerationState.ISSUED,
         attempt=runner.attempt,
         message=f"issued from the {directory.value} directory",
+    )
+
+
+async def _manual_state(
+    db: AsyncSession, certificate: Certificate
+) -> tuple[CertificateGeneration, CertificateGenerationState, dict[str, Any]]:
+    """The generation whose manual challenge this certificate is working on.
+
+    Three refusals, each saying a different thing: the certificate's challenges are
+    published automatically (there is nothing for an operator to do), it has no
+    generation, or its generation records no manual challenge. Answering any of them
+    with a challenge value would be handing out somebody else's instruction — or an
+    instruction for an order that no longer exists.
+    """
+    if _dns_mode(certificate) is not CertificateDnsMode.MANUAL:
+        raise Conflict(
+            "This certificate's dns-01 challenges are published automatically; there is no "
+            "manual challenge to act on.",
+            code=CODE_MANUAL_NOT_PENDING,
+        )
+    generation = await certificate_service.latest_generation(db, certificate.id)
+    if generation is None:
+        raise Conflict(
+            "This certificate has no issuance attempt to act on.",
+            code="CERTIFICATE_NO_GENERATION",
+        )
+    state = certificate_lifecycle.coerce_state(generation.state)
+    if state is None:
+        raise Conflict(
+            "This certificate's generation carries a state this version does not know.",
+            code=CODE_CONTEXT_INCOMPLETE,
+        )
+    document = certificate_order.load(generation)
+    if not certificate_order.manual_current(document):
+        raise Conflict(
+            "No manual dns-01 challenge is recorded for this certificate's current order.",
+            code=CODE_ORDER_LOST,
+        )
+    return generation, state, document
+
+
+async def manual_challenge(db: AsyncSession, certificate: Certificate) -> ManualChallengeStatus:
+    """What this certificate's manual challenge needs from an operator. **Read-only.**
+
+    No DNS is contacted and nothing is written: this is the persisted instruction and
+    the last observation, so a dashboard can render the exact record to publish and
+    say truthfully how the last check went. A fresh check is what the confirmation
+    call does.
+    """
+    generation, state, document = await _manual_state(db, certificate)
+    return ManualChallengeStatus(
+        generation_id=generation.id,
+        generation=generation.generation,
+        state=state,
+        certificate_id=certificate.id,
+        document=document,
+        identifiers=_identifiers(certificate),
+        # "Finished with its records" is the issuance *or* a generation that will
+        # not be attempted again: only then is the customer's value obsolete.
+        finished=state is CertificateGenerationState.ISSUED
+        or certificate_lifecycle.is_terminal(state, generation.attempt_count),
+        observation=certificate_order.observation(document),
+    )
+
+
+async def confirm_manual_publication(
+    db: AsyncSession,
+    certificate: Certificate,
+    ctx: AuthContext | None = None,
+    *,
+    refs: Sequence[str] | None = None,
+    request: Request | None = None,
+    observer: dns_propagation.Observer | None = None,
+) -> ManualChallengeStatus:
+    """Record an operator's confirmation and **recheck authoritative DNS once**.
+
+    The confirmation is a request to look, and this is the looking: one bounded round
+    against the authoritative servers, judged by the same policy the automated path
+    uses (:func:`app.services.dns_propagation.check_once`). It is deliberately not a
+    full attempt — nothing is ordered, nothing is answered and no attempt is spent —
+    because the ordinary case is an operator pressing the button seconds after
+    publishing, before the zone has caught up.
+
+    Two things this cannot do, and neither is negotiable:
+
+    * it never marks the challenge validated or the certificate issued — the CA's
+      authorization is the only verdict on that;
+    * it never skips the observation. Even when the round passes, the resume attempt
+      observes again immediately before it answers the CA, so a record removed in
+      between is caught rather than assumed.
+
+    A resume attempt is dispatched only when the round passed *and* every manual
+    challenge of the order is confirmed and observed. Repeated calls are idempotent:
+    the second confirmation of a challenge keeps its first timestamp, and the
+    observation is simply run again.
+    """
+    generation, state, document = await _manual_state(db, certificate)
+    if state is not CertificateGenerationState.AWAITING_MANUAL:
+        raise Conflict(
+            f"This certificate is not waiting for a manual challenge (state {state.value}). "
+            "Confirmation applies only while issuance is waiting for the record to be "
+            "published.",
+            code=CODE_MANUAL_NOT_PENDING,
+        )
+
+    entries = certificate_order.manual_current(document)
+    by_ref = {str(entry.get("ref") or ""): entry for entry in entries}
+    if refs:
+        unknown = [ref for ref in refs if ref not in by_ref]
+        if unknown:
+            raise Conflict(
+                "This certificate has no challenge with that reference.",
+                code="CERTIFICATE_CHALLENGE_NOT_FOUND",
+            )
+        targets = [by_ref[ref] for ref in refs]
+    else:
+        # No refs means "everything I have not confirmed yet"; once everything is
+        # confirmed it means "check again", which is what a retry of the observation
+        # is, and must not be a 409.
+        targets = [entry for entry in entries if not entry.get("confirmed_at")] or entries
+
+    for entry in targets:
+        problem = certificate_order.manual_entry_problem(entry)
+        if problem:
+            raise Conflict(
+                f"The recorded challenge cannot be acted on: {problem}. Request a new "
+                "certificate instead.",
+                code=CODE_MANUAL_CHALLENGE_INVALID,
+            )
+
+    just_confirmed: list[str] = []
+    for entry in targets:
+        ref = str(entry.get("ref") or "")
+        _confirmed, changed = certificate_order.confirm_published(document, ref)
+        if changed:
+            just_confirmed.append(ref)
+
+    result = await asyncio.to_thread(
+        dns_propagation.check_once, _expectations(document), observer=observer
+    )
+    certificate_order.record_observation(
+        document,
+        status=result.status,
+        detail=result.detail,
+        attempts=result.attempts,
+        nameservers=dns_propagation.nameserver_summary(result),
+    )
+    if result.ok:
+        # The order's whole expectation set passed, so every challenge of it was
+        # seen: this is the observation ``manual_ready`` asks for, recorded once for
+        # the order rather than guessed per challenge.
+        stamp = certificate_order.now_iso()
+        for entry in entries:
+            certificate_order.update_challenge(
+                document, str(entry.get("ref") or ""), observed_at=stamp, error=""
+            )
+    certificate_order.store(generation, document)
+    await db.flush()
+
+    resume_requested = bool(result.ok and certificate_order.manual_ready(document))
+    actor_id, actor_type = _actor(ctx)
+    await event_bus.publish(
+        db,
+        type="CERTIFICATE_CHALLENGE_CONFIRMED",
+        message=(
+            f"The dns-01 challenge for {certificate.primary_cn} was confirmed and rechecked "
+            f"({result.status})"
+        ),
+        level=EventLevel.INFO,
+        actor_id=actor_id,
+        actor_type=actor_type,
+        resource_type="certificate",
+        resource_id=str(certificate.id),
+        data={
+            "primary_cn": certificate.primary_cn,
+            "generation": generation.generation,
+            # References and the judged status only: the record value is not an
+            # event field, and neither is any per-server answer beyond a count.
+            "references": just_confirmed,
+            "propagation_status": result.status,
+            "nameservers": len(result.nameserver_answers),
+            "resume_requested": resume_requested,
+        },
+        org_id=generation.org_id,
+    )
+    await audit_service.record(
+        db,
+        ctx,
+        action="certificate.challenge_confirmed",
+        resource_type="certificate",
+        resource_id=certificate.id,
+        metadata={
+            "primary_cn": certificate.primary_cn,
+            "generation": generation.generation,
+            "references": just_confirmed,
+            "propagation_status": result.status,
+        },
+        org_id=generation.org_id,
+        request=request,
+    )
+    log.info(
+        "certificate_manual_challenge_confirmed",
+        certificate=str(certificate.id),
+        generation=generation.generation,
+        propagation=result.status,
+        references=len(just_confirmed),
+        resume=resume_requested,
+    )
+    if resume_requested:
+        enqueue_generation(db, generation.id)
+    return ManualChallengeStatus(
+        generation_id=generation.id,
+        generation=generation.generation,
+        state=CertificateGenerationState.AWAITING_MANUAL,
+        certificate_id=certificate.id,
+        document=document,
+        identifiers=_identifiers(certificate),
+        observation=certificate_order.observation(document),
+        resume_requested=resume_requested,
     )
 
 
@@ -1639,6 +2251,52 @@ async def _record_abandoned(
     )
 
 
+async def _publish_awaiting_manual(
+    db: AsyncSession,
+    certificate: Certificate,
+    generation: CertificateGeneration,
+    *,
+    attempt: int,
+    document: dict[str, Any],
+) -> None:
+    """Announce that issuance is waiting for a human — **without a challenge value**.
+
+    An event is readable by anything subscribed to the bus, so it carries what an
+    operator needs to know that something is waiting (the certificate, the attempt,
+    how many records and at which names) and never the TXT value itself. That value
+    has exactly one exit from this platform: the authenticated, organization-scoped
+    challenge endpoint.
+    """
+    instructions = certificate_order.manual_instructions(document)
+    record_names = sorted({str(entry.get("record_name") or "") for entry in instructions})
+    await event_bus.publish(
+        db,
+        type="CERTIFICATE_AWAITING_MANUAL",
+        message=(
+            f"Certificate {certificate.primary_cn} is waiting for its dns-01 challenge "
+            f"record{'' if len(instructions) == 1 else 's'} to be published"
+        ),
+        level=EventLevel.INFO,
+        actor_type=ActorType.SYSTEM,
+        resource_type="certificate",
+        resource_id=str(certificate.id),
+        data={
+            "primary_cn": certificate.primary_cn,
+            "generation": generation.generation,
+            "attempt": attempt,
+            "record_names": record_names,
+            "records": len(instructions),
+        },
+        org_id=generation.org_id,
+    )
+    log.info(
+        "certificate_awaiting_manual_challenge",
+        certificate=str(certificate.id),
+        generation=generation.generation,
+        records=len(instructions),
+    )
+
+
 async def _publish_failure(
     db: AsyncSession,
     certificate: Certificate,
@@ -1790,11 +2448,14 @@ __all__ = [
     "CODE_ATTEMPTS_EXHAUSTED",
     "CODE_ATTEMPT_ERROR",
     "CODE_ATTEMPT_IN_FLIGHT",
+    "CODE_AWAITING_MANUAL",
     "CODE_CONTEXT_INCOMPLETE",
     "CODE_DIRECTORY_CHANGED",
     "CODE_DNS_CREDENTIAL_MISSING",
     "CODE_DOCUMENT_UNSUPPORTED",
     "CODE_DOMAIN_NOT_VERIFIED",
+    "CODE_MANUAL_CHALLENGE_INVALID",
+    "CODE_MANUAL_NOT_PENDING",
     "CODE_MATERIAL_MISMATCH",
     "CODE_NOT_DUE",
     "CODE_ORDER_LOST",
@@ -1802,7 +2463,10 @@ __all__ = [
     "CODE_WORKER_LOST",
     "MAX_IDENTIFIERS",
     "IssuanceAttempt",
+    "ManualChallengeStatus",
+    "confirm_manual_publication",
     "enqueue_generation",
     "issue_generation",
+    "manual_challenge",
     "request_retry",
 ]

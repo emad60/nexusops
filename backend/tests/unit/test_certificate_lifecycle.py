@@ -97,6 +97,9 @@ CERTIFICATE_FIELDS = {
     "latest_generation",
     "issued",
     "dns_provider_id",
+    # Who publishes the challenge record. Metadata about the *workflow*, never
+    # about the material — and read by an operator to know whose turn it is.
+    "dns_mode",
     "status_detail",
 }
 
@@ -462,6 +465,28 @@ def test_no_response_field_can_hold_key_material(fragment: str) -> None:
     fields = set(CertificateOut.model_fields) | set(CertificateGenerationOut.model_fields)
     offending = sorted(name for name in fields if fragment in name)
     assert offending == [], f"read models must not expose {fragment!r}: {offending}"
+
+
+def test_the_request_body_names_the_publisher_explicitly() -> None:
+    """``dns_mode`` is required-and-defaulted, never inferred from the credential.
+
+    The distinction the field exists for: a *manual* request carries no credential
+    because the customer publishes, while an *automated* request may carry none yet
+    because its credential has not been stored. Both look identical in
+    ``dns_provider_id``, which is exactly why the mode is its own field.
+    """
+    default = CertificateCreate(
+        domain_id="11111111-1111-1111-1111-111111111111", identifiers=["example.com"]
+    )
+    assert default.dns_mode == "automated"
+    assert default.dns_provider_id is None
+
+    manual = CertificateCreate(
+        domain_id="11111111-1111-1111-1111-111111111111",
+        identifiers=["example.com"],
+        dns_mode="manual",
+    )
+    assert manual.dns_mode == "manual"
 
 
 def test_the_request_body_accepts_the_credential_override_and_nothing_else() -> None:

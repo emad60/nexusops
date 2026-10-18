@@ -15,7 +15,9 @@ metadata:
   is for, its primary common name, its additional identifiers, the challenge
   type, the renewal preference — plus a **derived** status, the denormalized
   expiry the list/sweep reads, the DNS credential its challenges are published
-  with (5.2.2, added *with* the table it references), and the suspension pair set
+  with (5.2.2, added *with* the table it references), **who publishes them**
+  (5.3.2: this platform or the customer, with the pair constrained so a manual
+  certificate can never name an automated credential), and the suspension pair set
   when ownership of an identifier is lost.
 * ``certificate_generations`` carries one ACME order + one key pair. Its ``state``
   CHECK is now the **full** vocabulary
@@ -86,6 +88,7 @@ from app.models.base import (
 from app.models.enums import (
     AcmeDirectory,
     CertificateChallengeType,
+    CertificateDnsMode,
     CertificateGenerationState,
     CertificateKeyAlgorithm,
     CertificateRevocationState,
@@ -183,8 +186,23 @@ def directory_required_predicate() -> str:
     certificate is never presented as a production certificate"). Combined with
     :func:`directory_known_predicate` this makes an issued generation with an
     unknown or absent directory unrepresentable, not merely impolite.
+
+    ``AWAITING_MANUAL`` is deliberately **not** in the exempted set even though it
+    is pre-issuance: by the time a generation waits for an operator it has already
+    placed an order, so the directory it was placed at is known and is required.
+    ``PENDING`` (before the first attempt) is the only live state that may have
+    none, and ``FAILED`` may describe an attempt that never got that far.
     """
-    return f"{pre_issuance_predicate()} OR directory_url IS NOT NULL"
+    no_directory_yet = (
+        *(
+            state
+            for state in CertificateGenerationState.live_pre_issuance()
+            if state is not CertificateGenerationState.AWAITING_MANUAL
+        ),
+        CertificateGenerationState.FAILED,
+    )
+    states = ", ".join(f"'{state.value}'" for state in no_directory_yet)
+    return f"state IN ({states}) OR directory_url IS NOT NULL"
 
 
 class Certificate(OrgScoped, TimestampMixin, Base):
@@ -195,6 +213,16 @@ class Certificate(OrgScoped, TimestampMixin, Base):
         status_check("status", CertificateStatus),
         status_check("challenge_type", CertificateChallengeType),
         status_check("key_algorithm", CertificateKeyAlgorithm),
+        status_check("dns_mode", CertificateDnsMode),
+        # A manual certificate has no automated publisher, by definition. The rule
+        # is stated once here rather than trusted to the service, because a row
+        # that named both would describe a workflow that contradicts itself — and
+        # the issuance path would have to choose, at challenge time, which of two
+        # operators to believe.
+        CheckConstraint(
+            "dns_mode <> 'manual' OR dns_provider_id IS NULL",
+            name="manual_mode_has_no_provider",
+        ),
         # One certificate row per name per organization. A renewal does not
         # create a second row; it creates a second generation of this one.
         UniqueConstraint("org_id", "primary_cn", name="uq_certificates_org_cn"),
@@ -259,6 +287,15 @@ class Certificate(OrgScoped, TimestampMixin, Base):
     )
     challenge_type: Mapped[CertificateChallengeType] = mapped_column(
         String(8), default=CertificateChallengeType.DNS_01, nullable=False
+    )
+    #: Who publishes the DNS-01 record: this platform through the credential above,
+    #: or the customer by hand. Explicit and validated, never inferred from a
+    #: missing credential — see :class:`~app.models.enums.CertificateDnsMode`.
+    dns_mode: Mapped[CertificateDnsMode] = mapped_column(
+        String(16),
+        default=CertificateDnsMode.AUTOMATED,
+        nullable=False,
+        server_default=CertificateDnsMode.AUTOMATED.value,
     )
     #: Renewal preference. The sweep skips ``False``; it never overrides it.
     auto_renew: Mapped[bool] = mapped_column(

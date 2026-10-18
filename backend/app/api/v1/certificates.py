@@ -1,4 +1,4 @@
-"""Certificate endpoints: request, list, inspect, retry, update the preference.
+"""Certificate endpoints: request, list, inspect, retry, update, manual challenge.
 
 ``certificate.read`` covers reads and ``certificate.manage`` covers every mutation
 — the same split the registry defines for every other resource, resolved from the
@@ -12,6 +12,15 @@ is the only thing that contacts a CA or writes material, so ``202 Accepted`` is
 what a retry answers with. Every refusal — already issued, attempt budget spent, an
 attempt genuinely running — is a named error, never a silent success.
 
+The two ``/challenge`` endpoints are the **only** exit for a manual DNS-01 TXT
+value. ``GET`` reports the exact record to publish and the last authoritative
+observation; ``POST .../confirm`` records "I published it" and rechecks DNS once.
+Both require ``certificate.manage`` with the caller's own organization — a
+``certificate.read`` grant is enough to see that a certificate exists, and this is
+deliberately more than that, because publishing the wrong value is a live
+issuance step rather than a metadata read. Confirming is a request to look, never a
+claim that the challenge passed: the CA's authorization stays the only verdict.
+
 The phase's boundary is visible in what is still *absent*: there is no renew,
 revoke or bind endpoint, because none of those can be honored before the delivery
 path (5.4) and the renewal slice (5.6) exist. A request is recorded, issuance is
@@ -21,6 +30,7 @@ attempted in the background, and the read model says which of the two happened.
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query, Request, status
@@ -36,8 +46,15 @@ from app.schemas.certificate import (
     CertificateDetailOut,
     CertificateOut,
     CertificateUpdate,
+    ManualChallengeConfirmIn,
+    ManualChallengeOut,
+    ManualChallengeRecordOut,
+    ManualCleanupOut,
+    ManualCleanupRecordOut,
+    ManualNameserverAnswerOut,
+    ManualObservationOut,
 )
-from app.services import certificate_issuance, certificate_service
+from app.services import certificate_issuance, certificate_order, certificate_service
 
 router = APIRouter(prefix="/certificates", tags=["certificates"])
 
@@ -126,6 +143,135 @@ async def retry_certificate(
     certificate = await certificate_service.get_certificate(db, certificate_id)
     await certificate_issuance.request_retry(db, certificate, ctx, request=request)
     return await _detail(db, certificate)
+
+
+def _at(value: object) -> datetime | None:
+    """A stored challenge timestamp as a datetime, or ``None`` when there is none.
+
+    The order document keeps its stamps as strings and writes ``""`` for "not yet",
+    which is not a datetime. The response models accept only the latter, so the
+    empty placeholder has to be translated here rather than leak into validation.
+    """
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def _manual_out(
+    status_in: certificate_issuance.ManualChallengeStatus,
+) -> ManualChallengeOut:
+    """The operator-facing view of one manual challenge set.
+
+    Everything here comes from the persisted order document and the certificate
+    row — no DNS is contacted and nothing is written, so this answers the same way
+    whether it is called once or fifty times.
+    """
+    instructions = certificate_order.manual_instructions(status_in.document)
+    cleanup = certificate_order.cleanup_instructions(
+        status_in.document, complete=status_in.finished
+    )
+    raw = status_in.observation
+    return ManualChallengeOut(
+        certificate_id=status_in.certificate_id,
+        generation=status_in.generation,
+        state=status_in.state,
+        identifiers=list(status_in.identifiers),
+        records=[
+            ManualChallengeRecordOut(
+                reference=str(entry.get("ref") or ""),
+                identifier=str(entry.get("identifier") or ""),
+                wildcard=bool(entry.get("wildcard")),
+                record_name=str(entry.get("record_name") or ""),
+                record_value=str(entry.get("record_value") or ""),
+                recommended_ttl=entry.get("recommended_ttl"),
+                confirmed=bool(entry.get("confirmed")),
+                confirmed_at=_at(entry.get("confirmed_at")),
+                observed=bool(entry.get("observed")),
+                observed_at=_at(entry.get("observed_at")),
+                validated=bool(entry.get("validated")),
+                validated_at=_at(entry.get("validated_at")),
+                problem=str(entry.get("problem") or ""),
+            )
+            for entry in instructions
+        ],
+        ready=certificate_order.manual_ready(status_in.document),
+        observation=(
+            ManualObservationOut(
+                status=str(raw.get("status") or ""),
+                detail=str(raw.get("detail") or ""),
+                checked_at=_at(raw.get("checked_at")),
+                attempts=int(raw.get("attempts") or 0),
+                nameservers=[
+                    ManualNameserverAnswerOut(
+                        server=answer["server"],
+                        status=answer["status"],
+                        serves_expected=answer["serves_expected"],
+                    )
+                    for answer in raw.get("nameservers") or []
+                ],
+            )
+            if raw is not None
+            else None
+        ),
+        cleanup=ManualCleanupOut(
+            required=bool(cleanup["required"]),
+            records=[ManualCleanupRecordOut(**record) for record in cleanup["records"]],
+            note=str(cleanup["note"] or ""),
+        ),
+        resume_requested=status_in.resume_requested,
+        order_expires_at=certificate_order.order_expires(status_in.document),
+    )
+
+
+@router.get("/{certificate_id}/challenge", response_model=ManualChallengeOut)
+async def get_manual_challenge(
+    certificate_id: uuid.UUID,
+    db: DbDep,
+    _ctx: ManageCtx,
+) -> ManualChallengeOut:
+    """The manual dns-01 record to publish, and how the last check went.
+
+    The only response in the API that carries a challenge TXT value, and it is
+    reachable only for a certificate whose ``dns_mode`` is ``manual``, in the
+    caller's own organization. Read-only: no DNS is contacted.
+    """
+    certificate = await certificate_service.get_certificate(db, certificate_id)
+    return _manual_out(await certificate_issuance.manual_challenge(db, certificate))
+
+
+@router.post(
+    "/{certificate_id}/challenge/confirm",
+    response_model=ManualChallengeOut,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def confirm_manual_challenge(
+    certificate_id: uuid.UUID,
+    payload: ManualChallengeConfirmIn,
+    request: Request,
+    db: DbDep,
+    ctx: ManageCtx,
+) -> ManualChallengeOut:
+    """Record that the record is published and recheck authoritative DNS **once**.
+
+    ``202`` because a passing check hands a resume attempt to the worker rather than
+    finishing issuance here. What comes back is the fresh observation, not a
+    verdict: the challenge is validated when the CA says so, and a confirmation made
+    while the record is absent simply reports that nothing was seen. Repeating it is
+    idempotent — the first confirmation's timestamp is kept and the observation is
+    run again.
+    """
+    certificate = await certificate_service.get_certificate(db, certificate_id)
+    result = await certificate_issuance.confirm_manual_publication(
+        db,
+        certificate,
+        ctx,
+        refs=payload.references or None,
+        request=request,
+    )
+    return _manual_out(result)
 
 
 @router.get("/{certificate_id}", response_model=CertificateDetailOut)

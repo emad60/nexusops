@@ -25,6 +25,7 @@ from pydantic import Field
 from app.models.enums import (
     AcmeDirectory,
     CertificateChallengeType,
+    CertificateDnsMode,
     CertificateGenerationState,
     CertificateKeyAlgorithm,
     CertificateRevocationState,
@@ -41,12 +42,19 @@ class CertificateCreate(APIModel):
     apex + wildcard pair is one order (``["example.com", "*.example.com"]``)
     rather than two certificates.
 
+    ``dns_mode`` says **who publishes** the DNS-01 record, and it is required
+    rather than derived: ``automated`` (the default, this platform writes it through
+    ``dns_provider_id``) or ``manual`` (the customer writes it, and no credential is
+    involved at all). A manual request naming a ``dns_provider_id`` is refused — the
+    two halves of the row would describe different publishers.
+
     ``dns_provider_id`` names the credential the DNS-01 challenge is published
     with. It is optional at request time — a certificate may be recorded before an
-    operator has stored a credential — but issuance refuses one that names none, so
-    ``PATCH /certificates/{id}`` is how it is attached afterwards. The id must name
-    a row in the caller's own organization — a foreign id is a 404, never a stored
-    reference that would later publish a challenge with someone else's credential.
+    operator has stored a credential — but automated issuance refuses one that names
+    none, so ``PATCH /certificates/{id}`` is how it is attached afterwards. The id
+    must name a row in the caller's own organization — a foreign id is a 404, never
+    a stored reference that would later publish a challenge with someone else's
+    credential.
     """
 
     domain_id: UUID
@@ -54,6 +62,10 @@ class CertificateCreate(APIModel):
     #: DNS-01 only in v1; anything else is refused by the service with a named
     #: error, because a challenge nobody can serve is worse than a rejection.
     challenge_type: str = "dns-01"
+    #: Who publishes the challenge record. Explicit, never inferred from a missing
+    #: credential: "no credential attached" is also the state of an automated
+    #: request whose credential has not been stored yet.
+    dns_mode: str = CertificateDnsMode.AUTOMATED.value
     #: Renewal preference the sweep honors (it never overrides it).
     auto_renew: bool = True
     #: The DNS credential this certificate's challenges are published with.
@@ -161,8 +173,12 @@ class CertificateOut(OutModel):
     #: status string that also means "requested".
     issued: bool = False
     #: The credential this certificate's challenges may be published with. NULL
-    #: means none is attached, which is a request issuance refuses to attempt.
+    #: means none is attached, which a *manual* certificate requires and an
+    #: automated one cannot be attempted without.
     dns_provider_id: UUID | None = None
+    #: Who publishes the challenge record. Read by an operator to know whose job
+    #: the next step is; never inferred from ``dns_provider_id`` being NULL.
+    dns_mode: CertificateDnsMode = CertificateDnsMode.AUTOMATED
     status_detail: str = ""
 
 
@@ -170,3 +186,125 @@ class CertificateDetailOut(CertificateOut):
     """Detail adds the whole generation history, newest first."""
 
     generations: list[CertificateGenerationOut] = Field(default_factory=list)
+
+
+class ManualChallengeRecordOut(APIModel):
+    """One DNS-01 record an operator has to publish.
+
+    The only place a challenge **value** appears in any API response, and it is
+    reachable only through the two organization-scoped challenge endpoints for a
+    certificate that is currently waiting. Never part of the certificate read model,
+    an event payload, an audit entry or a log line.
+    """
+
+    reference: str
+    #: The identifier this challenge authorizes (``example.com``, ``*.example.com``).
+    identifier: str
+    wildcard: bool = False
+    #: The exact name to publish at, e.g. ``_acme-challenge.example.com``.
+    record_name: str
+    #: The exact TXT value to publish. Presented so an operator can copy it; opaque
+    #: to everything else.
+    record_value: str
+    record_type: str = "TXT"
+    #: A recommendation only. The record belongs to the customer, who chooses its TTL.
+    recommended_ttl: int | None = None
+    #: The operator has said this record is published. A request to recheck, **not**
+    #: proof of propagation and not a verdict on the challenge.
+    confirmed: bool = False
+    confirmed_at: datetime | None = None
+    #: This platform has seen the value at the authoritative servers.
+    observed: bool = False
+    observed_at: datetime | None = None
+    #: The CA's authorization succeeded. The only verdict that counts.
+    validated: bool = False
+    validated_at: datetime | None = None
+    #: Why this challenge cannot be acted on, when the persisted data no longer has
+    #: the shape the flow produced. Empty when it can.
+    problem: str = ""
+
+
+class ManualNameserverAnswerOut(APIModel):
+    """One authoritative server's answer in the last observation. Never its values."""
+
+    server: str
+    status: str = ""
+    #: Whether that server served every value expected of it.
+    serves_expected: bool = False
+
+
+class ManualObservationOut(APIModel):
+    """The last authoritative observation, as stored.
+
+    Carries the judged status, the detail and a per-server summary — deliberately
+    **not** the TXT values the servers returned, because a name may hold other
+    services' records (SPF, site verification) and this workflow has no use for them.
+    """
+
+    status: str = ""
+    detail: str = ""
+    checked_at: datetime | None = None
+    attempts: int = 0
+    nameservers: list[ManualNameserverAnswerOut] = Field(default_factory=list)
+
+
+class ManualCleanupRecordOut(APIModel):
+    """One name whose challenge value(s) are no longer needed."""
+
+    record_name: str
+    #: Exactly the values this workflow asked for. Remove only these.
+    remove_values: list[str] = Field(default_factory=list)
+    #: True when several challenge values share the name (apex + wildcard), so the
+    #: operator knows the name is not "the challenge record" as a whole.
+    shared_name: bool = False
+
+
+class ManualCleanupOut(APIModel):
+    """What to do with customer-published records. **This platform never deletes them.**"""
+
+    required: bool = False
+    records: list[ManualCleanupRecordOut] = Field(default_factory=list)
+    note: str = ""
+
+
+class ManualChallengeOut(APIModel):
+    """What one manual DNS-01 certificate currently needs from an operator.
+
+    ``state`` is the generation's lifecycle state, so a caller can tell "never
+    ordered" from "waiting" from "finished". ``resume_requested`` reports whether a
+    confirmation handed an attempt to the worker — it is **not** a claim that a
+    certificate was issued, which only ``CERTIFICATE_ISSUED`` says.
+    """
+
+    certificate_id: UUID
+    generation: int
+    state: CertificateGenerationState
+    #: The names the certificate request covers, and therefore what the challenge
+    #: set authorizes. Echoed from the certificate, not from the CA's answer.
+    identifiers: list[str] = Field(default_factory=list)
+    records: list[ManualChallengeRecordOut] = Field(default_factory=list)
+    #: True only when every record is confirmed *and* was seen at the authoritative
+    #: servers. Decides whether an attempt is worth starting; never whether DNS is
+    #: checked, which every attempt does for itself.
+    ready: bool = False
+    observation: ManualObservationOut | None = None
+    cleanup: ManualCleanupOut | None = None
+    resume_requested: bool = False
+    #: The order's own expiry, when the CA sent one. An expired order cannot be
+    #: resumed, so the next attempt re-orders and re-issues instructions.
+    order_expires_at: datetime | None = None
+
+
+class ManualChallengeConfirmIn(APIModel):
+    """Payload for ``POST /certificates/{id}/challenge/confirm``.
+
+    ``references`` narrows the confirmation to specific challenge records. Empty
+    means "everything not yet confirmed" — and once everything is confirmed, it means
+    "check again", which is the retry path and is not an error.
+
+    This body says the operator *published* the record. It is a request to re-observe
+    DNS: it never marks the challenge validated, never marks the certificate issued
+    and never skips the platform's own authoritative check.
+    """
+
+    references: list[str] = Field(default_factory=list, max_length=100)

@@ -308,6 +308,100 @@ def observer_window(observer: Observer, name: str, budget: float) -> TxtObservat
         return TxtObservation(STATUS_ERROR, detail="the DNS observation failed")
 
 
+def _result(
+    expectations: tuple[TxtExpectation, ...],
+    observations: Mapping[str, TxtObservation],
+    *,
+    status: str,
+    detail: str,
+    attempts: int,
+    started: float,
+) -> PropagationResult:
+    """Assemble a :class:`PropagationResult` from the round that ended a check.
+
+    One builder rather than one per caller (the waiting loop and the single-round
+    check), so a result's shape cannot depend on which of the two produced it.
+    """
+    nameservers: tuple[str, ...] = ()
+    observed: dict[str, tuple[str, ...]] = {}
+    per_server: dict[str, tuple[ServerAnswer, ...]] = {}
+    for name, observation in observations.items():
+        observed[name] = observation.values
+        if observation.server_answers:
+            per_server[name] = observation.server_answers
+        if observation.nameservers:
+            nameservers = observation.nameservers
+    return PropagationResult(
+        ok=status == STATUS_PROPAGATED,
+        status=status,
+        attempts=attempts,
+        elapsed_seconds=round(time.monotonic() - started, 3),
+        expectations=expectations,
+        observed=observed,
+        nameservers=nameservers,
+        detail=detail,
+        nameserver_answers=per_server,
+    )
+
+
+def check_once(
+    expectations: Sequence[TxtExpectation],
+    *,
+    observer: Observer | None = None,
+    budget: float = DNS_TOTAL_BUDGET,
+) -> PropagationResult:
+    """Observe every expected name **once** and judge the round. Never waits.
+
+    The manual DNS-01 path's confirmation step: an operator says the record is
+    published, and this is the platform's immediate answer about whether the
+    authoritative servers agree. Unlike :func:`wait_for_txt_records` it holds no
+    worker and no request open, which is what makes it usable from an API call —
+    and it is deliberately *only* an observation: passing it does not answer a
+    challenge, it decides whether an attempt is worth starting.
+    """
+    observer = observer or observe_txt_record
+    expected = tuple(expectations)
+    if not expected:
+        return PropagationResult(
+            ok=False,
+            status=STATUS_MISSING,
+            attempts=0,
+            elapsed_seconds=0.0,
+            expectations=(),
+            detail="no challenge record was expected",
+        )
+    started = time.monotonic()
+    observations, _elapsed = observe(expected, observer=observer, budget=budget)
+    _ok, status, detail = evaluate(expected, observations)
+    return _result(
+        expected, observations, status=status, detail=detail, attempts=1, started=started
+    )
+
+
+def nameserver_summary(
+    result: PropagationResult,
+) -> tuple[tuple[str, str, bool], ...]:
+    """``(address, status, serves_every_expected_value)`` per server that answered.
+
+    A summary of the *round*, for storage: the per-name detail would be a second
+    copy of public DNS data in the order document, and the only question the
+    workflow asks of it is "did this server answer, and did it serve what we need".
+    A server appears once, and its ``serves`` flag is true only when it served every
+    expected value at every name it was asked about.
+    """
+    merged: dict[str, tuple[str, str, bool]] = {}
+    for expectation in result.expectations:
+        for answer in result.nameserver_answers.get(expectation.name, ()):
+            serves = answer.status == STATUS_OK and not expectation.missing_from(answer.values)
+            previous = merged.get(answer.server)
+            merged[answer.server] = (
+                answer.server,
+                answer.status,
+                serves if previous is None else (previous[2] and serves),
+            )
+    return tuple(merged.values())
+
+
 def wait_for_txt_records(
     expectations: Sequence[TxtExpectation],
     *,
@@ -358,25 +452,13 @@ def wait_for_txt_records(
             break
         time.sleep(min(interval_seconds, remaining))
 
-    nameservers: tuple[str, ...] = ()
-    observed: dict[str, tuple[str, ...]] = {}
-    per_server: dict[str, tuple[ServerAnswer, ...]] = {}
-    for name, observation in last_observations.items():
-        observed[name] = observation.values
-        if observation.server_answers:
-            per_server[name] = observation.server_answers
-        if observation.nameservers:
-            nameservers = observation.nameservers
-    result = PropagationResult(
-        ok=last_status == STATUS_PROPAGATED,
+    result = _result(
+        expected,
+        last_observations,
         status=last_status,
-        attempts=attempts,
-        elapsed_seconds=round(time.monotonic() - started, 3),
-        expectations=expected,
-        observed=observed,
-        nameservers=nameservers,
         detail=last_detail,
-        nameserver_answers=per_server,
+        attempts=attempts,
+        started=started,
     )
     log.info(
         "dns_propagation_checked",
@@ -398,7 +480,9 @@ __all__ = [
     "Observer",
     "PropagationResult",
     "TxtExpectation",
+    "check_once",
     "evaluate",
+    "nameserver_summary",
     "observe",
     "wait_for_txt_records",
 ]

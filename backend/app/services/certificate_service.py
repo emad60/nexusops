@@ -59,6 +59,7 @@ from app.models import Certificate, CertificateGeneration, DnsProvider, Domain
 from app.models.enums import (
     ActorType,
     CertificateChallengeType,
+    CertificateDnsMode,
     CertificateGenerationState,
     CertificateKeyAlgorithm,
     CertificateStatus,
@@ -78,6 +79,13 @@ log = get_logger("nexusops.certificates")
 #: Challenge types this phase can serve. DNS-01 only: it is the sole challenge
 #: that works for NAT-ed nodes and for wildcards (phase5-design.md §5.2).
 SUPPORTED_CHALLENGE_TYPES: tuple[str, ...] = (CertificateChallengeType.DNS_01.value,)
+
+#: Who may publish the challenge record. Both are supported; the caller must say
+#: which, and the platform never infers it (phase5-design.md §5.3).
+SUPPORTED_DNS_MODES: tuple[str, ...] = (
+    CertificateDnsMode.AUTOMATED.value,
+    CertificateDnsMode.MANUAL.value,
+)
 
 
 def _utcnow() -> datetime:
@@ -178,6 +186,35 @@ def _challenge_type(payload: CertificateCreate) -> CertificateChallengeType:
     return CertificateChallengeType(requested)
 
 
+def _dns_mode(payload: CertificateCreate) -> CertificateDnsMode:
+    """The requested publisher, refused unless it is one this phase implements.
+
+    Explicit and required rather than derived from whether a credential was named:
+    "no credential attached" is also the state of an automated request whose token
+    has not been stored yet, and reading that as ``manual`` would move a customer's
+    certificate into a workflow nobody chose — one where the platform stops and
+    waits for a human who was never told.
+    """
+    requested = (payload.dns_mode or "").strip().lower()
+    if requested not in SUPPORTED_DNS_MODES:
+        raise UnprocessableEntity(
+            f"Unsupported DNS mode '{payload.dns_mode}'. This phase publishes dns-01 "
+            f"challenges as {' or '.join(SUPPORTED_DNS_MODES)} only.",
+            code="CERTIFICATE_DNS_MODE_UNSUPPORTED",
+        )
+    mode = CertificateDnsMode(requested)
+    if mode is CertificateDnsMode.MANUAL and payload.dns_provider_id is not None:
+        # Two publishers on one certificate is a contradiction the database refuses
+        # too; refusing it here is what turns it into a message instead of a 500.
+        raise UnprocessableEntity(
+            "A manual certificate has its challenge record published by the customer, so "
+            "it cannot name a DNS credential. Leave dns_provider_id unset, or request an "
+            "automated certificate instead.",
+            code="CERTIFICATE_MANUAL_WITH_PROVIDER",
+        )
+    return mode
+
+
 async def create_certificate(
     db: AsyncSession,
     ctx: AuthContext | None,
@@ -193,6 +230,7 @@ async def create_certificate(
     """
     primary_cn, sans = _canonical_identifiers(payload)
     challenge_type = _challenge_type(payload)
+    dns_mode = _dns_mode(payload)
     domain = await _resolve_domain(db, payload.domain_id)
     dns_provider = (
         await _resolve_dns_provider(db, payload.dns_provider_id)
@@ -241,6 +279,9 @@ async def create_certificate(
         # code until PATCH attaches one — which is honest, and keeps the create
         # path usable before the operator has stored their DNS token.
         dns_provider_id=dns_provider.id if dns_provider is not None else None,
+        # Who publishes the challenge record. ``manual`` means the customer does,
+        # and consequently that no credential is involved at all.
+        dns_mode=dns_mode,
         suspended_at=None,
         suspension_reason="",
     )
@@ -280,11 +321,12 @@ async def create_certificate(
             "primary_cn": primary_cn,
             "identifiers": [primary_cn, *sans],
             "challenge_type": challenge_type.value,
+            "dns_mode": dns_mode.value,
             "generation": generation.generation,
             # The provider's name and id, never its credential: an audit entry may
             # say which credential was chosen and must never say what it holds.
             "dns_provider": dns_provider.name if dns_provider is not None else None,
-            "dns_provider_source": ("certificate" if dns_provider is not None else "domain"),
+            "dns_provider_source": ("certificate" if dns_provider is not None else None),
         },
         request=request,
     )
@@ -301,6 +343,7 @@ async def create_certificate(
             "primary_cn": primary_cn,
             "sans": sans,
             "challenge_type": challenge_type.value,
+            "dns_mode": dns_mode.value,
             "state": str(generation.state),
         },
     )
@@ -377,6 +420,16 @@ async def update_certificate(
         if requested is None:
             certificate.dns_provider_id = None
         else:
+            if certificate.dns_mode == CertificateDnsMode.MANUAL:
+                # The database's CHECK says the same thing; this is the version an
+                # operator can act on. A manual certificate has no publisher to
+                # point a credential at, and silently accepting one would leave the
+                # row describing two workflows.
+                raise UnprocessableEntity(
+                    "This certificate publishes its challenge record by hand, so it cannot "
+                    "name a DNS credential.",
+                    code="CERTIFICATE_MANUAL_WITH_PROVIDER",
+                )
             provider = await _resolve_dns_provider(db, requested)
             certificate.dns_provider_id = provider.id
         changed.append("dns_provider_id")

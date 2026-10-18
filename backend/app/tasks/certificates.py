@@ -132,7 +132,7 @@ def sweep_certificates() -> dict[str, int]:
 
         now = datetime.now(UTC)
         ttl = float(_order_ttl_seconds())
-        counts = {"candidates": 0, "dispatched": 0, "in_flight": 0}
+        counts = {"candidates": 0, "dispatched": 0, "in_flight": 0, "awaiting_manual": 0}
 
         due = or_(
             CertificateGeneration.next_attempt_at.is_(None),
@@ -183,6 +183,20 @@ def sweep_certificates() -> dict[str, int]:
                     # A worker is genuinely working on it. Dispatching anyway would
                     # only buy a refusal, once per tick, per running attempt.
                     counts["in_flight"] += 1
+                    continue
+                if (
+                    certificate_lifecycle.coerce_state(generation.state)
+                    is CertificateGenerationState.AWAITING_MANUAL
+                    and not certificate_order.manual_ready(document)
+                ):
+                    # The next step is the customer's, not the platform's. A
+                    # dispatch here would be a no-op the service refuses with
+                    # ``CERTIFICATE_AWAITING_MANUAL`` — once per tick, forever —
+                    # and the fresh attempt it idled would be indistinguishable
+                    # from a lost worker that genuinely needs recovering. The
+                    # confirmation endpoint is what makes a waiting generation
+                    # dispatchable, so that is the only path that can unstick it.
+                    counts["awaiting_manual"] += 1
                     continue
                 try:
                     issue_certificate.delay(str(generation.id))

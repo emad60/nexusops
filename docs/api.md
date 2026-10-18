@@ -725,24 +725,30 @@ gated live — see [domain-routing.md](domain-routing.md).
 
 ### Certificates — `certificates.py`
 
-Phase 5.1 metadata, extended by 5.2.2 with the credential reference and by 5.3 with
+Phase 5.1 metadata, extended by 5.2.2 with the credential reference, by 5.3 with
 **issuance** — a request is recorded, its generation is handed to a worker **after the
-transaction commits**, and the read model says which of the two happened. **Still no
-delivery, installation or activation**: nothing reaches a node, and no route can serve
-HTTPS. A generation may now reach `ISSUED` and carry material, encrypted under the
-organization DEK; no response model names a ciphertext field, and reads remain
-metadata-only — no endpoint returns a private key, plaintext certificate material or
-ciphertext. Both codenames are organization-scoped. See
-[phase5-design.md](phase5-design.md) §3.1–§3.2, §4.1, §10.7, §10.8 and
-§10.8.1 (the credential is the certificate's own; a Domain-level one never existed).
+transaction commits**, and the read model says which of the two happened — and by 5.3.2
+with **manual DNS-01**, where the customer publishes the challenge record and two
+endpoints are the only exit for its value. **Still no delivery, installation or
+activation**: nothing reaches a node, and no route can serve HTTPS. A generation may now
+reach `ISSUED` and carry material, encrypted under the organization DEK; no response model
+names a ciphertext field, and reads remain metadata-only — no certificate endpoint returns
+a private key, plaintext certificate material or ciphertext. The one value that *is*
+returned is a manual challenge's TXT record, and only by the two `/challenge` endpoints
+below, to `certificate.manage` in the certificate's own organization. Both codenames are
+organization-scoped. See [phase5-design.md](phase5-design.md) §3.1–§3.2, §4.1, §10.7,
+§10.8, §10.8.1 (the credential is the certificate's own; a Domain-level one never
+existed) and §10.9 (manual DNS-01).
 
 | Method | Path | Permission | Notes |
 |---|---|---|---|
-| POST | `/certificates` | `certificate.manage` | body `{domain_id, identifiers[], challenge_type?, auto_renew, dns_provider_id?}` — the **first** identifier is the primary common name and the rest are SANs; the domain must be `VERIFIED`, every identifier must be covered by it, and the challenge is `dns-01` only. `dns_provider_id` names a DNS credential in the caller's own organization (a foreign or unknown id is a 404); omitted, the certificate names none and issuance refuses it with `CERTIFICATE_DNS_CREDENTIAL_MISSING` until one is attached — there is no Domain-level credential to inherit. Writes the certificate and its first `PENDING` generation in one transaction and enqueues issuance **after it commits**; 409 `CERTIFICATE_EXISTS` on a duplicate name |
+| POST | `/certificates` | `certificate.manage` | body `{domain_id, identifiers[], challenge_type?, dns_mode?, auto_renew, dns_provider_id?}` — the **first** identifier is the primary common name and the rest are SANs; the domain must be `VERIFIED`, every identifier must be covered by it, and the challenge is `dns-01` only. `dns_mode` is `automated` (default; this platform publishes through the credential) or `manual` (the customer publishes; no credential is involved) — 422 `CERTIFICATE_DNS_MODE_UNSUPPORTED` for anything else, and `CERTIFICATE_MANUAL_WITH_PROVIDER` when `manual` names a `dns_provider_id`. For `automated`, `dns_provider_id` names a DNS credential in the caller's own organization (a foreign or unknown id is a 404); omitted, the certificate names none and issuance refuses it with `CERTIFICATE_DNS_CREDENTIAL_MISSING` until one is attached — there is no Domain-level credential to inherit. Writes the certificate and its first `PENDING` generation in one transaction and enqueues issuance **after it commits**; 409 `CERTIFICATE_EXISTS` on a duplicate name |
 | GET | `/certificates` | `certificate.read` | filters `status`, `domain_id`; each row carries its newest generation and the derived `status`/`status_detail` |
 | GET | `/certificates/{certificate_id}` | `certificate.read` | detail adds the whole generation history, newest first; each generation carries `directory_url`, `directory` (the known directory, or null when the URL is unrecognized) and `publicly_trusted` — derived from the URL **stored on the row**, so a staging generation stays labelled staging after the platform is pointed at production, and an unrecognized URL reads as not publicly trusted |
 | POST | `/certificates/{certificate_id}/retry` | `certificate.manage` | `202 Accepted`: pulls the newest generation's `next_attempt_at` forward and dispatches the same task the sweep dispatches — this call itself touches no CA and publishes nothing. A retry is not an attempt, so a *live* generation with no running attempt is allowed through (a lost dispatch) and a running one is refused. Named 409 refusals: `CERTIFICATE_NO_GENERATION`, `CERTIFICATE_ALREADY_ISSUED`, `CERTIFICATE_ATTEMPTS_EXHAUSTED`, `CERTIFICATE_ATTEMPT_IN_FLIGHT`, `CERTIFICATE_STATE_NOT_ATTEMPTABLE` |
-| PATCH | `/certificates/{certificate_id}` | `certificate.manage` | `auto_renew` and `dns_provider_id` only — an explicit `null` **detaches** the credential (leaving the certificate unissuable until another is attached), while `null` for `auto_renew` is not a value and is ignored. Identifiers, status and expiry are not writable in place |
+| PATCH | `/certificates/{certificate_id}` | `certificate.manage` | `auto_renew` and `dns_provider_id` only — an explicit `null` **detaches** the credential (leaving an automated certificate unissuable until another is attached), while `null` for `auto_renew` is not a value and is ignored. Attaching one to a **manual** certificate is refused (`CERTIFICATE_MANUAL_WITH_PROVIDER`): the customer publishes those records. Identifiers, status, `dns_mode` and expiry are not writable in place |
+| GET | `/certificates/{certificate_id}/challenge` | `certificate.manage` | the manual DNS-01 instructions: the exact record name/value per challenge, the `reference` the confirmation quotes back, `recommended_ttl`, the three separate facts (`confirmed_at`, `observed_at`, `validated_at`), `ready`, the last observation's status and per-server summary (no TXT values from the zone), and `cleanup` instructions. Read-only — no DNS is contacted, nothing is written. Named 409 refusals: `CERTIFICATE_MANUAL_CHALLENGE_NOT_PENDING` (not a manual certificate, or not waiting), `CERTIFICATE_NO_GENERATION`, `CERTIFICATE_CONTEXT_INCOMPLETE`, `CERTIFICATE_ORDER_LOST` |
+| POST | `/certificates/{certificate_id}/challenge/confirm` | `certificate.manage` | `202 Accepted`; body `{references: []}` (empty means every unconfirmed record, and "check again" once all are confirmed). Stamps `confirmed_at` — the first timestamp survives a repeated call — re-observes authoritative DNS **once**, records the result, and dispatches a resume only when every record is both confirmed and observed (`ready` / `resume_requested`). Never marks a challenge validated, never marks the certificate issued, and never skips the attempt's own observation. 409 refusals add `CERTIFICATE_CHALLENGE_NOT_FOUND` (an unknown reference) and `CERTIFICATE_MANUAL_CHALLENGE_INVALID` (the persisted instruction no longer has the shape the flow produced) |
 | DELETE | `/certificates/{certificate_id}` | `certificate.manage` | removes the request and its generations; refused once a generation has been issued. A domain with a certificate cannot be deleted (409 `DOMAIN_HAS_CERTIFICATES`) |
 
 ### DNS credentials — `dns_providers.py`

@@ -332,48 +332,122 @@ class _LibrarySession:
                     code="ACME_ORDER_IDENTIFIERS_MISMATCH",
                     detail=f"requested {len(requested)}, offered {len(granted)}",
                 )
-            collected: list[AcmeChallenge] = []
-            for authzr in orderr.authorizations:
-                body = authzr.body
-                identifier = str(body.identifier.value)
-                self._authz[authzr.uri] = authzr
-                for challb in body.challenges:
-                    if challb.typ != challenges.DNS01.typ:
-                        continue
-                    if not isinstance(challb.chall, challenges.DNS01):
-                        raise AcmeProtocolError(
-                            "the certificate authority returned a dns-01 challenge of an "
-                            "unexpected shape",
-                            code="ACME_CHALLENGE_UNSUPPORTED",
-                        )
-                    self._challenges[challb.uri] = challb
-                    collected.append(
-                        AcmeChallenge(
-                            identifier=identifier,
-                            wildcard=bool(body.wildcard),
-                            authorization_url=authzr.uri,
-                            challenge_url=challb.uri,
-                            token=str(challb.token),
-                            record_name=challb.chall.validation_domain_name(identifier),
-                            record_value=str(challb.chall.validation(key)),
-                            key_authorization=challb.chall.key_authorization(key),
-                            status=_status_text(challb.status),
-                        )
-                    )
-            if not collected:
+            return self._collected(orderr, key, identifiers=tuple(sorted(granted)))
+
+        return _execute(_call)
+
+    async def resume_order(self, *, order_url: str) -> AcmeOrder:
+        return await asyncio.to_thread(self._resume_order, order_url)
+
+    def _resume_order(self, order_url: str) -> AcmeOrder:
+        """Re-open an order this process did not create, by its URL.
+
+        Needed by the manual DNS-01 path for a structural reason: an attempt's key
+        pair lives only in the attempt that generated it, so the attempt that placed
+        a manual order cannot be the one that finalizes it — an operator publishes
+        the TXT record minutes or hours later. The order is one *pure data* fact
+        inside that attempt (URL, authorizations, challenges), which is exactly what
+        this method re-reads from the CA.
+
+        RFC 8555 has no "return this order" endpoint beyond a POST-as-GET of its
+        URL, so this uses the client's own primitives (``_post_as_get`` and
+        ``_authzr_from_response``), the same two ``new_order`` uses internally. They
+        are private API: pinning that is the honest cost of resuming at all, and it
+        is tested against a real CA in the Pebble suite rather than only against a
+        fake.
+
+        An **invalid** or **deactivated** order is not resumed. Answering for a
+        challenge the CA has already judged would report a success that never
+        happened, so it is refused here and the flow places a new order instead.
+        """
+        acme_client, key = self._require_client()
+        url = str(order_url or "").strip()
+        if not url:
+            raise AcmeProtocolError(
+                "there is no recorded order URL to resume", code="ACME_ORDER_URL_MISSING"
+            )
+
+        def _call() -> AcmeOrder:
+            response = acme_client._post_as_get(url)
+            body = messages.Order.from_json(response.json())
+            status = _status_text(body.status)
+            if status in {messages.STATUS_INVALID, messages.STATUS_DEACTIVATED}:
                 raise AcmeProtocolError(
-                    "the certificate authority returned no dns-01 challenge for this order",
-                    code="ACME_NO_DNS01_CHALLENGE",
+                    "the recorded order is no longer usable at the certificate authority",
+                    code="ACME_ORDER_UNUSABLE",
+                    detail=f"order status {status}",
                 )
-            return AcmeOrder(
-                order_url=_order_url(orderr),
-                status=_status_text(orderr.body.status),
-                challenges=tuple(collected),
-                expires_at=orderr.body.expires,
-                identifiers=tuple(sorted(granted)),
+            authorizations = []
+            for authorization_url in body.authorizations or ():
+                authorizations.append(
+                    acme_client._authzr_from_response(
+                        acme_client._post_as_get(authorization_url), uri=authorization_url
+                    )
+                )
+            orderr = messages.OrderResource(
+                body=body, uri=url, authorizations=authorizations, csr_pem=b""
+            )
+            self._orderr = orderr
+            return self._collected(
+                orderr,
+                key,
+                identifiers=tuple(
+                    sorted(str(identifier.value) for identifier in body.identifiers or ())
+                ),
             )
 
         return _execute(_call)
+
+    def _collected(
+        self, orderr: messages.OrderResource, key: jose.JWKEC, *, identifiers: tuple[str, ...]
+    ) -> AcmeOrder:
+        """Read one order's dns-01 challenges into the seam's own shape.
+
+        Shared by ``create_order`` and ``resume_order`` so a resumed order yields
+        exactly the same challenge fields a fresh one did: the token and the TXT
+        value the operator was handed have to be *the same values* on the resume
+        path, and two parsers would be two chances to disagree.
+        """
+        collected: list[AcmeChallenge] = []
+        for authzr in orderr.authorizations:
+            body = authzr.body
+            identifier = str(body.identifier.value)
+            self._authz[authzr.uri] = authzr
+            for challb in body.challenges or ():
+                if challb.typ != challenges.DNS01.typ:
+                    continue
+                if not isinstance(challb.chall, challenges.DNS01):
+                    raise AcmeProtocolError(
+                        "the certificate authority returned a dns-01 challenge of an "
+                        "unexpected shape",
+                        code="ACME_CHALLENGE_UNSUPPORTED",
+                    )
+                self._challenges[challb.uri] = challb
+                collected.append(
+                    AcmeChallenge(
+                        identifier=identifier,
+                        wildcard=bool(body.wildcard),
+                        authorization_url=authzr.uri,
+                        challenge_url=challb.uri,
+                        token=str(challb.token),
+                        record_name=challb.chall.validation_domain_name(identifier),
+                        record_value=str(challb.chall.validation(key)),
+                        key_authorization=challb.chall.key_authorization(key),
+                        status=_status_text(challb.status),
+                    )
+                )
+        if not collected:
+            raise AcmeProtocolError(
+                "the certificate authority returned no dns-01 challenge for this order",
+                code="ACME_NO_DNS01_CHALLENGE",
+            )
+        return AcmeOrder(
+            order_url=_order_url(orderr),
+            status=_status_text(orderr.body.status),
+            challenges=tuple(collected),
+            expires_at=orderr.body.expires,
+            identifiers=identifiers,
+        )
 
     async def accept_challenge(self, *, challenge_url: str) -> None:
         await asyncio.to_thread(self._accept_challenge, challenge_url)
@@ -465,6 +539,13 @@ class _LibrarySession:
         # the Pebble integration test (``test_certificate_pebble``); the contract
         # lives in :func:`_finalize_deadline` so a unit test can pin it.
         deadline = _finalize_deadline(timeout_seconds)
+        # The CSR belongs to *this* attempt, not to the order's earlier life. A resumed
+        # manual order is finalized with the key generated after validation, while the
+        # resource re-read from the CA carries no CSR at all — handing the library the
+        # resource as-is makes it parse an empty CSR and fail before the CA is asked.
+        # Found by the manual DNS-01 Pebble test, which is the only path that resumes.
+        orderr = orderr.update(csr_pem=csr_pem)
+        self._orderr = orderr
 
         def _call() -> IssuedChain:
             finalized = acme_client.finalize_order(orderr, deadline)

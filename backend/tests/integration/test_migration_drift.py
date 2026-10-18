@@ -84,6 +84,7 @@ def test_the_certificate_vocabularies_match_the_enums() -> None:
     """
     from app.models.enums import (
         CertificateChallengeType,
+        CertificateDnsMode,
         CertificateGenerationState,
         CertificateKeyAlgorithm,
         CertificateRevocationState,
@@ -99,6 +100,8 @@ def test_the_certificate_vocabularies_match_the_enums() -> None:
         "revocation_state": "ck_certificate_generations_revocation_state_valid",
         "material_guard": "ck_certificate_generations_material_guard",
         "dns_provider_kind": "ck_dns_providers_kind_valid",
+        "dns_mode": "ck_certificates_dns_mode_valid",
+        "manual_no_provider": "ck_certificates_manual_mode_has_no_provider",
     }
     engine = create_engine(TEST_OWNER_DATABASE_URL)
     try:
@@ -127,6 +130,16 @@ def test_the_certificate_vocabularies_match_the_enums() -> None:
         assert f"'{member}'" in definitions["revocation_state"], member
     for member in DnsProviderKind:
         assert f"'{member}'" in definitions["dns_provider_kind"], member
+    for member in CertificateDnsMode:
+        assert f"'{member}'" in definitions["dns_mode"], member
+
+    # The manual/provider contradiction (5.3.2): a manual certificate has no
+    # automated publisher. Naming both would describe a workflow with two
+    # operators for one challenge, and the issuance path would have nowhere to
+    # look to learn which one is real.
+    assert "dns_mode" in definitions["manual_no_provider"]
+    assert "'manual'" in definitions["manual_no_provider"]
+    assert "dns_provider_id IS NULL" in definitions["manual_no_provider"]
 
     # The material guard is the acceptance criterion of 5.2.2 in the schema: the
     # two branches are the pre-issuance states and the six fields every

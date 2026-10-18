@@ -334,6 +334,17 @@ class AcmeSession(Protocol):
         """Create an order for *identifiers* and return its authorizations."""
         ...
 
+    async def resume_order(self, *, order_url: str) -> AcmeOrder:
+        """Re-open an order this session did not create, by its recorded URL.
+
+        The manual DNS-01 path needs it: the attempt that placed the order is not
+        the attempt that finalizes it, because an operator publishes the challenge
+        record in between. What comes back is the CA's current view of the same
+        order — same challenge URLs, same tokens — so an answer the operator was
+        already handed stays the answer the CA expects.
+        """
+        ...
+
     async def accept_challenge(self, *, challenge_url: str) -> None:
         """Tell the CA a challenge is ready to be validated."""
         ...

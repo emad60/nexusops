@@ -32,10 +32,14 @@ mean deleting the wrong DNS record.
 
 from __future__ import annotations
 
+import copy
 import hashlib
+import re
+from collections.abc import Iterable
 from datetime import UTC, datetime
 from typing import Any
 
+from app.core.dnsname import InvalidName, canonicalize_record_name
 from app.services.acme import AcmeChallenge
 
 #: Bumped when the document's shape changes incompatibly. Read through
@@ -46,10 +50,9 @@ DOCUMENT_VERSION = 1
 #: generation, because the two are genuinely different facts: an automated
 #: challenge has a provider record reference and an automated cleanup path, a
 #: manual one has neither, and a retry must not "clean up" a record the operator
-#: published by hand (phase5-design.md §5.3). This slice records ``automated``
-#: challenges only — the operator-facing manual publication flow is a later slice,
-#: and the mode exists here so that adding it cannot retroactively change how an
-#: existing challenge's record must be cleaned up.
+#: published by hand (phase5-design.md §5.3). The mode is recorded when the entry
+#: is written, so a certificate whose ``dns_mode`` changes later cannot change how
+#: an existing challenge's record has to be cleaned up.
 MODE_AUTOMATED = "automated"
 MODE_MANUAL = "manual"
 
@@ -135,11 +138,17 @@ def load(generation: Any) -> dict[str, Any]:
     the caller acts on the fields it needs, each of which is shape-checked again
     where it is used. The version is reported, not enforced here; the flow refuses
     an unknown version where it matters.
+
+    The document is returned as a **deep copy**. Callers edit it in place and hand it
+    back with :func:`store`, and the ORM's committed value for a JSONB column is the
+    very object it was loaded into: mutating a nested challenge dict through a shared
+    reference would change the "before" value too, leaving the write invisible to the
+    dirty check and silently unpersisted.
     """
     raw = getattr(generation, "order_state", None)
     if not isinstance(raw, dict):
         return {"version": DOCUMENT_VERSION}
-    document = dict(raw)
+    document = copy.deepcopy(raw)
     challenges = document.get("challenges")
     if not isinstance(challenges, list):
         document["challenges"] = []
@@ -273,7 +282,14 @@ def record_challenges(
             "cleanup_attempts": 0,
             "cleanup_error": "",
             "published_at": "",
+            # The operator's act ("I published it") — kept separate from
+            # ``observed_at`` below, because the two are different facts and a
+            # manual challenge needs both before it may be answered.
             "confirmed_at": "",
+            # What *this platform* saw at the authoritative servers. Written only
+            # by an observation that passed, so it can never be mistaken for a
+            # confirmation or for the CA's verdict.
+            "observed_at": "",
             "validated_at": "",
             "error": "",
         }
@@ -331,6 +347,21 @@ def finish_attempt(document: dict[str, Any]) -> dict[str, Any]:
     """Mark the attempt as no longer running, whatever its outcome."""
     document["attempt_finished_at"] = now_iso()
     return document
+
+
+def attempt_unfinished(document: dict[str, Any]) -> bool:
+    """Whether an attempt was stamped and never wrote its finish.
+
+    Distinct from :func:`attempt_in_flight`, which also applies the TTL. A stamped
+    attempt with no finish is *either* running or lost, and only the TTL says which
+    — but the absence of a stamp is a third fact: nothing is running, and nothing
+    was interrupted. The manual DNS-01 wait is exactly that third case (the attempt
+    ended deliberately, waiting for a person), so recovery must not read it as a
+    lost worker.
+    """
+    return bool(_text(document.get("attempt_started_at"))) and not _text(
+        document.get("attempt_finished_at")
+    )
 
 
 def attempt_in_flight(
@@ -417,11 +448,18 @@ def pending_cleanup(document: dict[str, Any]) -> list[dict[str, Any]]:
     ``unresolved`` is included on purpose: a record the provider could not confirm
     deleted is still a record to try to delete, and excluding it would make cleanup
     give up after one bad minute.
+
+    A **manual** entry is never in this list, and the mode test comes first: the
+    customer published that record in their own zone, so there is nothing here a
+    provider call may delete — not even when a hand-edited document carries a
+    ``record_id`` (phase5-design.md §5.3).
     """
     return [
         entry
         for entry in entries(document)
-        if entry.get("cleanup") in (CLEANUP_PENDING, CLEANUP_UNRESOLVED) and entry.get("record_id")
+        if entry.get("mode") != MODE_MANUAL
+        and entry.get("cleanup") in (CLEANUP_PENDING, CLEANUP_UNRESOLVED)
+        and entry.get("record_id")
     ]
 
 
@@ -442,7 +480,15 @@ def manual_instructions(document: dict[str, Any]) -> list[dict[str, Any]]:
     two authorizations of an apex+wildcard order share a record name and differ
     only in that value — an operator publishing "the" record would otherwise
     overwrite one with the other.
+
+    The three timestamps are the three *different* facts the flow keeps apart: the
+    operator said it is published (``confirmed_at``), this platform saw it at the
+    authoritative servers (``observed_at``), and the CA accepted it
+    (``validated_at``). A caller that collapsed them would be able to show a
+    pending challenge as validated.
     """
+    ttl = document.get("txt_ttl")
+    recommended = int(ttl) if isinstance(ttl, int) and 0 < ttl <= 2_147_483_647 else None
     return [
         {
             "ref": _text(entry.get("ref")),
@@ -450,12 +496,265 @@ def manual_instructions(document: dict[str, Any]) -> list[dict[str, Any]]:
             "wildcard": bool(entry.get("wildcard")),
             "record_name": _text(entry.get("record_name")),
             "record_value": _text(entry.get("record_value")),
+            "recommended_ttl": recommended,
             "confirmed": bool(entry.get("confirmed_at")),
+            "confirmed_at": _timestamp(entry.get("confirmed_at")),
+            "observed": bool(entry.get("observed_at")),
+            "observed_at": _timestamp(entry.get("observed_at")),
             "validated": bool(entry.get("validated_at")),
+            "validated_at": _timestamp(entry.get("validated_at")),
+            "problem": manual_entry_problem(entry),
         }
-        for entry in entries(document)
-        if entry.get("mode") == MODE_MANUAL
+        for entry in manual_current(document)
     ]
+
+
+def manual_current(document: dict[str, Any]) -> list[dict[str, Any]]:
+    """The manual challenges of the order this document currently records.
+
+    Narrowed to the *current* order for the same reason
+    :func:`current_entries` is: an operator must never be shown a value for an
+    order the platform has already replaced, because publishing it cannot help and
+    a confirmation against it would be a request to observe a name nothing is
+    waiting for.
+    """
+    return [entry for entry in current_entries(document) if entry.get("mode") == MODE_MANUAL]
+
+
+#: A challenge's TXT value is the base64url SHA-256 of the key authorization: 43
+#: characters, no padding. Checked before a stored value is shown or acted on, so a
+#: hand-edited document cannot send an operator to publish something arbitrary.
+_TXT_VALUE = re.compile(r"^[A-Za-z0-9_-]{43}$")
+
+#: A challenge reference is :func:`challenge_ref`'s output: 16 lower-case hex.
+_REF = re.compile(r"^[0-9a-f]{16}$")
+
+
+def manual_entry_problem(entry: dict[str, Any]) -> str:
+    """Why a persisted manual challenge cannot be acted on, or ``""`` when it can.
+
+    The document is customer-adjacent state: it is written by this platform, but a
+    value that no longer has the shape the flow produced — a truncated record name,
+    a value that is not a DNS-01 digest, a reference that names no challenge — must
+    be refused rather than handed to an operator or used to build an observation.
+    An operator following a malformed instruction publishes the wrong record, and a
+    confirmation against it would ask the CA to validate a challenge nobody can
+    answer.
+    """
+    if entry.get("mode") != MODE_MANUAL:
+        return "the challenge is not a manual one"
+    if not _REF.match(_text(entry.get("ref"))):
+        return "the challenge reference is not a reference this platform issued"
+    for field in ("authorization_url", "challenge_url", "identifier", "record_name"):
+        if not _text(entry.get(field)):
+            return f"the challenge record is missing its {field.replace('_', ' ')}"
+    name = _text(entry.get("record_name"), limit=253)
+    if not name.startswith("_acme-challenge.") or name != name.lower():
+        return "the challenge record name is not a DNS-01 record name"
+    try:
+        # A *record* name, not a hostname: ``_acme-challenge.`` is a service label
+        # that ``canonicalize_name`` refuses by design, and the function this call
+        # uses is the same one the automated publisher writes with.
+        canonicalize_record_name(name, allow_wildcard=False)
+    except (InvalidName, ValueError):
+        return "the challenge record name is not a valid DNS name"
+    if not _TXT_VALUE.match(_text(entry.get("record_value"), limit=64)):
+        return "the challenge value is not a DNS-01 digest"
+    return ""
+
+
+def manual_ready(document: dict[str, Any]) -> bool:
+    """Whether every manual challenge is confirmed **and** has been seen published.
+
+    The resume precondition, and both halves are load-bearing:
+
+    * ``confirmed_at`` is the operator's request to recheck DNS;
+    * ``observed_at`` is this platform's own answer.
+
+    Requiring only the confirmation would make a premature "it's published" — the
+    ordinary case, since DNS lags — dispatch an attempt that waits out the whole
+    propagation deadline and then spends one of five attempts failing. Requiring the
+    observation instead means the sweep and a dispatch from anywhere else can treat
+    "ready" as a fact rather than a claim.
+
+    The worker re-observes before it answers the CA regardless; this predicate
+    decides *when an attempt is worth starting*, never whether DNS was checked.
+    """
+    current = manual_current(document)
+    return bool(current) and all(
+        entry.get("confirmed_at") and entry.get("observed_at") and not manual_entry_problem(entry)
+        for entry in current
+    )
+
+
+def confirm_published(document: dict[str, Any], ref: str) -> tuple[dict[str, Any] | None, bool]:
+    """Record an operator's confirmation. Returns ``(entry, changed)``.
+
+    Idempotent by construction: a second confirmation of the same challenge leaves
+    the first timestamp in place and reports ``changed=False``, so a repeated POST
+    cannot move the clock, re-open a finished order or spend another attempt. The
+    timestamp is the *only* thing a confirmation writes — never ``validated_at`` and
+    never the generation's state, because confirming is a request to re-observe
+    DNS, not a claim that the record is visible.
+    """
+    for entry in manual_current(document):
+        if entry.get("ref") != ref:
+            continue
+        if entry.get("confirmed_at"):
+            return entry, False
+        entry["confirmed_at"] = now_iso()
+        return entry, True
+    return None, False
+
+
+def order_expires(document: dict[str, Any]) -> datetime | None:
+    """The CA's own expiry for the recorded order, if it sent one.
+
+    Exposed so an operator can see that the instructions they were handed will stop
+    being answerable, rather than discovering it when a resume re-orders.
+    """
+    return _instant(document.get("order_expires_at"))
+
+
+def order_expired(document: dict[str, Any], *, now: datetime | None = None) -> bool:
+    """Whether the recorded order's own expiry has passed.
+
+    An expired order cannot be resumed or finalized, so the flow re-orders instead.
+    Read from the CA's ``expires`` (stored when the order was placed) rather than
+    from ``started_at`` plus a guessed TTL: the CA is the authority on its own
+    order's lifetime, and guessing shorter would re-order an order that is fine.
+    """
+    expires = _instant(document.get("order_expires_at"))
+    return expires is not None and expires <= (now or _utcnow())
+
+
+#: Bound on stored per-server answers. Eight is far beyond the three or four
+#: authoritative servers a zone has, and a bound keeps a hand-written document from
+#: turning the observation into a storage amplifier.
+MAX_NAMESERVERS = 8
+
+
+def record_observation(
+    document: dict[str, Any],
+    *,
+    status: str,
+    detail: str = "",
+    attempts: int = 0,
+    nameservers: Iterable[tuple[str, str, bool]] = (),
+) -> dict[str, Any]:
+    """Store the last authoritative observation, **without the values it saw**.
+
+    The per-server answer is kept as ``(address, status, serves_expected)``. The
+    observed TXT values are deliberately not stored: they are public, but a name may
+    legitimately carry other services' TXT records (SPF, site verification), and
+    copying those into this platform's database would be collecting data the
+    workflow does not need to act. Only "did the expected value appear" is needed
+    to explain a waiting generation to its operator.
+    """
+    document["propagation"] = {
+        "status": _text(status, limit=32),
+        "detail": _text(detail),
+        "checked_at": now_iso(),
+        "attempts": int(attempts or 0),
+        "nameservers": [
+            {
+                "server": _text(server, limit=64),
+                "status": _text(answer_status, limit=32),
+                "serves_expected": bool(serves_expected),
+            }
+            for server, answer_status, serves_expected in list(nameservers)[:MAX_NAMESERVERS]
+        ],
+    }
+    return document
+
+
+def observation(document: dict[str, Any]) -> dict[str, Any] | None:
+    """The last recorded observation, shape-checked, or ``None`` when there is none."""
+    raw = document.get("propagation")
+    if not isinstance(raw, dict):
+        return None
+    servers = raw.get("nameservers")
+    answers = []
+    if isinstance(servers, list):
+        for answer in servers[:MAX_NAMESERVERS]:
+            if not isinstance(answer, dict):
+                continue
+            answers.append(
+                {
+                    "server": _text(answer.get("server"), limit=64),
+                    "status": _text(answer.get("status"), limit=32),
+                    "serves_expected": bool(answer.get("serves_expected")),
+                }
+            )
+    return {
+        "status": _text(raw.get("status"), limit=32),
+        "detail": _text(raw.get("detail")),
+        "checked_at": _timestamp(raw.get("checked_at")),
+        "attempts": int(raw.get("attempts") or 0),
+        "nameservers": answers,
+    }
+
+
+def cleanup_instructions(document: dict[str, Any], *, complete: bool) -> dict[str, Any]:
+    """What to do with the records this workflow asked the customer to publish.
+
+    **This platform never deletes them.** A manual record was created by the
+    customer, in their own zone, possibly alongside other TXT values at the same
+    name (SPF, another CA's challenge, site verification). An automated cleanup
+    call cannot name the one value it wants removed — the DNS provider's delete is
+    by record reference, and this platform has none — so the honest instruction is
+    the only safe one: remove these exact values, and keep everything else at the
+    name.
+
+    ``complete`` says whether the workflow has finished with them: after a
+    successful issuance or a terminal failure the values are obsolete, while a
+    generation still waiting or still retrying must keep them (removing one would
+    fail the next observation).
+    """
+    records: dict[str, list[str]] = {}
+    for entry in manual_current(document):
+        name = _text(entry.get("record_name"), limit=253)
+        value = _text(entry.get("record_value"), limit=512)
+        if not name or not value:
+            continue
+        values = records.setdefault(name, [])
+        if value not in values:
+            values.append(value)
+    instructions = [
+        {
+            "record_name": name,
+            "remove_values": values,
+            # More than one value at one name is the apex+wildcard case: the
+            # operator must not treat the name as "the challenge record".
+            "shared_name": len(values) > 1,
+        }
+        for name, values in records.items()
+    ]
+    if not instructions:
+        return {
+            "required": False,
+            "records": [],
+            "note": "No manual challenge record was recorded for this certificate.",
+        }
+    if not complete:
+        return {
+            "required": False,
+            "records": instructions,
+            "note": (
+                "Keep these records published until issuance finishes: the certificate "
+                "authority still has to validate them, and removing one now would fail "
+                "the next check."
+            ),
+        }
+    return {
+        "required": True,
+        "records": instructions,
+        "note": (
+            "Issuance no longer needs these values. Delete only the TXT value(s) listed "
+            "for each name and leave every other TXT record at that name in place — "
+            "this platform did not create them and cannot remove them for you."
+        ),
+    }
 
 
 def public_view(document: dict[str, Any]) -> dict[str, Any]:
@@ -483,6 +782,7 @@ def public_view(document: dict[str, Any]) -> dict[str, Any]:
                 "mode": (MODE_MANUAL if entry.get("mode") == MODE_MANUAL else MODE_AUTOMATED),
                 "published": bool(entry.get("published_at")),
                 "confirmed_at": _timestamp(entry.get("confirmed_at")),
+                "observed_at": _timestamp(entry.get("observed_at")),
                 "validated_at": _timestamp(entry.get("validated_at")),
                 "cleanup": _text(entry.get("cleanup"), limit=16) or CLEANUP_PENDING,
                 "error": _text(entry.get("error")),
@@ -513,21 +813,31 @@ __all__ = [
     "MODE_AUTOMATED",
     "MODE_MANUAL",
     "attempt_in_flight",
+    "attempt_unfinished",
     "begin_attempt",
     "challenge",
     "challenge_ref",
     "cleanup_incomplete",
+    "cleanup_instructions",
+    "confirm_published",
     "current_entries",
     "entries",
     "finish_attempt",
     "load",
+    "manual_current",
+    "manual_entry_problem",
     "manual_instructions",
     "manual_pending",
+    "manual_ready",
     "now_iso",
+    "observation",
+    "order_expired",
+    "order_expires",
     "pending_cleanup",
     "pending_publication",
     "public_view",
     "record_challenges",
+    "record_observation",
     "reset_challenges",
     "set_order",
     "started_at",

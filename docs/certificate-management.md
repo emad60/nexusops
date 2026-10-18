@@ -108,6 +108,20 @@ cleanup/reference semantics, which a real CA cannot be made to produce on demand
 verification note). Second, **propagation now requires agreement rather than any one positive
 answer** (§5).
 
+**Shipped since (5.3.2, 2026-10-18, migration `d0e1f2a3b4c5`):** **manual DNS-01** — the
+workflow for a customer whose zone this platform cannot write. `certificates.dns_mode`
+(`automated` | `manual`) names the publisher explicitly rather than inferring it from a
+missing credential, and `ck_certificates_manual_mode_has_no_provider` refuses a manual
+certificate that also names a credential. `AWAITING_MANUAL` is the new **live
+pre-issuance** state in which the order is placed and the attempt has stopped on purpose,
+waiting for a human. The record to publish comes from
+`GET /certificates/{id}/challenge` — the only response in the API that carries a challenge
+value — and `POST /certificates/{id}/challenge/confirm` records "I published it" and
+re-observes authoritative DNS once, dispatching a resume only when the platform itself saw
+the value. Nothing is ever deleted from the customer's zone; cleanup is an instruction
+naming the exact obsolete values. §5.2 has the workflow; phase5-design.md §10.9 has the
+per-module record and the evidence.
+
 **Not shipped (the rest of this document):** private-key delivery, installation, HTTPS
 activation, renewal, expiry monitoring and revocation. `routes.scheme` cannot be set to
 `https` and there is no `certificate_id` column, so an HTTPS route is not merely
@@ -183,8 +197,9 @@ remember.
 | `sans` | JSONB list | Additional identifiers on the order (e.g. apex + wildcard) |
 | `status` | String + CHECK | Certificate-level view: `PENDING`/`ISSUED`/`FAILED`/`EXPIRED`/`SUSPENDED`/`REVOCATION_PENDING`/`REVOKED`/`REVOKED_LOCAL_ONLY`; `state` (material) and `revocation_state` (CA) are separate axes (phase5-design.md §2.2/§9.3) |
 | `challenge_type` | String + CHECK | `dns-01` only in v1; `http-01` is a later fallback, not offered (phase5-design.md §5.2/§5.7) |
+| `dns_mode` | String + CHECK | Who publishes the challenge: `automated` (this platform, through `dns_provider_id`) or `manual` (the customer). Added in 5.3.2; a CHECK refuses `manual` with a provider (phase5-design.md §10.9) |
 | `auto_renew` | Bool | Renewal scan skips rows with false |
-| `dns_provider_id` | UUID FK → `dns_providers` | DNSProvider creds for DNS-01; defaults from the Domain (phase5-design.md §3.4/§5.3) |
+| `dns_provider_id` | UUID FK → `dns_providers` | DNSProvider creds for DNS-01. There is **no** Domain-level credential and no inheritance: the certificate's own reference is the only one (phase5-design.md §10.8.1). NULL is required for `manual` and is refused by issuance for `automated` |
 | `issued_at`, `expires_at` | DateTime | From the issued cert's notBefore/notAfter |
 | `chain_ciphertext` | Text | Fernet(**org DEK**, phase5-design.md §6) of `fullchain.pem` — on the generation row, not the certificate row |
 | `key_ciphertext` | Text | Fernet(**org DEK**) of `privkey.pem` — generation row |
@@ -220,7 +235,10 @@ renewal creates and supersedes. Renewal does not re-enter `validating` on the sa
 stateDiagram-v2
     [*] --> PENDING: generation created (certificate.manage)
     PENDING --> ORDERING: ACME order created
-    ORDERING --> CHALLENGE_PUBLISHED: DNS-01 TXT published
+    ORDERING --> AWAITING_MANUAL: manual DNS-01 order placed, instructions issued
+    AWAITING_MANUAL --> CHALLENGE_PUBLISHED: confirmed, observed and resumed
+    AWAITING_MANUAL --> FAILED: resume/validation error
+    ORDERING --> CHALLENGE_PUBLISHED: DNS-01 TXT published (automated)
     CHALLENGE_PUBLISHED --> VALIDATING: challenge accepted by CA
     VALIDATING --> ISSUED: finalize OK, chain+key stored, expires_at set
     VALIDATING --> FAILED: validation/DNS/finalize error
@@ -502,10 +520,95 @@ attempt: recovering a live attempt would be a second order for one generation.
 
 **Provenance.** The generation records the directory URL its order was created at,
 written when the attempt starts and never rewritten, with two CHECKs beside it (NULL or a
-vocabulary URL; material-bearing ⇒ not NULL). The API derives `directory` and
+vocabulary URL; NULL only before an order exists — once one has been placed, including a
+manual order waiting for the customer, it must name the CA holding it; material-bearing ⇒
+not NULL). The API derives `directory` and
 `publicly_trusted` from that stored URL rather than from current configuration, so a
 staging generation stays labelled staging after the platform is pointed at production and
 an unrecognised URL reads as **not** publicly trusted.
+
+### 5.2 Shipped (5.3.2): manual DNS-01
+
+**A second publisher, not a degraded automated one.** Some customers host DNS somewhere
+this platform has no credential for, and the v1 provider list is Cloudflare only (phase5-
+design.md §5.3). Manual mode is the honest option for them: the platform still places the
+order, still observes authoritative DNS itself, and still verifies the issued chain — it
+simply asks the customer to publish the one TXT record and stops until they say it is
+there. The mode is **explicit** (`dns_mode` on `POST /certificates`), never inferred from
+a missing credential, because "no credential attached yet" is also the state of an
+automated request; a manual request naming a credential is refused by the service
+(`CERTIFICATE_MANUAL_WITH_PROVIDER`) and by a database CHECK, and `PATCH` cannot attach
+one afterwards.
+
+**The attempt stops at `AWAITING_MANUAL`.** It places the order, records each challenge
+(token, key authorization, the TXT name and value, the wildcard flag) in the order
+document with `mode: manual`, and returns without answering the CA. That state is a
+**live** pre-issuance state — the order is open and resumable, so the one-live-generation
+index and the abandoned-attempt recovery both apply — but nothing is scheduled:
+`next_attempt_at` is NULL and `last_error` is empty, because waiting is not failing and
+no attempt has been spent. No private key exists for the generation yet; the CSR that
+opened the order is discarded. The event `CERTIFICATE_AWAITING_MANUAL` announces that
+something is waiting, with the certificate, generation, record count and record names —
+**never the TXT value**, which has exactly one exit (below).
+
+**The instructions are a read, not a mutation.** `GET /certificates/{id}/challenge`
+(`certificate.manage`, the caller's own organization) answers from the persisted order
+document and the certificate row, contacts no DNS, and writes nothing. It carries the
+exact record name and value, the challenge reference the operator quotes back, the
+recommended TTL (a recommendation: the record is theirs), and three timestamps kept
+apart on purpose — the operator said it is published (`confirmed`/`confirmed_at`), the
+platform saw it at the authoritative servers (`observed`/`observed_at`), and the CA
+validated it (`validated`/`validated_at`). It also carries the last observation's status
+and a **per-server summary** (address, judged status, whether that server served every
+expected value) with no TXT values from the zone, because a challenge name may hold other
+services' records. A persisted entry that no longer has the shape the flow produced — a
+truncated value, a reference that names nothing — is reported as `problem` and refused by
+the confirmation endpoint (`CERTIFICATE_MANUAL_CHALLENGE_INVALID`), so a hand-edited
+column cannot send an operator to publish something arbitrary.
+
+**Confirmation is a request to look, never a verdict.** `POST
+/certificates/{id}/challenge/confirm` answers `202 Accepted`. It stamps `confirmed_at`
+(the first confirmation's timestamp survives a repeat — idempotent by construction),
+re-observes the name's authoritative servers **once** through
+`dns_propagation.check_once` (the same judging code the automated wait uses, without the
+propagation deadline and without holding a worker), records the observation, and marks
+`observed_at` only when the whole expected set passed on every answering authority. It
+never marks a challenge validated and never skips the attempt's own observation: the
+resume attempt observes again immediately before it answers the CA, so a record removed
+in between is caught. `ready` is true only when every record is both confirmed and
+observed, and only then is a resume dispatched (`resume_requested`); a resume reuses the
+open order rather than placing a second one, and no attempt is spent while the record is
+absent. Refusals are named: `CERTIFICATE_MANUAL_CHALLENGE_NOT_PENDING` (the certificate
+is not waiting — including an automated one), `CERTIFICATE_NO_GENERATION`,
+`CERTIFICATE_CONTEXT_INCOMPLETE`, `CERTIFICATE_ORDER_LOST`,
+`CERTIFICATE_CHALLENGE_NOT_FOUND` and `CERTIFICATE_MANUAL_CHALLENGE_INVALID`.
+
+**Nothing is deleted from the customer's zone.** The platform did not create the record
+and holds no provider reference for it, so cleanup is an instruction: after issuance
+finishes, the challenge response lists the exact value(s) to remove and says to keep every
+other TXT record at the name (an apex + wildcard order shares one name and differs only
+in value). While the generation is still waiting or retrying, the same section says to
+keep the records in place. A manual generation's document entries carry
+`cleanup: not_required`, so the automated cleanup path never runs for them.
+
+**The sweep leaves a waiting generation alone.** `nx.sweep_certificates` counts
+`awaiting_manual` and dispatches nothing for it: a dispatch would only buy the same
+`CERTIFICATE_AWAITING_MANUAL` refusal once per tick, and a fresh attempt stamp would make
+a deliberate wait indistinguishable from a worker that died. What makes a waiting
+generation dispatchable is the platform observing the published value — the confirmation
+endpoint, or an attempt that finds every record ready.
+
+**Verified against a real CA (2026-10-19).** `make test-pebble` now drives this workflow
+through the isolated Pebble stack and the real client adapter (§11). A manual certificate
+with no credential and a provider factory that raises on any call is issued end to end:
+the order stops at `AWAITING_MANUAL`, the operator publishes the exact TXT value at both
+authoritative views, the confirmation observes it and dispatches one resume, and that
+resume finalizes the **same** order — no second order, no provider call, and the
+customer's record still present afterwards. The same run pins a wrong value never
+authorizing, one stale authority keeping the CA unaware, an interrupted resume recovering
+from the persisted order, and no key, chain, value or credential in API responses, events,
+audit rows or logs. The fake-CA suite remains the owner of the failure vocabulary and
+backoff a real CA cannot be made to produce on demand.
 
 ## 6. Delivery to serving nodes
 
@@ -691,15 +794,24 @@ paths then atomically moved only after `nginx -t` passes (the shipped Phase 4
 stage → validate → backup → swap → reload → rollback pipeline,
 phase5-design.md §8.4).
 
-**Verification — two suites, two claims (5.3.1).** Neither suite substitutes for the
-other, and the commands are separate so a run says which claim it made:
+**Verification — three claims, three suites (5.3.2).** None substitutes for another, and
+the commands are separate so a run says which claim it made:
 
 | Command | Infrastructure | What it proves |
 |---|---|---|
 | `make test-backend` | PostgreSQL + Redis | everything, including both suites below through the ordinary run |
 | `make test-backend-unit` | none | the pure pieces: the order document, the propagation fold, the ACME seam, the attempt's helpers |
 | `make test-backend` → `tests/integration/test_certificate_issuance.py` | PostgreSQL + Redis | the **flow** with a fake CA session, fake zone and fake observer: success, the CA-side failure families, backoff, cleanup reference semantics, duplicate dispatch, manual retry |
-| `make test-pebble` → `tests/integration/test_certificate_pebble.py` | the isolated Pebble + two-view authoritative-DNS stack (`docker-compose.pebble.yml`) plus PostgreSQL + Redis | **interoperability**: a certificate really is issued by a CA that really resolves the challenge name, and the flow's own propagation observation is what lets it validate |
+| `make test-pebble` → `tests/integration/test_certificate_pebble.py` | the isolated Pebble + two-view authoritative-DNS stack (`docker-compose.pebble.yml`) plus PostgreSQL + Redis | **interoperability**: a certificate really is issued by a CA that really resolves the challenge name, and the flow's own propagation observation is what lets it validate. Since 2026-10-19 the same suite also drives **manual DNS-01** end to end: the operator publishes at the two authoritative views, the confirmation dispatches one resume, the resumed **same** order finalizes through Pebble, and the customer's record is still there afterwards |
+| `make test-backend` → `tests/integration/test_certificate_manual_issuance.py` | PostgreSQL + Redis (fake CA, resolver stub, a provider factory that fails if called) | **the manual workflow**: no credential is touched, the attempt stops at `AWAITING_MANUAL` with no material, the instructions are the CA's own values, confirmation does not become a verdict, a resume re-observes before answering, cleanup is an instruction, and the value appears only in the challenge endpoint |
+
+**The manual Pebble run found a real defect (2026-10-19).** Finalization used the order
+resource the session held; a manual order resumed by URL carries no CSR, and the manual
+flow generates its key **after** validation, so the library tried to parse an empty CSR and
+failed with `ACME_REQUEST_FAILED` before the CA was asked. The fake CA accepted any CSR it
+was handed, which is why the fake suite was green. Finalization now attaches the attempt's
+own CSR, `test_finalize_order_sends_this_attempts_csr` pins that in a unit test, and the
+manual workflow is now proven end to end against Pebble (phase5-design.md §10.9.4).
 
 The Pebble suite does **not** skip when its stack is missing: a missing Docker daemon, a
 failed `up` or an unreachable directory is a failure naming `make pebble-up`. Pebble's TLS
@@ -710,15 +822,19 @@ startup validator refuses it in production).
 
 ## 12. Audit and events
 
-**Shipped in 5.3:** the audit actions below marked *(shipped)* are written by the
-issuance flow today — `certificate.issued` by the worker when the chain is stored, and
-`certificate.issuance_retried` when an operator pulls an attempt forward. The rest belong
-to the later slices. The shipped event types are `CERTIFICATE_ISSUED`,
+**Shipped in 5.3 / 5.3.2:** the audit actions below marked *(shipped)* are written by the
+issuance flow today — `certificate.issued` by the worker when the chain is stored,
+`certificate.issuance_retried` when an operator pulls an attempt forward, and
+`certificate.challenge_confirmed` for a manual confirmation. The rest belong to the later
+slices. The shipped event types are `CERTIFICATE_ISSUED`,
 `CERTIFICATE_ISSUANCE_FAILED` (one attempt; retries may remain — a **warning** alert),
-`CERTIFICATE_ISSUANCE_RETRIED`, and `CERTIFICATE_FAILED` (the budget is spent and nobody
-is working on it — a **critical** alert, because only a human can decide what happens
-next). Which is which is decided in `alert_service` by set membership, so adding a type
-to the wrong set is a deliberate edit rather than an accident of naming.
+`CERTIFICATE_ISSUANCE_RETRIED`, `CERTIFICATE_FAILED` (the budget is spent and nobody is
+working on it — a **critical** alert, because only a human can decide what happens next),
+and the manual pair `CERTIFICATE_AWAITING_MANUAL` / `CERTIFICATE_CHALLENGE_CONFIRMED`
+(informational: the first says the next step is the operator's, the second reports the
+judged observation; neither carries the TXT value). Which is which is decided in
+`alert_service` by set membership, so adding a type to the wrong set is a deliberate edit
+rather than an accident of naming.
 
 Audit actions (append-only, org-attributed once tenancy lands, named per the
 `resource.action` convention in domain-model.md §2.6):
@@ -728,6 +844,7 @@ Audit actions (append-only, org-attributed once tenancy lands, named per the
 | `certificate.created` | Create | user |
 | `certificate.issued` *(shipped, 5.3)* | Chain stored | system (worker) |
 | `certificate.issuance_retried` *(shipped, 5.3)* | Operator pulled the next attempt forward | user |
+| `certificate.challenge_confirmed` *(shipped, 5.3.2)* | Operator confirmed a manual challenge record; carries references and the judged propagation status, never the value | user |
 | `certificate.renewed` | Renewal chain stored | system (worker) |
 | `certificate.failed` | Attempt budget exhausted | system (worker) |
 | `certificate.deployed` | Node reports install success | agent |
@@ -741,7 +858,8 @@ Audit actions (append-only, org-attributed once tenancy lands, named per the
 | `certificate.deleted` | Row deleted | user |
 
 SystemEvent equivalents (`CERTIFICATE_ISSUED`, `CERTIFICATE_ISSUANCE_FAILED`,
-`CERTIFICATE_ISSUANCE_RETRIED`, `CERTIFICATE_FAILED`, and the later slices'
+`CERTIFICATE_ISSUANCE_RETRIED`, `CERTIFICATE_FAILED`, `CERTIFICATE_AWAITING_MANUAL`,
+`CERTIFICATE_CHALLENGE_CONFIRMED`, and the later slices'
 `certificate.renewed` / `certificate.deployed`) go through `event_bus.publish` with
 ids/status/fingerprint only (§9), giving the events feed and a future
 `org:{org_id}:certificates` WS channel everything the UI needs without a leak path.

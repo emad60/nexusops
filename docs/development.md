@@ -263,6 +263,11 @@ make test                 # unit backend + frontend vitest — no services neede
   hand. The suite **fails** rather than skips when Docker, the stack or the directory
   is missing, so a green run is evidence; Pebble's self-signed TLS is trusted only in
   the `pebble` client path and its test root is never added to a system trust store.
+  Since 2026-10-19 the same file also drives the **manual DNS-01** workflow against
+  Pebble: the test publishes at both authoritative views the way an operator would,
+  confirms through the API, and asserts the resumed order (not a new one) is what the
+  CA finalizes. Do not treat `make test-backend` as covering that path — the fake CA
+  cannot validate which CSR an attempt finalized with.
 - Pytest configuration lives in `backend/pyproject.toml`:
   `asyncio_mode = "auto"`, `--strict-markers`, and the single custom marker
   `integration: requires PostgreSQL + Redis`. `DeprecationWarning` raised from

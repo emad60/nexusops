@@ -65,6 +65,12 @@ EVENT_TYPES: dict[str, str] = {
     "CERTIFICATE_ISSUANCE_FAILED": "One issuance attempt failed; another may be scheduled",
     "CERTIFICATE_ISSUANCE_RETRIED": "An operator asked for another issuance attempt",
     "CERTIFICATE_FAILED": "Issuance gave up for this generation: the attempt budget is spent",
+    # manual DNS-01 (Phase 5.3.2) — the customer publishes this record, so the two
+    # facts worth announcing are "someone has to act" and "they said they did".
+    # Neither carries the TXT value: that has one exit, the authenticated challenge
+    # endpoint, and an event payload is readable by everything on the bus.
+    "CERTIFICATE_AWAITING_MANUAL": "Issuance stopped until an operator publishes the challenge record",
+    "CERTIFICATE_CHALLENGE_CONFIRMED": "An operator confirmed the challenge record and its authoritative DNS was rechecked",
     # certificate inputs (Phase 5.2.2) — the credentials and accounts issuance will
     # use. Each of these says only that a stored input changed; none of them is an
     # issuance, a delivery or an activation event, and none carries a secret.

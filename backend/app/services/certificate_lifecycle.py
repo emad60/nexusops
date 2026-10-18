@@ -18,6 +18,10 @@ constraint instead of by the absence of the column.
 The machine (phase5-design.md §2.2):
 
     PENDING → ORDERING → CHALLENGE_PUBLISHED → VALIDATING → ISSUED
+    ORDERING → AWAITING_MANUAL → CHALLENGE_PUBLISHED        (manual DNS-01)
+    AWAITING_MANUAL → ORDERING                              (re-order, e.g. expired)
+    AWAITING_MANUAL → FAILED
+    FAILED → AWAITING_MANUAL                                (retry: order still open)
     ISSUED  → SUPERSEDED | SUSPENDED | EXPIRED | REVOCATION_PENDING
     SUPERSEDED → SUSPENDED | REVOCATION_PENDING
     SUSPENDED  → REVOCATION_PENDING
@@ -67,7 +71,26 @@ TRANSITIONS: dict[CertificateGenerationState, frozenset[CertificateGenerationSta
         {CertificateGenerationState.ORDERING, CertificateGenerationState.FAILED}
     ),
     CertificateGenerationState.ORDERING: frozenset(
-        {CertificateGenerationState.CHALLENGE_PUBLISHED, CertificateGenerationState.FAILED}
+        {
+            CertificateGenerationState.CHALLENGE_PUBLISHED,
+            # The manual DNS-01 branch: the order is placed and the attempt stops
+            # deliberately, because publishing the record is the customer's act.
+            CertificateGenerationState.AWAITING_MANUAL,
+            CertificateGenerationState.FAILED,
+        }
+    ),
+    # A manual generation waits for an operator without holding a worker. Both ways
+    # out are legal and mean different things: an authoritative observation that
+    # passed moves it forward, and a fresh order (the previous one expired, or the
+    # document was unreadable) goes back through ``ORDERING``. ``FAILED`` is for a
+    # failure the platform recorded while resuming — never for "the operator has not
+    # confirmed yet", which is the state itself.
+    CertificateGenerationState.AWAITING_MANUAL: frozenset(
+        {
+            CertificateGenerationState.ORDERING,
+            CertificateGenerationState.CHALLENGE_PUBLISHED,
+            CertificateGenerationState.FAILED,
+        }
     ),
     CertificateGenerationState.CHALLENGE_PUBLISHED: frozenset(
         {CertificateGenerationState.VALIDATING, CertificateGenerationState.FAILED}
@@ -75,7 +98,16 @@ TRANSITIONS: dict[CertificateGenerationState, frozenset[CertificateGenerationSta
     CertificateGenerationState.VALIDATING: frozenset(
         {CertificateGenerationState.ISSUED, CertificateGenerationState.FAILED}
     ),
-    CertificateGenerationState.FAILED: frozenset({CertificateGenerationState.ORDERING}),
+    CertificateGenerationState.FAILED: frozenset(
+        {
+            CertificateGenerationState.ORDERING,
+            # A retry of a manual generation whose order is still open does not
+            # re-order: it observes the record the operator already published and,
+            # when that observation has not happened yet, goes back to waiting
+            # rather than handing out a second set of instructions.
+            CertificateGenerationState.AWAITING_MANUAL,
+        }
+    ),
     CertificateGenerationState.ISSUED: frozenset(
         {
             CertificateGenerationState.SUPERSEDED,
@@ -291,6 +323,7 @@ def next_attempt_at(attempt_count: int, *, now: datetime | None = None) -> datet
 _STATUS_FOR: dict[CertificateGenerationState, CertificateStatus] = {
     CertificateGenerationState.PENDING: CertificateStatus.PENDING,
     CertificateGenerationState.ORDERING: CertificateStatus.PENDING,
+    CertificateGenerationState.AWAITING_MANUAL: CertificateStatus.PENDING,
     CertificateGenerationState.CHALLENGE_PUBLISHED: CertificateStatus.PENDING,
     CertificateGenerationState.VALIDATING: CertificateStatus.PENDING,
     CertificateGenerationState.FAILED: CertificateStatus.FAILED,
@@ -317,6 +350,10 @@ def status_detail_for(state: object, attempt_count: int = 0) -> str:
         return "Requested — no certificate has been issued yet"
     if resolved is CertificateGenerationState.ORDERING:
         return "An order is being placed with the certificate authority — nothing is issued yet"
+    if resolved is CertificateGenerationState.AWAITING_MANUAL:
+        return (
+            "Waiting for the challenge record to be published and confirmed — nothing is issued yet"
+        )
     if resolved is CertificateGenerationState.CHALLENGE_PUBLISHED:
         return "Ownership challenge published — nothing is issued yet"
     if resolved is CertificateGenerationState.VALIDATING:

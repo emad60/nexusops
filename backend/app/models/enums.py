@@ -517,11 +517,13 @@ class AcmeDirectory(StrEnum):
       tests, CI and non-production deployments default to staging").
     * ``PRODUCTION`` — Let's Encrypt's production endpoint. Selecting it requires
       explicit configuration *and* a production environment; nothing infers it.
-    * ``PEBBLE`` — the local ``pebble`` test CA a developer can run by hand for a
-      real ACME round trip (``https://localhost:14000/dir``, Pebble's documented
-      default; the test suite itself fakes the CA and needs neither Pebble nor
-      egress). Its address is **fixed here rather than configured**, so the closed
-      set stays closed: no environment variable can point a value called "pebble"
+    * ``PEBBLE`` — the local ``pebble`` test CA, and the one directory no
+      deployment may use (``https://localhost:14000/dir``, Pebble's documented
+      default). ``make test-pebble`` runs the production adapter and the real flow
+      against it in an isolated stack (``docker-compose.pebble.yml``); the ordinary
+      suite still needs neither Pebble nor egress, because its CA, zone and
+      resolver are fakes. Its address is **fixed here rather than configured**, so
+      the closed set stays closed: no environment variable can point a value called "pebble"
       at a real CA, and the test directory cannot be reached from production at all
       (:func:`app.services.acme.directory.select_directory` refuses it there). Its
       certificate is self-signed, so the one thing that differs in how the client

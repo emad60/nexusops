@@ -610,8 +610,9 @@ async def delete_dns_provider(
 
     The FK is ``ON DELETE RESTRICT``, so the database would refuse anyway; this
     turns that into a named 409 explaining which certificate to rebind first. A
-    silent fallback to the Domain's credential would change which token the
-    platform signs with on the next renewal.
+    silent fallback to another credential would change which token the platform
+    signs with on the next attempt, so deletion stays blocked until the operator
+    rebinds explicitly.
     """
     provider = await require_provider(db, provider_id)
     in_use = await db.scalar(
@@ -623,7 +624,7 @@ async def delete_dns_provider(
     if in_use is not None:
         raise Conflict(
             f"Certificate '{in_use}' still uses this DNS credential. Point it at another "
-            "provider (or at its domain's) before deleting this one.",
+            "provider before deleting this one.",
             code="DNS_PROVIDER_IN_USE",
         )
     name = provider.name

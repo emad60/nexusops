@@ -4,11 +4,17 @@ Phase 5.1 shipped the identity and lifecycle half of the certificate subsystem, 
 everything in this module is about *what was asked for* and *how far the request
 has got* — never about a key. Creating a certificate here records an intent: the
 row, its first generation in ``PENDING``, an audit entry and an event. It does not
-contact a CA, does not queue a worker, and **cannot produce material**: 5.2.2
-owned the material columns, the guard CHECK that requires them in every
-post-issuance state, and the credential a challenge will be published with — but
-nothing in this module writes any of them, and no serializer here emits one. The
-states that *would* carry material exist now; the code that fills them is 5.3.
+contact a CA and **cannot produce material**: 5.2.2 owned the material columns,
+the guard CHECK that requires them in every post-issuance state, and the credential
+a challenge will be published with — but nothing in this module writes any of
+them, and no serializer here emits one.
+
+What it does do since 5.3 is *hand the fresh generation to the worker*
+(:func:`app.services.certificate_issuance.enqueue_generation`), deferred to after
+its transaction commits. Recording a request and attempting it are deliberately
+one call apart and one process apart: the ACME round trip and the DNS propagation
+wait are exactly what a request thread must never hold a transaction through, and
+the worker re-validates everything this module checked before it touches a CA.
 
 Rules enforced here rather than in the API layer, so a worker-initiated call
 obeys them identically:
@@ -65,6 +71,7 @@ from app.schemas.certificate import (
     CertificateUpdate,
 )
 from app.services import audit_service, certificate_lifecycle, event_bus
+from app.services.acme.directory import directory_for_url
 
 log = get_logger("nexusops.certificates")
 
@@ -229,8 +236,10 @@ async def create_certificate(
         key_algorithm=CertificateKeyAlgorithm.ECDSA_P256,
         expires_at=None,
         last_error="",
-        # NULL is a value here, not a missing one: it means "inherit the Domain's
-        # credential", which is what a certificate that names none does.
+        # NULL is a value here, not a missing one: it means "no credential chosen
+        # yet". The request is still recorded, and issuance refuses it with a named
+        # code until PATCH attaches one — which is honest, and keeps the create
+        # path usable before the operator has stored their DNS token.
         dns_provider_id=dns_provider.id if dns_provider is not None else None,
         suspended_at=None,
         suspension_reason="",
@@ -301,6 +310,12 @@ async def create_certificate(
         primary_cn=primary_cn,
         identifiers=len(sans) + 1,
     )
+    # Imported here rather than at module scope: the issuance flow imports this
+    # module (it reads the certificate a generation belongs to), so a top-level
+    # import in either direction would be a cycle.
+    from app.services.certificate_issuance import enqueue_generation
+
+    enqueue_generation(db, generation.id)
     return certificate
 
 
@@ -343,8 +358,8 @@ async def update_certificate(
 
     The two fields read an explicit ``null`` differently on purpose. For
     ``auto_renew``, null is the absence of a value and is ignored; for
-    ``dns_provider_id``, null *is* the value — it clears the override so the
-    certificate inherits its Domain's credential again.
+    ``dns_provider_id``, null *is* the value — it detaches the credential, which
+    leaves the certificate unissuable until another is attached.
     """
     certificate = await get_certificate(db, certificate_id)
     data = payload.model_dump(exclude_unset=True)
@@ -554,6 +569,15 @@ def serialize_generation(generation: CertificateGeneration) -> CertificateGenera
     payload.status_detail = certificate_lifecycle.status_detail_for(
         generation.state, generation.attempt_count
     )
+    # Which authority answered for this generation, and whether a browser would
+    # trust a certificate from it. Derived from the URL stored on the row rather
+    # than from the current configuration: a generation issued at staging stays
+    # labelled staging after the platform is pointed at production, and an
+    # unrecognised URL reads as not publicly trusted rather than as trusted
+    # because it is unreadable.
+    directory = directory_for_url(generation.directory_url)
+    payload.directory = directory
+    payload.publicly_trusted = bool(directory and directory.is_publicly_trusted)
     return payload
 
 

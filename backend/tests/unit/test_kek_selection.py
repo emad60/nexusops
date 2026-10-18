@@ -56,6 +56,13 @@ def _settings(**overrides: object):
 
     # jwt_secret / encryption_key come from the process environment, which the test
     # bootstrap has already pinned; only the key-management fields vary here.
+    # ``acme_directory`` is pinned to a valid value for the environment under test:
+    # 5.3 made production require an explicit directory, and this module is about
+    # the KEK choice, so it must not fail on an unrelated validator first.
+    overrides.setdefault(
+        "acme_directory",
+        "production" if overrides.get("environment") == "production" else "staging",
+    )
     return Settings(_env_file=None, **overrides)  # type: ignore[arg-type]
 
 

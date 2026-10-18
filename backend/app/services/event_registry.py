@@ -55,11 +55,16 @@ EVENT_TYPES: dict[str, str] = {
     "ROUTE_REMOVAL_CONFIRMED": "A node applied a configuration without this route, so it is no longer served",
     "NGINX_DRIFT_DETECTED": "Node configuration drifted from the desired bundle",
     "NGINX_DRIFT_RECOVERED": "Node configuration was re-applied after drift",
-    # certificates (Phase 5) — the request is recorded here; issuance, delivery,
-    # installation and activation each get their own event in a later slice, so
-    # this type never stands in for one of them.
+    # certificates (Phase 5) — a request, an issuance and a failure are three
+    # different facts and none of them stands in for another: delivery and
+    # installation get their own events in a later slice.
     "CERTIFICATE_REQUESTED": "Certificate requested for a verified domain; nothing has been issued yet",
     "CERTIFICATE_DELETED": "Certificate request deleted (no certificate had been issued)",
+    # certificate issuance (Phase 5.3)
+    "CERTIFICATE_ISSUED": "Certificate issued and its material stored",
+    "CERTIFICATE_ISSUANCE_FAILED": "One issuance attempt failed; another may be scheduled",
+    "CERTIFICATE_ISSUANCE_RETRIED": "An operator asked for another issuance attempt",
+    "CERTIFICATE_FAILED": "Issuance gave up for this generation: the attempt budget is spent",
     # certificate inputs (Phase 5.2.2) — the credentials and accounts issuance will
     # use. Each of these says only that a stored input changed; none of them is an
     # issuance, a delivery or an activation event, and none carries a secret.

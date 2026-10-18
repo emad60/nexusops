@@ -12,6 +12,7 @@ APP_PG_URL := postgresql+psycopg://$${POSTGRES_APP_USER:-nexusops_app}:$${POSTGR
 REDIS := redis://127.0.0.1:$${NEXUSOPS_REDIS_PORT:-6390}/0
 
 .PHONY: help install dev up down logs test test-backend test-backend-unit test-frontend e2e e2e-stack e2e-await-worker e2e-down \
+        pebble-up pebble-down test-pebble \
         lint lint-backend lint-frontend format typecheck migrate makemigrations seed clean build
 
 help: ## Show this help
@@ -139,6 +140,24 @@ e2e-stack: ## Bring up + seed the isolated e2e stack and leave it running (for d
 
 e2e-down: ## Tear down the isolated e2e stack and its volume (DESTRUCTIVE)
 	@$(E2E_COMPOSE) down -v --remove-orphans
+
+# --- Phase 5.3.1: real ACME against Pebble -----------------------------------
+# Its own compose project on host loopback (127.0.0.2/127.0.0.3), so it cannot
+# collide with the dev stack, the e2e stack or anything else on port 53. The
+# test starts this stack itself when it is not already running; these targets
+# exist for running it by hand and for looking at its logs.
+PEBBLE_PROJECT ?= nexusops-pebble
+PEBBLE_COMPOSE := $(COMPOSE) -p $(PEBBLE_PROJECT) -f docker-compose.pebble.yml
+
+pebble-up: ## Start the isolated Pebble CA + two-view authoritative DNS stack
+	@$(PEBBLE_COMPOSE) up -d --build
+
+pebble-down: ## Tear down the Pebble test stack (no volumes are used)
+	@$(PEBBLE_COMPOSE) down --remove-orphans
+
+test-pebble: ## Run the real-ACME integration test (needs postgres+redis; starts its own stack)
+	cd backend && DATABASE_URL=$(APP_PG_URL) MIGRATION_DATABASE_URL=$(PG_URL) REDIS_URL=$(REDIS) \
+		uv run pytest tests/integration/test_certificate_pebble.py -m pebble -v
 
 lint: lint-backend lint-frontend ## Lint everything
 lint-backend:

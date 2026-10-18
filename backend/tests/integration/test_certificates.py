@@ -37,7 +37,7 @@ import psycopg
 import pytest
 from app.core.tenancy import TenancyScopeError, apply_scope_to_session, system_scope
 from app.models import AuditLog, Certificate, CertificateGeneration, SystemEvent
-from app.models.enums import DomainStatus
+from app.models.enums import AcmeDirectory, DomainStatus
 from app.services import dns_verifier
 from app.services.dns_verifier import STATUS_OK, TxtObservation
 from sqlalchemy import select
@@ -106,6 +106,11 @@ GENERATION_FIELDS = {
     "issued_at",
     "fingerprint",
     "revocation_state",
+    # Provenance (5.3): which directory the order was placed at, the same value
+    # resolved to a known directory, and whether that directory is publicly trusted.
+    "directory_url",
+    "directory",
+    "publicly_trusted",
 }
 
 
@@ -190,8 +195,21 @@ async def _member_with_role(client, owner, role_name: str) -> dict:
     }
 
 
-async def _insert_generation(org_db, certificate_id: str, *, generation: int, state: str) -> None:
-    """Write a generation straight to the database, bypassing every service rule."""
+async def _insert_generation(
+    org_db,
+    certificate_id: str,
+    *,
+    generation: int,
+    state: str,
+    directory_url: str | None = None,
+) -> None:
+    """Write a generation straight to the database, bypassing every service rule.
+
+    ``directory_url`` is a parameter rather than a constant because 5.3 added a
+    second constraint on the same rows: a material-bearing state must name the ACME
+    directory it was ordered at, so a test isolating the *material* guard has to
+    satisfy the provenance rule to reach it.
+    """
     org_db.add(
         CertificateGeneration(
             id=uuid.uuid4(),
@@ -201,6 +219,7 @@ async def _insert_generation(org_db, certificate_id: str, *, generation: int, st
             order_state={},
             last_error="",
             attempt_count=0,
+            directory_url=directory_url,
         )
     )
     await org_db.flush()
@@ -509,9 +528,12 @@ async def test_a_material_bearing_generation_cannot_be_written_without_material(
     domain = await _create_domain(client, owner, "unrepresentable.example.com")
     created = await _created_certificate(client, owner, domain)
 
+    staging_url = AcmeDirectory.STAGING.url()
     for state in ("ISSUED", "SUPERSEDED", "REVOKED_LOCAL_ONLY"):
         with pytest.raises(Exception) as exc:
-            await _insert_generation(org_db, created["id"], generation=9, state=state)
+            await _insert_generation(
+                org_db, created["id"], generation=9, state=state, directory_url=staging_url
+            )
         assert "material_guard" in str(exc.value), state
         await org_db.rollback()
 
@@ -539,6 +561,9 @@ async def test_a_material_bearing_generation_cannot_be_written_without_material(
             not_before=issued_at,
             not_after=issued_at + timedelta(days=90),
             fingerprint="0" * 64,
+            # The provenance rule 5.3 pairs with the guard: the same row without
+            # this value was refused a few lines above, and for a different reason.
+            directory_url=staging_url,
         )
     )
     await org_db.flush()

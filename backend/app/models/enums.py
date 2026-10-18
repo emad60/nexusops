@@ -509,6 +509,26 @@ class AcmeDirectory(StrEnum):
     generation records so a staging certificate can be recognized as staging from
     its own data.
 
+    Three members, and the third one exists because the design demands a local
+    test CA that a test may reach and production may not:
+
+    * ``STAGING`` — Let's Encrypt's staging endpoint. The **default for every
+      non-production environment** (phase5-design.md §5.4's "local development,
+      tests, CI and non-production deployments default to staging").
+    * ``PRODUCTION`` — Let's Encrypt's production endpoint. Selecting it requires
+      explicit configuration *and* a production environment; nothing infers it.
+    * ``PEBBLE`` — the local ``pebble`` test CA a developer can run by hand for a
+      real ACME round trip (``https://localhost:14000/dir``, Pebble's documented
+      default; the test suite itself fakes the CA and needs neither Pebble nor
+      egress). Its address is **fixed here rather than configured**, so the closed
+      set stays closed: no environment variable can point a value called "pebble"
+      at a real CA, and the test directory cannot be reached from production at all
+      (:func:`app.services.acme.directory.select_directory` refuses it there). Its
+      certificate is self-signed, so the one thing that differs in how the client
+      is built for this member is TLS verification — see
+      :func:`app.services.acme.library.build_client`, where that relaxation is
+      keyed on this member being *non-production* and is refused everywhere else.
+
     Production is a **separate member, never inferred from the environment**: the
     design's rule is that selecting production requires explicit configuration, so
     there is no ``default()`` here and no function that reads ``ENVIRONMENT`` to
@@ -519,18 +539,46 @@ class AcmeDirectory(StrEnum):
 
     STAGING = "staging"
     PRODUCTION = "production"
+    PEBBLE = "pebble"
 
     def url(self) -> str:
         """The directory URL stored on the account row and recorded per issuance."""
         return _ACME_DIRECTORY_URLS[self]
 
+    @property
+    def is_production(self) -> bool:
+        """Whether this directory issues publicly trusted certificates.
+
+        The single predicate every guard reads — the settings validator (which
+        refuses this member outside production), the client factory (which refuses
+        to relax TLS verification for it) and the read model that labels a
+        certificate "not publicly trusted". A property rather than a set union at
+        each call site, so adding a CA cannot silently leave one guard behind.
+        """
+        return self is AcmeDirectory.PRODUCTION
+
+    @property
+    def is_publicly_trusted(self) -> bool:
+        """Whether a certificate from this directory is trusted by a browser.
+
+        False for staging and Pebble: both mint certificates signed by a CA a
+        client does not trust, which is why a generation records the directory it
+        was issued at and the API labels the result.
+        """
+        return self.is_production
+
+    @property
+    def label(self) -> str:
+        """Short operator-facing name, stored in metadata and shown in the API."""
+        return _ACME_DIRECTORY_LABELS[self]
+
     @classmethod
     def from_url(cls, url: str) -> AcmeDirectory | None:
-        """The directory a stored URL names, or ``None`` when it names neither.
+        """The directory a stored URL names, or ``None`` when it names none.
 
         ``None`` rather than a default: an unrecognized directory URL — a future
         CA, a typo, a hand-edited row — must be visible as unknown instead of being
-        silently treated as one of the two known directories.
+        silently treated as one of the known directories.
         """
         for directory, candidate in _ACME_DIRECTORY_URLS.items():
             if candidate == url:
@@ -538,11 +586,22 @@ class AcmeDirectory(StrEnum):
         return None
 
 
-#: One URL per directory. Let's Encrypt's published endpoints; a CA swap is a new
-#: member plus an entry here, and every existing row keeps the URL it was made at.
+#: One URL per directory. Let's Encrypt's published endpoints plus Pebble's
+#: documented local default; a CA swap is a new member plus an entry here, and
+#: every existing row keeps the URL it was made at.
 _ACME_DIRECTORY_URLS: dict[AcmeDirectory, str] = {
     AcmeDirectory.STAGING: "https://acme-staging-v02.api.letsencrypt.org/directory",
     AcmeDirectory.PRODUCTION: "https://acme-v02.api.letsencrypt.org/directory",
+    AcmeDirectory.PEBBLE: "https://localhost:14000/dir",
+}
+
+#: The word an operator sees. Staging and Pebble both mean "not publicly trusted",
+#: but they are different facts — one is a real CA's rehearsal endpoint, the other
+#: is a test server in a container — so they are never collapsed into one label.
+_ACME_DIRECTORY_LABELS: dict[AcmeDirectory, str] = {
+    AcmeDirectory.STAGING: "Let's Encrypt staging",
+    AcmeDirectory.PRODUCTION: "Let's Encrypt production",
+    AcmeDirectory.PEBBLE: "Pebble (local test CA)",
 }
 
 

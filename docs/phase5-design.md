@@ -1,7 +1,7 @@
 # Phase 5 — HTTPS, Certificates and Private-Key Delivery — Design
 
-**Status:** Authoritative Phase 5 design. **Phase 5.1, 5.2.1, 5.2.1.2 and 5.2.2 are
-shipped; everything from 5.3 on is design only.** Shipped (2026-10-12, `37b7211`): the
+**Status:** Authoritative Phase 5 design. **Phase 5.1, 5.2.1, 5.2.1.2, 5.2.2 and 5.3 are
+shipped; everything from 5.4 on is design only.** Shipped (2026-10-12, `37b7211`): the
 `certificates` and `certificate_generations` tables, the pre-issuance generation
 lifecycle, the `certificate.read`/`certificate.manage` codenames with the role matrix,
 both tables' RLS policies and grants, and the metadata-only certificate API — see §1.1
@@ -14,12 +14,17 @@ DEK and the pre-call zone allowlist; `acme_accounts`, one per organization per
 directory, with its key wrapped under that same DEK; the `certificate_generations`
 material columns with the widened `state` vocabulary and the material guard that keeps
 the widening from re-opening the window 5.1 closed; and `certificates.dns_provider_id`,
-added in the revision that adds the table it references.
-**Not shipped:** ACME issuance (5.3 — no ACME client, no CA contact, no order),
-private-key delivery (5.4), HTTPS activation (5.5), renewal, expiry monitoring and
-revocation (5.6) — §7, §8, §9, §10.1. Nothing in the tree signs a CSR, stores a
-customer certificate or private key, publishes a challenge record, or delivers
-anything to a node.
+added in the revision that adds the table it references. Also shipped: **ACME issuance**
+(5.3, 2026-10-16, migration `c9d0e1f2a3` — §10.8): the `acme`/`josepy` client behind the
+`AcmeProvider` seam, the DNS-01 record seam with its propagation check, registration of
+the per-organization account, the order/publish/prove/validate/finalize flow with the
+attempt budget and backoff, the crash-recovery order document, the issuance worker and
+its sweep, and the provenance column that lets the API say whether an issued certificate
+is publicly trusted. A generation now reaches `ISSUED` with material encrypted under the
+organization DEK.
+**Not shipped:** private-key delivery (5.4), HTTPS activation (5.5), renewal, expiry
+monitoring and revocation (5.6) — §7, §8, §9, §10.1. Nothing in the tree delivers
+certificate material or anything else to a node, and no route can serve HTTPS.
 **Key-management gate closed 2026-10-12:** the KEK provider direction is approved (§6.7)
 and its operational custody specified (§6.9), which unblocked 5.2.1 — the provider adapter
 and the organization DEK envelope, planned in §10.5 and shipped; §10.6 records the audit
@@ -29,8 +34,8 @@ blocks (§1.1, §10.5–§10.7) is labelled *design* and is not implemented; the
 describe the other shipped subsystems — domains/routes/nginx (Phase 4) and the
 operation control plane (Phase 1/3) — are [domain-routing.md](domain-routing.md) and
 [node-agent-architecture.md](node-agent-architecture.md).
-**Date:** 2026-10-14 (implementation status reconciled with the shipped tree through
-5.2.2; KEK key-management decision approved 2026-10-12)
+**Date:** 2026-10-16 (implementation status reconciled with the shipped tree through
+5.3; KEK key-management decision approved 2026-10-12)
 **Baseline:** Phase 4.4 `ddd9727` (the Phase 4 starting point recorded in §1.1) +
 **Phase 5.1 `37b7211`** (certificate metadata, pre-issuance lifecycle, org-scoped
 metadata API — the current baseline for every later slice).
@@ -302,7 +307,7 @@ sequenceDiagram
     W->>AC: newOrder(identifiers)
     AC-->>W: authorizations + dns-01 challenges
     W->>DNS: create_txt(_acme-challenge.<name>, digest)
-    W->>DNS: propagation check until authoritative answer or deadline
+    W->>DNS: propagation check until every answering authority agrees, or deadline
     W->>AC: challenge ready (notify)
     W->>AC: poll authorization
     AC-->>W: valid
@@ -1520,7 +1525,7 @@ so an operator is never told a certificate is revoked when it is not.
 | **5.1 — Certificate metadata & lifecycle foundations — SHIPPED 2026-10-12 (`37b7211`)** | `certificates` + `certificate_generations` **first** migration (identity + pre-issuance lifecycle only — **no `dns_provider_id`, no material columns, no `deke_id`**), `certificate.read`/`certificate.manage` codenames **+ the role matrix (§4.1, O3 resolved)**, RLS/grant pattern from the Phase 4 migration, metadata-only CRUD (no issuance) | Migration + API + IDOR cases | A `certificates` row is org-scoped; a foreign id is 404; `GET` returns no ciphertext field; the one-live-generation unique index rejects a second concurrent issuance; **the generation `state` CHECK is limited to pre-issuance states, so an `ISSUED` row is rejected** (no forward dependency on 5.2); no `dns_providers` table exists yet and nothing references one; no `deke_id` column exists, so no placeholder can be written; role matrix matches §4.1; drift test green. |
 | **5.2.1 — KEK provider and organization DEK envelope — SHIPPED 2026-10-12 (`06e8c52`); storage relocated by **5.2.1.2** (`a7b8c9d0e1f2`, §10.6)* | The `KEKProvider` seam with the **Vault Transit** adapter and the deterministic test provider; the organization envelope (`organization_dek_envelopes.dek_ciphertext` / `dek_generation` — the plan put these on `organizations`; §10.6 moved them); org-DEK create/wrap/unwrap/rewrap; provider configuration + fail-fast startup validation; operation-scoped unwrap (no LRU) | Migration (`organization_dek_envelopes` + the `organizations` columns it retires) + provider module + envelope service + config + tests | A production configuration cannot select or fall back to a non-production provider (abort at import); the KEK never reaches application code, the DB plaintext, logs or responses; a wrap/unwrap round-trip is bound to `(org_id, purpose, dek_generation)` so a moved ciphertext is rejected; `rewrap_dek` leaves no plaintext DEK in the application; provider outage fails closed with a named error while the API stays up; **no certificate/DNS material column exists yet, so nothing can be written with a placeholder key** |
 | **5.2.2 — Providers, ACME accounts and material columns — SHIPPED 2026-10-14 (migration `b8c9d0e1f2a3`, single head; §10.7 records what landed and its evidence)** | `dns_providers` + its metadata-only API and credential storage, `acme_accounts`, the generation material columns + `deke_id`, `certificates.dns_provider_id` **FK added with its target table**, widened `state` vocabulary, **material guard CHECK**; `verify_creds` + zone allowlist | Migration + two services + write-only API + the payload-framing primitive | **An issued (or superseded/suspended/expired/revoked) generation cannot exist without `key_ciphertext`, `chain_ciphertext`, `deke_id`, `issued_at` and `not_after`** (guard CHECK rejects it); `dns_provider_id` FK resolves to a real row (no artificial provider); DNS credential never returned by any endpoint; a challenge outside `zone_allowlist` is refused; DEK rotation re-encrypts only Phase-5 rows; no existing secret re-encrypted; a `decrypt_str` mismatch fails closed |
-| **5.3 — ACME issuance (staging + pebble)** | `acme`/`josepy` dependency behind `AcmeProvider`; per-org account; DNS-01 order → publish → propagate → validate → finalize → store; state machine; backoff | Worker task + tests against pebble | Issue a certificate for a name whose TXT record the test publishes; generation reaches `ISSUED` with `not_after` set; retry/backoff and stuck-state sweep pinned; **no production CA traffic in tests** |
+| **5.3 — ACME issuance (staging + pebble) — SHIPPED 2026-10-16 (migration `c9d0e1f2a3`; §10.8 records what landed, its evidence and the one acceptance criterion that was met differently)** | `acme`/`josepy` dependency behind `AcmeProvider`; per-org account; DNS-01 order → publish → propagate → validate → finalize → store; state machine; backoff | Worker task + issuance suite through the seam | Issue a certificate for a name whose TXT record the flow publishes; generation reaches `ISSUED` with `not_after` set; retry/backoff and stuck-state sweep pinned; **no production CA traffic in tests** |
 | **5.4 — Secure delivery** | `certificate_deliveries`, `POST /agent/certificates/{id}/material`, `certificate.install`/`.remove` op types + agent handlers, content-addressed paths, fingerprint check, no-store response policy | Endpoint + op types + agent + contract tests | **No certificate private key or chain appears in operation params, results, audit metadata, events or logs** (asserted by tests over each path, §7.6); a foreign node's delivery is 404; a superseded generation is refused; a duplicate claim is idempotent; interrupted delivery recovers within the window and not after. **Non-production only until C1–C6 (§6.6) are met.** |
 | **5.5 — HTTPS activation & verification** | Renderer TLS block, allowlisted `tls` paths, `routes.certificate_id` + widen `scheme`, `proxy_state.tls`, activation endpoint, control-plane HTTPS probe | Migration + renderer + API | HTTP keeps serving until the probe succeeds; a bad cert path fails `nginx -t` and rolls back to the HTTP tree; `scheme` flips to `https` only after `VERIFIED_ACTIVE`; content-addressed path change ⇒ different `bundle_id` ⇒ drift detected |
 | **5.6 — Renewal, expiry monitor, removal, revocation** | Hourly sweep, `CERTIFICATE` monitor target, removal/`REMOVED` state, suspension on ownership loss, automated revocation with the impact safeguard, replace/split for shared certs, `REVOKED_LOCAL_ONLY` + retry | Beat schedule + monitors + API | Renewal produces a new generation and supersedes the old; an offline node stays `PENDING` without a false success; expiry monitor pages independently of uptime; ownership loss suspends + re-renders + removes-on-confirm; a shared multi-identifier cert is **never** auto-revoked while a retained identifier still serves — it is replaced/split first; removal is **never** gated on CA revocation; revoked vs local-only vs suspended are distinct |
@@ -1604,11 +1609,11 @@ later; each item is genuinely unresolved and is **not** invented away.
 | # | Open item | Blocks what? |
 |---|---|---|
 | O1 | **KMS / secret-manager vendor for the KEK (C1).** **Closed 2026-10-12**: approved in §6.7 (Vault Transit first; cloud KMS adapters later behind the same interface; test providers never a production fallback; no plaintext KEK in code or DB; operation-scoped unwrap; provider-side rewrap). Operational custody is specified in §6.9. | **No longer blocks anything.** §3.7 step 1 and §10.5 are unblocked; the residual items are operator choices inside the approved direction (auto-unseal KMS vendor, transit key name, audit destination, break-glass holders — §6.8). |
-| O2 | **Exact `acme`/`josepy` versions and pin policy**, and whether to use `acme`'s `ClientNetwork` or its higher-level message helpers. | **No** — needed at 5.3. |
+| O2 | **Exact `acme`/`josepy` versions and pin policy**, and whether to use `acme`'s `ClientNetwork` or its higher-level message helpers. **Closed 2026-10-16 at 5.3**: the floor is declared (`acme>=5.1`, `josepy>=2.2`) and the seam uses `acme`'s `ClientNetwork` plus its message helpers, both behind `app/services/acme/` so a version bump touches one module (§10.8). | **No longer blocks anything.** |
 | O4 | **`REVOCATION_FAILED` → operator action vs extended automatic retry budget.** The bounded-budget default is designed (§9.5); the exact budget/threshold is a tuning decision. | **No** — 5.6. |
 | O5 | **Expiry-monitor thresholds** (warn/critical days) — defaults proposed (30/7) but org-configurability is undecided. | **No** — 5.6. |
 | O6 | **Whether the multi-identifier split is automatic or operator-confirmed** when the replacement issuance itself needs DNS credentials for a still-owned zone. | **No** — 5.6; the safeguard (never revoke a still-serving shared cert) holds either way. |
-| O7 | **CAA record handling** — honor/refuse at issuance. Not designed here. | **No** — 5.3/5.7 hardening. |
+| O7 | **CAA record handling** — honor/refuse at issuance. Not designed here, and **not** implemented by 5.3: the flow publishes a challenge and lets the CA apply its own CAA policy, so a CAA refusal arrives as a classified rejection (`CERTIFICATE_ISSUANCE_FAILED` with the CA's sanitized reason) rather than as a pre-check. | **No** — 5.7 hardening. |
 
 **Bottom line after 5.1 shipped:** **O3 is resolved (D4, §4.1)** and is implemented —
 the two codenames are registered with the matrix Owner/Admin/Operator = read+manage,
@@ -1674,7 +1679,7 @@ key, because no column exists to store one in.
 
 | Check | Result |
 |---|---|
-| Current Alembic head | `c8d9e0f1a2b3` — **single head**, no branch points (`uv run alembic heads`) |
+| Current Alembic head | `c8d9e0f1a2b3` — **single head**, no branch points (`uv run alembic heads`) at the time of this check. The head has advanced since (`c9d0e1f2a3` at 5.3, §10.8) and every revision added since has kept a single head |
 | 5.1 revision chain | `c8d9e0f1a2b3` revises `b7c8d9e0f1a2`; the 5.2.1 migration must set `down_revision = "c8d9e0f1a2b3"` |
 | Do the 5.2.1 columns already exist? | **No.** `dek_ciphertext`, `dek_generation`, `dns_providers`, `acme_accounts`, `key_ciphertext` and `deke_id` appear in 5.1 only as prose stating their absence — no column, no table, no index |
 | Does 5.2.1 conflict with 5.1's constraints? | No. It **alters `organizations`** only, and 5.1 touched `certificates`/`certificate_generations` |
@@ -1851,7 +1856,109 @@ No ACME client, no CA contact, no order, no challenge publication, no certificat
 generation, no delivery, no `routes.certificate_id`, no `certificate.*` agent handler, and
 no worker or beat task. The material columns exist and are guarded; they are **empty** —
 nothing in this slice writes a `key_ciphertext`, which is why the guard can be a CHECK
-rather than a convention. 5.3 is the first slice that will write one.
+rather than a convention. 5.3 is the first slice that writes one.
+
+### 10.8 Phase 5.3 — ACME issuance (shipped 2026-10-16)
+
+**Scope.** The order-to-material flow the previous two slices built the inputs for: the
+ACME client behind a seam, DNS-01 publication with a real propagation check, the
+per-organization account's registration, the attempt machine with its budget and backoff,
+the worker and its sweep, and the provenance the API needs to say whether what was issued
+is publicly trusted. One migration from `b8c9d0e1f2a3` (`c9d0e1f2a3`, single head).
+**Out of scope, deliberately:** delivery (5.4), HTTPS
+activation (5.5), renewal, expiry monitoring and revocation (5.6), and manual challenge
+publication (the order document already records the mode so adding it cannot change how an
+existing record is cleaned up).
+
+| Area | What shipped |
+|---|---|
+| Dependencies (O2, closed) | `acme>=5.1` and `josepy>=2.2` — the client certbot ships, used through its `ClientNetwork` and message helpers. Both are imported only inside `app/services/acme/`, so a version bump is one module's problem |
+| `AcmeDirectory` (third member) | `PEBBLE` at Pebble's documented local default (`https://localhost:14000/dir`), **fixed in the vocabulary rather than configured**, so no environment variable can point a value called "pebble" at a real CA. `is_production` / `is_publicly_trusted` / `label` carry the three facts call sites need, and TLS verification is relaxed for exactly this member in exactly one place (`library.build_client`) |
+| Configuration | `ACME_DIRECTORY` (empty means staging outside production and is **refused** in production), `ACME_ACCOUNT_EMAIL`, `certificate_propagation_timeout_seconds` (120), `certificate_validation_timeout_seconds` (240), `certificate_finalization_timeout_seconds` (60), `certificate_order_ttl_seconds` (3600), `certificate_sweep_interval_seconds` (60), `certificate_dns_ttl_seconds` (60). The whole matrix — unknown name, pebble in production, production outside production, unset in production — is decided by one startup validator, so a misconfigured deployment fails before it serves a request and no task re-derives the rule |
+| ACME seam (`app/services/acme/`) | `directory.py` (the closed set, `select_directory`, `coerce_directory`, `assert_issuance_allowed`, `directory_for_settings` / `directory_for_url`, `describe`), `library.py` (the `acme` client adapter), and `__init__.py` (the `AcmeProvider` protocol, `open_acme_session`, typed errors `AcmeRejected` / `AcmeRateLimited` / `AcmeTimeout` / `AcmeUnavailable` / `AcmeConfigError`, `classify_error`, `sanitize_detail` with its bound). The gate `assert_issuance_allowed` is re-applied where the socket is opened, not only at startup |
+| DNS record seam | `DnsRecordProvider` (`resolve_zone`, `create_txt`, `find_txt`, `delete_txt`) obtained from `records_provider_for`, **separate from** the credential-verification protocol so no verification call site can write a record. Cloudflare is the one implementation. Failures are typed: unavailable (retryable), rejected (not), and `DnsWriteAmbiguous` — a write whose response was lost, which is resolved by **observing** the zone rather than by retrying blind. Cleanup deletes by the returned record reference, never by re-deriving the name |
+| Propagation | `app/services/dns_propagation.py` polls the name's **authoritative nameservers** (through `dns_verifier.observe_txt_record`) until the expected value is visible or a hard deadline passes. The rule is **agreement, not any one positive answer** (5.3.1): every server that answered authoritatively must serve every expected value, because telling a CA "ready" while a second authority still answers without the value is how a validation fails for a reason the platform could already see. A server that did not answer (timeout, SERVFAIL, transport error) is recorded as unreachable in `PropagationResult.nameserver_answers` and cannot veto readiness, since the platform cannot observe a value a server refuses to serve. A negative answer is never final before the deadline |
+| Order document | `app/services/certificate_order.py` owns `certificate_generations.order_state`: a versioned document holding **public ACME data only** (order and challenge URLs, token, key authorization, the challenge's TXT name/value, the provider's record reference, cleanup state, the attempt stamp), read defensively — a partially readable document drops fields rather than coercing them, and `public_view` is an allowlist so a future writer cannot make a field visible by default |
+| Issuance service | `app/services/certificate_issuance.py`: an attempt is stamped **durably** before it acts (a live state says an order is open, not that a worker is running it — `attempt_in_flight` plus the order TTL is what makes that answerable), leftover records of the same generation are deleted first, every attempt generates a **fresh P-256 key and CSR** (a persisted key for a generation that is not yet issued is exactly what the material guard forbids), and the chain is parsed, matched against this attempt's key and identifier list and encrypted under the organization DEK **before** any state moves to `ISSUED`. One attempt never retries internally; the CA's own `Retry-After` is the one exception and the platform's backoff never shortens it |
+| Budget, backoff, recovery | `MAX_ISSUE_ATTEMPTS = 5` with exponential backoff from 300s capped at 24h (5.5's number, reused rather than restated). A worker that died holding a live state is recovered as a **failure with a named code** (`CERTIFICATE_WORKER_LOST`), not silently resumed; a dispatch that arrives while another worker runs is refused (`CERTIFICATE_ATTEMPT_IN_FLIGHT`) without touching the row |
+| Tasks and cadence | `nx.issue_certificate` (soft limit 540s, keyed by generation id, one attempt per invocation) and `nx.sweep_certificates` on a 60s beat: dispatches due generations **and** abandoned ones (live state, attempt older than the order TTL), in a bounded batch of 50, and writes nothing itself |
+| API | `POST /certificates` now hands the fresh generation to the worker **after** its transaction commits; `POST /certificates/{id}/retry` answers `202 Accepted` and re-arms the schedule. Both refusals are named: `CERTIFICATE_ALREADY_ISSUED`, `CERTIFICATE_ATTEMPTS_EXHAUSTED`, `CERTIFICATE_ATTEMPT_IN_FLIGHT`, `CERTIFICATE_STATE_NOT_ATTEMPTABLE`, `CERTIFICATE_NO_GENERATION` |
+| Provenance | `certificate_generations.directory_url`, written when an attempt starts and never rewritten, with `ck_..._directory_known` (NULL or a vocabulary URL) and `ck_..._directory_required` (material-bearing ⇒ not NULL) beside it. The generation read model exposes `directory`, `directory_url` and `publicly_trusted`, derived from the stored URL rather than from current configuration — so a staging generation stays labelled staging after the platform is pointed at production, and an unrecognised URL reads as **not** publicly trusted |
+| Events and alerts | `CERTIFICATE_ISSUED`, `CERTIFICATE_ISSUANCE_FAILED` (one attempt, retries may remain), `CERTIFICATE_ISSUANCE_RETRIED`, `CERTIFICATE_FAILED` (budget spent — nobody is working on it any more), with audit actions `certificate.issued` / `certificate.issuance_retried`. `CERTIFICATE_FAILED` pages (critical); `CERTIFICATE_ISSUANCE_FAILED` is a warning |
+| Refusal vocabulary | Stable codes, because an operator acts on the code and only the text beside it is prose: `CERTIFICATE_CONTEXT_INCOMPLETE`, `CERTIFICATE_DNS_CREDENTIAL_MISSING`, `DOMAIN_NOT_VERIFIED`, `CERTIFICATE_DIRECTORY_CHANGED`, `CERTIFICATE_ORDER_MISMATCH`, `CERTIFICATE_ORDER_LOST`, `CERTIFICATE_MATERIAL_MISMATCH`, `CERTIFICATE_ORDER_DOCUMENT_UNSUPPORTED`, `CERTIFICATE_ATTEMPT_ERROR`, plus the CA-classified ones the seam produces |
+
+#### 10.8.1 Earlier wording this slice corrected rather than implemented
+
+Two statements in this document and in certificate-management.md described a shape that no
+migration ever created, and 5.3 records the correction instead of guessing at it:
+
+* **The Domain-level DNS credential.** §3.4 and certificate-management.md §4.2 said a
+  certificate "inherits its Domain's" credential through a `domains.dns_provider_id`
+  column. No slice ever added that column — the tree has exactly one reference,
+  `certificates.dns_provider_id`, added in 5.2.2 with the table it points at — so a
+  certificate that names none has nothing to inherit. Issuance refuses it with
+  `CERTIFICATE_DNS_CREDENTIAL_MISSING` until `PATCH /certificates/{id}` attaches one, which
+  is why the create path stays usable before an operator has stored a token and why the
+  API's `dns_provider_id` wording changed from "override" to "the credential this
+  certificate's challenges are published with".
+* **`propagation_check` as a provider method.** §5.3's interface sketch put the
+  propagation check on the DNS provider. What shipped is a **platform-side** loop over
+  authoritative nameservers (`dns_propagation.py`), because the question "is the record
+  visible to resolvers?" is about the name's DNS, not about the provider's API — asking
+  the provider would have answered a different question. The provider seam instead gained
+  `resolve_zone`, `find_txt` and delete-by-reference, which are the operations that
+  genuinely belong to a provider API.
+
+#### 10.8.2 Verification
+
+| Module | What it asserts |
+|---|---|
+| `backend/tests/unit/test_acme_seam.py` | directory selection and its refusals (unknown name, pebble in production, production outside production, the non-production default), `directory_for_url` and `describe`, the provider factory, and the error classification surface — which codes are transient, which are rejections, and that a sanitized detail is bounded |
+| `backend/tests/unit/test_certificate_order.py` | the order document itself: round trip, versioning, a partially readable document dropping rather than coercing, the cleanup vocabulary, `attempt_in_flight` against the TTL, `public_view`'s allowlist, and `reset_challenges` keeping every reference that still has to be deleted |
+| `backend/tests/unit/test_dns_propagation.py` | the loop's two properties: readiness requires **every answering authority** to serve every expected value, and a negative answer is not final before the deadline — plus each inconclusive status continuing, each deadline exit being honest about what was seen, and the mixed-answer cases (one server stale, one absent, one unreachable, none answering) deciding the way §5.3.1 documents |
+| `backend/tests/unit/test_certificate_issuance.py` | the pieces of one attempt without a database: context resolution (an unverified domain, a missing credential, a directory that moved), identifier re-canonicalisation and its bounds, the CSR/key pair, leaf verification against the attempt's own key and identifier list, and the scheduled-retry arithmetic |
+| `backend/tests/integration/test_certificate_issuance.py` | the flow end to end through the real API, database, DEK envelope and task path with a **fake CA session, a fake DNS provider and a fake observer**: a generation reaching `ISSUED` with material encrypted under the organization DEK and the certificate's derived status following, a failed attempt recorded with its code and a scheduled retry, a retry after a failure issuing, an operator retry refused with the right code for each refusal shape, the abandoned-attempt recovery, a finalization failure recorded and cleaned up, an ambiguous create that committed remotely before the provider call timed out being adopted rather than duplicated, an unconfirmed delete reported as unresolved and retried, duplicate task dispatch creating no second order, and the TXT records this platform created being deleted by reference even when the attempt failed |
+| `backend/tests/integration/test_certificate_pebble.py` (`make test-pebble`) | **interoperability, not a seam** (5.3.1): the production client adapter and the real `issue_generation()` against an isolated Pebble CA whose DNS-01 validation resolves the challenge name at this repository's own two-view authoritative server. Account registration, order and authorization handling, TXT publication, the platform's propagation observation, challenge validation, finalization, chain retrieval and leaf verification against the attempt's key and identifiers all happen over the wire; the generation is then `ISSUED` with material encrypted under the organization DEK and no plaintext, its `directory_url` makes `publicly_trusted` false, and exactly the created TXT records are gone afterwards. Also pinned there: a wildcard issued as a wildcard with both authorization values at one name, a stale authoritative view that keeps the challenge away from Pebble until it catches up, and Pebble itself rejecting a challenge whose TXT record is absent |
+| `test_certificates.py`, `test_acme_accounts.py`, `test_dns_providers.py` | the earlier slices' boundaries re-asserted where 5.3 moved them: the read model gained provenance fields and no response model gained material, account registration records once and never repoints, and the credential surface still never returns a secret |
+| `test_migration_drift.py` | `directory_url`'s two CHECKs derived from the vocabulary, so a fourth directory is a drift failure rather than a runtime CHECK violation |
+
+#### 10.8.3 The acceptance criterion that was met differently, and how 5.3.1 closed it
+
+The 5.3 row asked for "tests against pebble". What 5.3 shipped was a **seam-shaped**
+suite: the integration flow ran the real service, the real transaction boundaries, the real
+database and the real envelope with a fake `AcmeProvider` session, a fake DNS provider and
+a fake observer, because no Pebble container existed in this repository's compose files.
+The Pebble member, its fixed URL and the client path that reached it were implemented and
+covered at the unit level (`test_acme_seam.py`), but nothing drove a real ACME server end
+to end. That gap was recorded rather than described as coverage: a green issuance suite
+proves the platform's own flow, not interoperability with a live CA.
+
+**5.3.1 (2026-10-18) closed it.** `docker-compose.pebble.yml` adds an isolated stack —
+Pebble, plus two authoritative views of `pebble.test` on two loopback addresses (127.0.0.2
+and 127.0.0.3) that advertise the same delegation and keep separate record stores — and
+`tests/integration/test_certificate_pebble.py` drives the real adapter and workflow through
+it. The suite fails rather than skips when Docker, the stack, or the directory is missing,
+so a green run is evidence. Two facts the fake CA cannot produce are pinned there as well:
+the CA's own validation of a name the flow published is the only thing that can turn an
+authorization valid, and a zone whose two authorities disagree keeps the challenge away
+from the CA until the stale one catches up. The fake-CA suite is retained deliberately: it
+owns the state machine, failure vocabulary, backoff and cleanup-reference semantics that a
+real CA cannot be made to produce on demand, and the two commands are documented as
+distinct claims (§11's verification note in `certificate-management.md`).
+
+The seam change 5.3.1 did make is propagation's rule: **one positive answer from one
+authoritative server is no longer sufficient** (§10.8, `dns_propagation.py`). Readiness
+now requires every server that answered authoritatively to serve every expected value; a
+server that did not answer is recorded as unreachable and does not veto. The deadline and
+bounded polling are unchanged, and a manual confirmation still cannot bypass the
+observation.
+
+Absent, unchanged by this or that slice: delivery to nodes (5.4) — no `certificate_deliveries`, no
+material endpoint, no `certificate.install`/`.remove` op type, no agent handler — HTTPS
+activation (5.5), renewal and expiry monitoring (5.6), revocation (5.6), and manual
+challenge publication. Nothing outside the control plane's own database has seen a
+private key, and the certificate material columns are the only place one is stored
+(encrypted under the organization DEK, with `deke_id` beside them).
 
 ---
 
@@ -1904,3 +2011,26 @@ or provider row is created by recording them.
 No application behavior is changed by these notes: they record what 5.1 built, and set
 the order and the gates for 5.2. No dependency, adapter, credential or configuration key
 is added — the KEK vendor is explicitly still an approval (§6.8, K1).
+
+### Recorded in the Phase 5.3 closeout (2026-10-16)
+
+| Decision | Where |
+|---|---|
+| Phase 5.3 implementation status — the ACME seam, the DNS record seam, propagation, the order document, the attempt machine, the worker and its sweep, the provenance column, the evidence for each acceptance criterion, and the one criterion met differently (a fake CA session rather than a Pebble container, since no Pebble service exists in this repository's compose files) | §10.8, §10.8.2, §10.8.3 |
+| The `acme`/`josepy` client selection and its version floor, closing O2 | §10.8, §10.3.3 |
+| The third `AcmeDirectory` member (`pebble`), fixed in the vocabulary rather than configured, with TLS verification relaxed for exactly that member and refused everywhere else | §10.8, §5.4 |
+| A Domain-level DNS credential never existed: the certificate's own reference is the only one, and issuance refuses a certificate that names none (`CERTIFICATE_DNS_CREDENTIAL_MISSING`) | §10.8.1 |
+| Propagation is a platform-side check against authoritative nameservers, not a provider method | §10.8.1 |
+
+### Recorded in the Phase 5.3.1 verification (2026-10-18)
+
+| Decision | Where |
+|---|---|
+| The "tests against pebble" criterion is met for real: an isolated Pebble + two-view authoritative-DNS stack, driven by the production adapter and `issue_generation()`, with the platform's own propagation observation in the validation path | §10.8.3, `docker-compose.pebble.yml`, `make test-pebble` |
+| Propagation readiness requires every **answering** authoritative server to serve every expected value; an unreachable server is recorded but does not veto, and one positive answer can no longer override a persistent negative one | §10.8, §10.8.3, `app/services/dns_propagation.py` |
+| The fake-CA issuance suite remains, with a narrower stated claim: it owns the state machine, failure vocabulary, backoff and cleanup-reference semantics; the Pebble suite owns interoperability | §10.8.2, `certificate-management.md` §11 |
+
+These record what 5.3 built and the two pieces of earlier wording it corrected. They
+authorize **no** later slice: delivery, activation, renewal, expiry monitoring and
+revocation remain design, and the production-readiness conditions of §6.6 (C1–C6) still
+govern whether 5.4 may ship at all.

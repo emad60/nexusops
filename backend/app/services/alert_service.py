@@ -15,9 +15,16 @@ from app.models import Alert
 from app.models.enums import AlertSeverity
 
 #: Event types that page an operator immediately.
-CRITICAL_EVENT_TYPES = frozenset({"MONITOR_DOWN", "SERVER_OFFLINE", "DEPLOYMENT_FAILED"})
+#: ``CERTIFICATE_FAILED`` is here rather than in warning because it is the event
+#: that says nobody is working on the request any more: the attempt budget is spent,
+#: no certificate exists, and only a human can decide what to do next.
+CRITICAL_EVENT_TYPES = frozenset(
+    {"MONITOR_DOWN", "SERVER_OFFLINE", "DEPLOYMENT_FAILED", "CERTIFICATE_FAILED"}
+)
 
-WARNING_EVENT_TYPES = frozenset({"NOTIFICATION_FAILED"})
+#: Events worth surfacing without waking anyone: a single failed attempt that still
+#: has retries behind it is information, not an incident.
+WARNING_EVENT_TYPES = frozenset({"NOTIFICATION_FAILED", "CERTIFICATE_ISSUANCE_FAILED"})
 
 
 def severity_for_event(event_type: str) -> AlertSeverity:

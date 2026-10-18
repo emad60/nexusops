@@ -31,14 +31,19 @@ notification, and deploy → step logs → rollback.
   missing proof record, or another organization proving control) pulls the routes
   from every node that was serving it; a node that is offline keeps its state
   visibly unresolved and is retried by a bounded reconciler rather than reported as
-  fixed. **There is no TLS yet**: routes render plain HTTP only — no certificate
-  issuance, no `listen 443`, no HTTPS redirect — and `routes.scheme` cannot express
-  `https`. Phase 5.1 shipped the certificate *record* (identity, lifecycle metadata and
-  an org-scoped metadata API) and 5.2.2 the **inputs** issuance will need — the DNS
-  credential store, the per-organization ACME account key and the generation material
-  columns, all wrapped under the organization DEK. Those columns are **empty and
-  guarded**: a material-bearing generation state cannot be written without them, and
-  no certificate has ever been issued.
+  fixed. **There is no TLS yet**: routes render plain HTTP only — no `listen 443`, no
+  HTTPS redirect — and `routes.scheme` cannot express `https`. Phase 5.1 shipped the
+  certificate *record* (identity, lifecycle metadata and an org-scoped metadata API),
+  5.2.2 the **inputs** issuance needs — the DNS credential store, the per-organization
+  ACME account key and the generation material columns, wrapped under the organization
+  DEK — and **5.3 issuance itself**: the ACME client behind a seam, the DNS-01 order,
+  the propagation check against the name's authoritative nameservers, the five-attempt
+  budget with backoff, a worker plus its sweep, and the provenance column that records
+  which certificate authority issued a generation (so a staging certificate is never
+  presented as a production one). Material is **encrypted under the organization DEK
+  and guarded**: a material-bearing generation state cannot be written without it.
+  What is still absent is everything after issuance — no key or chain is delivered to
+  any node, and no certificate is installed or activated anywhere.
   The control plane is never in the customer traffic path: it renders configuration
   and ships it as an operation, so customer requests go browser → node nginx →
   container (uptime checks, by contrast, do probe from the control plane, and the
@@ -167,6 +172,7 @@ the host (`cd frontend && npm run dev`; it proxies `/api`, WebSockets included, 
 | `make test` | backend unit + frontend vitest | nothing external |
 | `make test-backend-unit` | pytest `-m "not integration"` | nothing external |
 | `make test-backend` | full backend suite (850+ tests) | stack up (postgres :5433, redis :6390) |
+| `make test-pebble` | real-ACME issuance through an isolated Pebble CA + two authoritative DNS views (`tests/integration/test_certificate_pebble.py`) | Docker + postgres + redis — it starts and tears down its own CA stack |
 | `make test-frontend` | vitest suite | nothing external |
 | `make e2e` | the whole Playwright suite on a throwaway isolated stack (`frontend/e2e/*.spec.ts`) | docker only — it builds, seeds, runs and tears the stack down itself |
 
@@ -219,8 +225,8 @@ tenancy model as built — org resolution, the session guard, PostgreSQL RLS and
   sweeps, the nginx renderer and the apply pipeline, ownership revocation across
   nodes, and the drift reconciler. Everything certificate- or TLS-shaped in it is
   **Phase 5 target design** and labelled as such (Phase 5.1 shipped the certificate
-  *record* and 5.2.2 its inputs; nothing serves TLS, no route can reference a
-  certificate, and nothing in the tree issues one).
+  *record*, 5.2.2 its inputs and 5.3 issuance; nothing serves TLS, no route can
+  reference a certificate, and nothing delivers one to a node).
 - [docs/platform-vision.md](docs/platform-vision.md) — platform-evolution direction,
   target domain model, authorization, phased roadmap (the tenant foundation in it is
   now shipped; the later-phase entities are still design). Companion specs:
@@ -228,11 +234,11 @@ tenancy model as built — org resolution, the session guard, PostgreSQL RLS and
   [authorization.md](docs/authorization.md), [product-roadmap.md](docs/product-roadmap.md),
   [node-agent-architecture.md](docs/node-agent-architecture.md),
   [domain-routing.md](docs/domain-routing.md) (its HTTP half is now shipped),
-  [certificate-management.md](docs/certificate-management.md) (5.1 metadata and 5.2.2
-  credential/account/material storage shipped, all of it empty; issuance/TLS still
-  design),
+  [certificate-management.md](docs/certificate-management.md) (5.1 metadata, 5.2.2
+  credential/account/material storage and **5.3 issuance** shipped; delivery, TLS and
+  renewal still design),
   [phase5-design.md](docs/phase5-design.md) (authoritative Phase 5 HTTPS/certificate
-  design — **5.1 shipped, the rest is design**),
+  design — **5.1–5.3 shipped, the rest is design**),
   [deployment-architecture.md](docs/deployment-architecture.md),
   [secrets-architecture.md](docs/secrets-architecture.md),
   [platform-security-model.md](docs/platform-security-model.md).

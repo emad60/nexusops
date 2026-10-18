@@ -4,17 +4,19 @@ Two tenant-owned tables, one relationship spine:
 **Organization → Domain → Certificate → CertificateGeneration**.
 
 Phase 5.1 shipped the *identity and lifecycle* half of the certificate subsystem;
-Phase 5.2.2 adds the material half. Nothing is issued yet — no ACME client, no CA
-contact, no delivery — but the columns and the constraints that will hold what
-issuance produces now exist, so a partially working path cannot be smuggled in
-later:
+Phase 5.2.2 added the material half; Phase 5.3 adds issuance, which is what finally
+writes one of these rows end to end — through the ACME seam
+(:mod:`app.services.acme`), with the DNS-01 challenge published to the customer's
+own zone through the DNS seam (:mod:`app.providers.dns`). The delivery half is still
+absent (Phase 5.4), so nothing here leaves the control plane's database beyond
+metadata:
 
 * ``certificates`` carries the identity — which verified domain the certificate
   is for, its primary common name, its additional identifiers, the challenge
   type, the renewal preference — plus a **derived** status, the denormalized
-  expiry the list/sweep reads, the DNS credential that may override its Domain's
-  (5.2.2, added *with* the table it references), and the suspension pair set when
-  ownership of an identifier is lost.
+  expiry the list/sweep reads, the DNS credential its challenges are published
+  with (5.2.2, added *with* the table it references), and the suspension pair set
+  when ownership of an identifier is lost.
 * ``certificate_generations`` carries one ACME order + one key pair. Its ``state``
   CHECK is now the **full** vocabulary
   (:class:`~app.models.enums.CertificateGenerationState`), because the envelope
@@ -37,13 +39,19 @@ Four structural promises live in the schema rather than in prose:
   monotonic per certificate, so a rewound or duplicated renewal is refused.
 * ``ck_certificate_generations_material_guard`` — material and ``deke_id`` are
   mandatory in every state that outlives the order (see above).
+* ``ck_certificate_generations_directory_known`` +
+  ``..._directory_required`` — the provenance pair Phase 5.3 adds: the directory a
+  generation was ordered at is always one of the vocabulary's URLs, and every
+  material-bearing generation has one. "Staging, not publicly trusted" is derived
+  from this column alone.
 
 Deletion: a generation is removed only with its certificate (``ON DELETE
 CASCADE``); a domain that still has certificates cannot be deleted at all
 (``ON DELETE RESTRICT``) — withdrawing the name a certificate was issued for
 would strand material that the CA still considers valid — and neither can a DNS
-provider a certificate still names, for the same reason: silently falling back to
-the Domain's credential would change which token the platform signs with.
+provider a certificate still names, for the same reason: a rebind to another
+credential changes which token the platform signs with, and that must be an
+operator's explicit act rather than a deletion's side effect.
 """
 
 from __future__ import annotations
@@ -76,6 +84,7 @@ from app.models.base import (
     uuid_pk,
 )
 from app.models.enums import (
+    AcmeDirectory,
     CertificateChallengeType,
     CertificateGenerationState,
     CertificateKeyAlgorithm,
@@ -137,6 +146,45 @@ def material_guard_predicate() -> str:
         "AND chain_ciphertext IS NOT NULL AND deke_id IS NOT NULL "
         "AND issued_at IS NOT NULL AND not_before IS NOT NULL AND not_after IS NOT NULL)"
     )
+
+
+def known_directory_urls() -> tuple[str, ...]:
+    """Every ACME directory URL a generation may record, from the vocabulary.
+
+    Read from :class:`~app.models.enums.AcmeDirectory` rather than listed here, so
+    a fourth directory cannot be added to the enum and then be refusable by the
+    database — the two would disagree, and the disagreement would show up as a
+    CHECK violation on the first issuance at the new CA rather than as a compile
+    error. A URL *outside* the vocabulary remains unrepresentable, which is the
+    point: a hand-edited ``directory_url`` must not be able to claim a CA this
+    platform cannot reason about (phase5-design.md §5.4's "no silent fallback").
+    """
+    return tuple(member.url() for member in AcmeDirectory)
+
+
+def directory_known_predicate() -> str:
+    """``directory_url`` is NULL or names a directory in the vocabulary.
+
+    The ``NULL`` branch exists because every pre-issuance row has no directory yet:
+    the directory is chosen when an attempt starts, and a ``PENDING`` generation
+    that has never been attempted legitimately has none. The second CHECK
+    (:func:`directory_required_predicate`) closes the other half.
+    """
+    urls = ", ".join(f"'{url}'" for url in known_directory_urls())
+    return f"directory_url IS NULL OR directory_url IN ({urls})"
+
+
+def directory_required_predicate() -> str:
+    """A generation that outlives the order must name the CA that issued it.
+
+    The counterpart of the material guard on the *provenance* axis: holding
+    material is not enough to be a certificate, because a caller has to be able to
+    tell whether the result is publicly trusted (§5.4's "a staging-issued
+    certificate is never presented as a production certificate"). Combined with
+    :func:`directory_known_predicate` this makes an issued generation with an
+    unknown or absent directory unrepresentable, not merely impolite.
+    """
+    return f"{pre_issuance_predicate()} OR directory_url IS NOT NULL"
 
 
 class Certificate(OrgScoped, TimestampMixin, Base):
@@ -227,8 +275,10 @@ class Certificate(OrgScoped, TimestampMixin, Base):
     #: Sanitized, bounded reason the newest generation failed. Never key material,
     #: never an ACME account key, never another organization's data.
     last_error: Mapped[str] = mapped_column(String(500), default="", nullable=False)
-    #: Overrides the Domain's DNS provider for this certificate's challenges.
-    #: Nullable by design: a certificate that names none inherits its Domain's.
+    #: The DNS provider this certificate's challenges are published with.
+    #: Nullable because a request may be recorded before its credential is chosen;
+    #: issuance refuses such a certificate (``CERTIFICATE_DNS_CREDENTIAL_MISSING``)
+    #: until ``PATCH /certificates/{id}`` attaches one.
     #: ``RESTRICT`` because deleting a credential a certificate still names would
     #: silently change which token the platform signs with — the renewal would
     #: keep working, against a different zone, which is the worst kind of failure.
@@ -285,6 +335,14 @@ class CertificateGeneration(OrgScoped, TimestampMixin, Base):
         # real DEK is generation 1 or later, and the guard already requires it for
         # every material-bearing state.
         CheckConstraint("deke_id IS NULL OR deke_id >= 1", name="deke_id_positive"),
+        # The provenance axis (Phase 5.3). Two constraints rather than one, because
+        # they fail for different reasons and the operator reads them differently: a
+        # row claiming an unlisted directory is corrupt or hand-edited, while a
+        # material-bearing row with no directory is a partially applied issuance
+        # that must never be mistaken for a certificate. Together they are the exact
+        # rule `directory_url` exists for.
+        CheckConstraint(directory_known_predicate(), name="directory_known"),
+        CheckConstraint(directory_required_predicate(), name="directory_required"),
         CheckConstraint(
             f"fingerprint IS NULL OR char_length(fingerprint) = {FINGERPRINT_LENGTH}",
             name="fingerprint_length",
@@ -317,10 +375,23 @@ class CertificateGeneration(OrgScoped, TimestampMixin, Base):
     state: Mapped[CertificateGenerationState] = mapped_column(
         String(24), default=CertificateGenerationState.PENDING, nullable=False
     )
-    #: ACME order/challenge URLs, key authorizations, DNS record names/values —
-    #: **public ACME data only, never the account key**. Populated by the
-    #: issuance slice (5.3); empty until then.
+    #: ACME order/challenge URLs, the published TXT record references and the
+    #: cleanup state — **public ACME data only, never the account key, never a DNS
+    #: credential**. Written and read through :mod:`app.services.certificate_order`,
+    #: which owns the shape; the column is JSONB so the progress a crashed attempt
+    #: has to be able to resume from survives the crash (phase5-design.md §5.3's
+    #: ``dns_record_ref``, §5.5's stuck-state recovery).
     order_state: Mapped[dict[str, Any]] = json_column()
+    #: Which ACME directory this generation's order was created at, as the CA's own
+    #: directory URL. Set when the attempt starts (before the material exists) so a
+    #: failed or abandoned attempt still says which CA it spoke to, and required by
+    #: CHECK from the moment the generation carries material: the API derives
+    #: "staging, not publicly trusted" from this and from nothing else
+    #: (phase5-design.md §5.4). A generation never changes directory — the URL is
+    #: written once per generation, and a retry at a different directory is a new
+    #: generation, which is what keeps a staging order from becoming a production
+    #: certificate halfway through.
+    directory_url: Mapped[str | None] = mapped_column(String(255), nullable=True)
     last_error: Mapped[str] = mapped_column(String(500), default="", nullable=False)
     #: Bounded backoff cursors of *this* generation's attempts.
     next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

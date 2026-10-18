@@ -21,6 +21,14 @@ pulls and builds nothing that is not already cached locally.
 Environment:
   MOCK_ZONE           zone served authoritatively (default ``e2e.test``)
   MOCK_IP             the address this mock answers with (its own static IP)
+  MOCK_BIND_HOST      interface the authoritative listener binds (default
+                      ``0.0.0.0``). The Pebble integration runs two instances on
+                      distinct loopback addresses, so one zone can have two
+                      authoritative servers that genuinely disagree.
+  MOCK_NS             the zone's delegation as ``name=address`` pairs, comma
+                      separated (default ``ns1.<zone>=<MOCK_IP>``). Both Pebble
+                      instances advertise the *same* set, so nameserver discovery
+                      is consistent while each keeps its own record store.
   MOCK_DNS_PORT       UDP port to serve on (default 53)
   MOCK_CONTROL_PORT   HTTP port for the control API (default 8053)
 """
@@ -37,6 +45,7 @@ from urllib.parse import parse_qs, urlparse
 
 ZONE = (os.environ.get("MOCK_ZONE") or "e2e.test").strip(".").lower()
 MOCK_IP = (os.environ.get("MOCK_IP") or "172.31.253.53").strip()
+BIND_HOST = (os.environ.get("MOCK_BIND_HOST") or "0.0.0.0").strip()
 DNS_PORT = int(os.environ.get("MOCK_DNS_PORT") or "53")
 CONTROL_PORT = int(os.environ.get("MOCK_CONTROL_PORT") or "8053")
 
@@ -44,7 +53,22 @@ CONTROL_PORT = int(os.environ.get("MOCK_CONTROL_PORT") or "8053")
 #: ask for the TXT), short enough that a re-run never reads a stale record from
 #: an intermediate resolver's cache.
 TTL = 5
-NAMESERVER_HOST = f"ns1.{ZONE}"
+
+
+def _nameservers() -> list[tuple[str, str]]:
+    """The delegation this instance advertises, as ``(name, address)`` pairs."""
+    pairs: list[tuple[str, str]] = []
+    for entry in (os.environ.get("MOCK_NS") or "").split(","):
+        name, _, address = entry.partition("=")
+        name = name.strip().rstrip(".").lower()
+        address = address.strip()
+        if name and address:
+            pairs.append((name, address))
+    return pairs or [(f"ns1.{ZONE}", MOCK_IP)]
+
+
+NAMESERVERS = _nameservers()
+NAMESERVER_HOSTS = [name for name, _address in NAMESERVERS]
 
 TYPE_A = 1
 TYPE_NS = 2
@@ -59,8 +83,8 @@ RCODE_SERVFAIL = 2
 
 _lock = threading.Lock()
 _records: dict[str, dict[int, list[str]]] = {
-    ZONE: {TYPE_NS: [NAMESERVER_HOST], TYPE_A: [MOCK_IP]},
-    NAMESERVER_HOST: {TYPE_A: [MOCK_IP]},
+    ZONE: {TYPE_NS: list(NAMESERVER_HOSTS), TYPE_A: [MOCK_IP]},
+    **{name: {TYPE_A: [address]} for name, address in NAMESERVERS},
 }
 
 
@@ -100,15 +124,33 @@ def set_record(name: str, record_type: int, value: str) -> None:
             _records[key][record_type].append(value)
 
 
-def clear_record(name: str, record_type: int | None = None) -> None:
+def clear_record(name: str, record_type: int | None = None, value: str | None = None) -> None:
+    """Remove the whole name, one record type, or **one value** of a type.
+
+    The value-scoped form is what makes cleanup observable the way a provider's
+    delete-by-reference is: one name can carry two challenge values (apex and
+    wildcard share ``_acme-challenge.example.com``), and deleting "the record this
+    platform created" must not be able to take the other one with it.
+    """
     key = name.strip(".").lower()
     with _lock:
+        bucket = _records.get(key)
+        if bucket is None:
+            return
         if record_type is None:
             _records.pop(key, None)
             return
-        bucket = _records.get(key)
-        if bucket:
+        values = bucket.get(record_type)
+        if values is None:
+            return
+        if value is None:
             bucket.pop(record_type, None)
+        elif value in values:
+            values.remove(value)
+            if not values:
+                bucket.pop(record_type, None)
+        if not bucket:
+            _records.pop(key, None)
 
 
 def snapshot() -> dict[str, dict[str, list[str]]]:
@@ -203,7 +245,9 @@ def _rdata(rtype: int, value: str) -> bytes:
 def servfail(packet: bytes) -> bytes:
     _, _, _, end = parse_question(packet)
     if end < 0:
-        end = len(packet)
+        # Not a DNS message. There is no transaction id to answer to, so the only
+        # safe reply is none at all — see :func:`serve_dns`.
+        return b""
     return respond(packet, end, [], RCODE_SERVFAIL)
 
 
@@ -220,16 +264,81 @@ def forward(packet: bytes) -> bytes:
         return servfail(packet)
 
 
+def _recv_exact(conn: socket.socket, length: int) -> bytes | None:
+    """Read exactly *length* bytes from a TCP stream, or ``None`` at EOF."""
+    buffer = b""
+    while len(buffer) < length:
+        chunk = conn.recv(length - len(buffer))
+        if not chunk:
+            return None
+        buffer += chunk
+    return buffer
+
+
+def _serve_tcp_connection(conn: socket.socket) -> None:
+    """One RFC 7766 connection: 2-byte length prefix, then a DNS message.
+
+    TCP is not optional for an authoritative server. A validating resolver falls
+    back to it whenever a UDP answer is truncated, and some resolvers (the Go
+    resolver Pebble's validation authority uses, for one) *only* ask over TCP —
+    so a UDP-only mock reports the zone as unreachable, which looks exactly like
+    propagation that never happened.
+    """
+    with conn:
+        while True:
+            header = _recv_exact(conn, 2)
+            if header is None:
+                return
+            (length,) = struct.unpack("!H", header)
+            if length < 12:
+                return
+            packet = _recv_exact(conn, length)
+            if packet is None:
+                return
+            try:
+                reply = answer(packet) or forward(packet)
+            except Exception as exc:  # pragma: no cover - defensive
+                print(f"dns tcp query failed: {exc.__class__.__name__}", flush=True)
+                return
+            if not reply:
+                return
+            conn.sendall(struct.pack("!H", len(reply)) + reply)
+
+
+def serve_dns_tcp() -> None:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind((BIND_HOST, DNS_PORT))
+    sock.listen(16)
+    while True:
+        try:
+            conn, _peer = sock.accept()
+        except OSError:
+            continue
+        threading.Thread(target=_serve_tcp_connection, args=(conn,), daemon=True).start()
+
+
 def serve_dns() -> None:
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    sock.bind(("0.0.0.0", DNS_PORT))
+    sock.bind((BIND_HOST, DNS_PORT))
     while True:
         try:
             packet, peer = sock.recvfrom(4096)
         except OSError:
             continue
-        reply = answer(packet) or forward(packet)
+        # A malformed datagram must never end the listener: a single stray packet
+        # on the port would otherwise take the whole zone down for every later
+        # query, which is a silent outage the caller would read as "propagation".
+        if len(packet) < 12:
+            continue
+        try:
+            reply = answer(packet) or forward(packet)
+        except Exception as exc:  # pragma: no cover - defensive
+            print(f"dns query failed: {exc.__class__.__name__}", flush=True)
+            reply = b""
+        if not reply:
+            continue
         try:
             sock.sendto(reply, peer)
         except OSError:
@@ -265,7 +374,16 @@ class ControlHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler's contract
         path = urlparse(self.path).path
         if path == "/health":
-            self._send(200, {"zone": ZONE, "address": MOCK_IP, "upstream": UPSTREAM})
+            self._send(
+                200,
+                {
+                    "zone": ZONE,
+                    "address": MOCK_IP,
+                    "bind": BIND_HOST,
+                    "nameservers": {name: address for name, address in NAMESERVERS},
+                    "upstream": UPSTREAM,
+                },
+            )
         elif path == "/records":
             self._send(200, {"zone": ZONE, "records": snapshot()})
         else:
@@ -303,12 +421,14 @@ class ControlHandler(BaseHTTPRequestHandler):
         query = parse_qs(parsed.query)
         name = (query.get("name") or [""])[0]
         record_type = self._type_of((query.get("type") or [""])[0])
-        clear_record(name, record_type)
+        value = (query.get("value") or [None])[0]
+        clear_record(name, record_type, value)
         self._send(200, {"cleared": name.strip(".").lower()})
 
 
 def main() -> None:
     threading.Thread(target=serve_dns, daemon=True).start()
+    threading.Thread(target=serve_dns_tcp, daemon=True).start()
     ThreadingHTTPServer(("0.0.0.0", CONTROL_PORT), ControlHandler).serve_forever()
 
 

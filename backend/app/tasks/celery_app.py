@@ -22,6 +22,7 @@ app = Celery(
         "app.tasks.monitoring",
         "app.tasks.deployments",
         "app.tasks.domain_routing",
+        "app.tasks.certificates",
         "app.tasks.maintenance",
         "app.tasks.simulation",
     ],
@@ -97,6 +98,15 @@ app.conf.beat_schedule = {
         "task": "nx.sweep_routes",
         "schedule": settings.route_sweep_interval_seconds,
         "options": {"expires": settings.route_sweep_interval_seconds - 5},
+    },
+    # Certificate issuance: the sweep is what turns "due" into work, so its cadence
+    # bounds how long a backoff — or a worker that died holding a live state —
+    # delays the next attempt. Much shorter than the shortest backoff (5 min), so
+    # a recovered generation retries immediately instead of waiting for a tick.
+    "sweep-certificates": {
+        "task": "nx.sweep_certificates",
+        "schedule": settings.certificate_sweep_interval_seconds,
+        "options": {"expires": settings.certificate_sweep_interval_seconds - 10},
     },
     "aggregate-metrics": {
         "task": "nx.aggregate_metrics",

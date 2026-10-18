@@ -725,31 +725,35 @@ gated live — see [domain-routing.md](domain-routing.md).
 
 ### Certificates — `certificates.py`
 
-Phase 5.1 metadata, extended by 5.2.2 with the credential reference. **Still no
-issuance, delivery, installation or activation**: a request is recorded, its
-generation stays in the pre-issuance vocabulary, and every response says so
-(`issued: false`, `current_generation_id: null`, `expires_at: null`, and a
-`status_detail` that names what has *not* happened). The `certificate_generations`
-material columns (`key_ciphertext`, `chain_ciphertext`, `deke_id`, `issued_at`) exist
-since 5.2.2 and are **empty** — nothing in the tree writes one — and no response
-model names them. Reads are metadata-only — no endpoint returns a private key,
-plaintext certificate material or ciphertext — and both codenames are
-organization-scoped. See [phase5-design.md](phase5-design.md) §3.1–§3.2, §4.1, §10.7.
+Phase 5.1 metadata, extended by 5.2.2 with the credential reference and by 5.3 with
+**issuance** — a request is recorded, its generation is handed to a worker **after the
+transaction commits**, and the read model says which of the two happened. **Still no
+delivery, installation or activation**: nothing reaches a node, and no route can serve
+HTTPS. A generation may now reach `ISSUED` and carry material, encrypted under the
+organization DEK; no response model names a ciphertext field, and reads remain
+metadata-only — no endpoint returns a private key, plaintext certificate material or
+ciphertext. Both codenames are organization-scoped. See
+[phase5-design.md](phase5-design.md) §3.1–§3.2, §4.1, §10.7, §10.8 and
+§10.8.1 (the credential is the certificate's own; a Domain-level one never existed).
 
 | Method | Path | Permission | Notes |
 |---|---|---|---|
-| POST | `/certificates` | `certificate.manage` | body `{domain_id, identifiers[], challenge_type?, auto_renew, dns_provider_id?}` — the **first** identifier is the primary common name and the rest are SANs; the domain must be `VERIFIED`, every identifier must be covered by it, and the challenge is `dns-01` only. `dns_provider_id` names a DNS credential in the caller's own organization (a foreign or unknown id is a 404); omitted it inherits the Domain's. Writes the certificate and its first `PENDING` generation in one transaction; 409 `CERTIFICATE_EXISTS` on a duplicate name |
+| POST | `/certificates` | `certificate.manage` | body `{domain_id, identifiers[], challenge_type?, auto_renew, dns_provider_id?}` — the **first** identifier is the primary common name and the rest are SANs; the domain must be `VERIFIED`, every identifier must be covered by it, and the challenge is `dns-01` only. `dns_provider_id` names a DNS credential in the caller's own organization (a foreign or unknown id is a 404); omitted, the certificate names none and issuance refuses it with `CERTIFICATE_DNS_CREDENTIAL_MISSING` until one is attached — there is no Domain-level credential to inherit. Writes the certificate and its first `PENDING` generation in one transaction and enqueues issuance **after it commits**; 409 `CERTIFICATE_EXISTS` on a duplicate name |
 | GET | `/certificates` | `certificate.read` | filters `status`, `domain_id`; each row carries its newest generation and the derived `status`/`status_detail` |
-| GET | `/certificates/{certificate_id}` | `certificate.read` | detail adds the whole generation history, newest first |
-| PATCH | `/certificates/{certificate_id}` | `certificate.manage` | `auto_renew` and `dns_provider_id` only — an explicit `null` clears the credential override ("inherit the Domain's"), while `null` for `auto_renew` is not a value and is ignored. Identifiers, status and expiry are not writable in place |
+| GET | `/certificates/{certificate_id}` | `certificate.read` | detail adds the whole generation history, newest first; each generation carries `directory_url`, `directory` (the known directory, or null when the URL is unrecognized) and `publicly_trusted` — derived from the URL **stored on the row**, so a staging generation stays labelled staging after the platform is pointed at production, and an unrecognized URL reads as not publicly trusted |
+| POST | `/certificates/{certificate_id}/retry` | `certificate.manage` | `202 Accepted`: pulls the newest generation's `next_attempt_at` forward and dispatches the same task the sweep dispatches — this call itself touches no CA and publishes nothing. A retry is not an attempt, so a *live* generation with no running attempt is allowed through (a lost dispatch) and a running one is refused. Named 409 refusals: `CERTIFICATE_NO_GENERATION`, `CERTIFICATE_ALREADY_ISSUED`, `CERTIFICATE_ATTEMPTS_EXHAUSTED`, `CERTIFICATE_ATTEMPT_IN_FLIGHT`, `CERTIFICATE_STATE_NOT_ATTEMPTABLE` |
+| PATCH | `/certificates/{certificate_id}` | `certificate.manage` | `auto_renew` and `dns_provider_id` only — an explicit `null` **detaches** the credential (leaving the certificate unissuable until another is attached), while `null` for `auto_renew` is not a value and is ignored. Identifiers, status and expiry are not writable in place |
 | DELETE | `/certificates/{certificate_id}` | `certificate.manage` | removes the request and its generations; refused once a generation has been issued. A domain with a certificate cannot be deleted (409 `DOMAIN_HAS_CERTIFICATES`) |
 
 ### DNS credentials — `dns_providers.py`
 
-Phase 5.2.2 — the customer DNS API credentials the DNS-01 challenge will be published
-with, **written here and never read back**. There is no issuance in this phase, so a
-stored credential's only observable use is `verify` (`scopes`, `verified_at`,
-`verify_error`, `last_used_at`). Permissions are the certificate ones: v1 gives
+Phase 5.2.2 — the customer DNS API credentials the DNS-01 challenge is published with,
+**written here and never read back**. Since 5.3 a stored credential has a second
+observable effect: issuance publishes and deletes `_acme-challenge` TXT records through
+it, so the row's `last_used_at` moves and its `zone_allowlist` is enforced **before every
+provider call** (an empty allowlist authorizes nothing, and a challenge outside it is a
+refusal, not a lookup). What the API still shows is only `verify`'s verdict (`scopes`,
+`verified_at`, `verify_error`, `last_used_at`). Permissions are the certificate ones: v1 gives
 `dns_providers` no codename of its own (phase5-design.md §10.3.2 L4) — managing a
 credential *is* managing the inputs to a certificate request — so reads ride
 `certificate.read` and every mutation rides `certificate.manage`, both

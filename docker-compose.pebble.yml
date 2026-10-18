@@ -1,0 +1,81 @@
+# Phase 5.3.1 — isolated real-ACME stack: Pebble plus a two-view authoritative zone.
+#
+# Why a stack of its own: the acceptance criterion for this phase is that issuance
+# completes through the **real** ACME protocol against a CA whose validation is
+# real, with the platform's own authoritative-DNS propagation check in the path.
+# A fake session proves the flow; only a CA that actually resolves
+# `_acme-challenge.<name>` proves the flow's DNS half is wired correctly.
+#
+# --- Why every service uses host networking ---------------------------------
+#
+# Pebble validates DNS-01 by querying the nameserver given with `-dnsserver`.
+# That server has to be *the same zone* the application observes, and the two
+# authoritative views have to live at two different addresses on that zone's
+# delegation. Loopback addresses (127.0.0.2 / 127.0.0.3) are the only addresses
+# guaranteed to exist without touching the host's DNS or `/etc/hosts`, and a
+# container on a bridge network cannot reach the host's loopback. Host networking
+# gives all three processes the same loopback namespace, which is what makes the
+# delegation real rather than simulated. This is therefore Linux-only, like the
+# rest of this repository's node-agent tooling.
+#
+# Nothing here publishes on 0.0.0.0: `MOCK_BIND_HOST` binds the authoritative
+# listener to one loopback address per view, so the two views can disagree without
+# fighting over port 53.
+#
+# --- Why two mock nameservers ------------------------------------------------
+#
+# One authoritative server can only ever prove the happy path. Two, advertising
+# the same delegation but holding their own record stores, are what let a test
+# model a zone that is mid-propagation — one server with the TXT value, one still
+# without it. That disagreement is exactly the state in which telling a CA
+# "ready" is wrong, so it has to be representable in the infrastructure, not
+# merely in a unit-test double.
+#
+# Control API: http://127.0.0.1:18053 and :18054 (the test provider publishes
+# through it; a real provider's API is what it stands in for).
+name: nexusops-pebble
+
+services:
+  ca:
+    image: ghcr.io/letsencrypt/pebble:latest
+    # `-config` is explicit because overriding the command drops the image's
+    # default arguments. Nonces and authz reuse are turned off so a retry in a
+    # test is deterministic rather than "5% of requests are rejected on purpose".
+    command:
+      - -dnsserver
+      - 127.0.0.2:53
+      - -config
+      - /test/config/pebble-config.json
+    environment:
+      PEBBLE_VA_NOSLEEP: "1"
+      PEBBLE_WFE_NONCEREJECT: "0"
+      PEBBLE_AUTHZREUSE: "0"
+    network_mode: host
+
+  # The zone's ns1: 127.0.0.2, control API on 18053.
+  ns-a:
+    image: nexusops-dnsmock:pebble
+    build:
+      context: ./e2e/dnsmock
+    network_mode: host
+    environment:
+      MOCK_ZONE: pebble.test
+      MOCK_IP: 127.0.0.2
+      MOCK_BIND_HOST: 127.0.0.2
+      MOCK_CONTROL_PORT: "18053"
+      # Both views advertise the *same* delegation, so nameserver discovery sees
+      # one zone with two servers. Only the record stores differ.
+      MOCK_NS: ns1.pebble.test=127.0.0.2,ns2.pebble.test=127.0.0.3
+
+  # The zone's ns2: 127.0.0.3, control API on 18054.
+  ns-b:
+    image: nexusops-dnsmock:pebble
+    build:
+      context: ./e2e/dnsmock
+    network_mode: host
+    environment:
+      MOCK_ZONE: pebble.test
+      MOCK_IP: 127.0.0.3
+      MOCK_BIND_HOST: 127.0.0.3
+      MOCK_CONTROL_PORT: "18054"
+      MOCK_NS: ns1.pebble.test=127.0.0.2,ns2.pebble.test=127.0.0.3

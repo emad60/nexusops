@@ -23,6 +23,7 @@ from uuid import UUID
 from pydantic import Field
 
 from app.models.enums import (
+    AcmeDirectory,
     CertificateChallengeType,
     CertificateGenerationState,
     CertificateKeyAlgorithm,
@@ -40,10 +41,12 @@ class CertificateCreate(APIModel):
     apex + wildcard pair is one order (``["example.com", "*.example.com"]``)
     rather than two certificates.
 
-    ``dns_provider_id`` overrides the credential the DNS-01 challenge is published
-    with; omitted (or null) it inherits the Domain's. The id must name a row in the
-    caller's own organization — a foreign id is a 404, never a stored reference
-    that would later publish a challenge with someone else's credential.
+    ``dns_provider_id`` names the credential the DNS-01 challenge is published
+    with. It is optional at request time — a certificate may be recorded before an
+    operator has stored a credential — but issuance refuses one that names none, so
+    ``PATCH /certificates/{id}`` is how it is attached afterwards. The id must name
+    a row in the caller's own organization — a foreign id is a 404, never a stored
+    reference that would later publish a challenge with someone else's credential.
     """
 
     domain_id: UUID
@@ -53,7 +56,7 @@ class CertificateCreate(APIModel):
     challenge_type: str = "dns-01"
     #: Renewal preference the sweep honors (it never overrides it).
     auto_renew: bool = True
-    #: Overrides the Domain's DNS credential for this certificate's challenges.
+    #: The DNS credential this certificate's challenges are published with.
     dns_provider_id: UUID | None = None
 
 
@@ -62,9 +65,9 @@ class CertificateUpdate(APIModel):
 
     Two fields a caller may change after creation. ``auto_renew`` is a preference;
     ``dns_provider_id`` is which credential may publish this certificate's
-    challenges (null means "inherit the Domain's"). Neither changes what the
-    certificate *is*: different identifiers would be a new generation, and issuing
-    one is not something this phase does.
+    challenges (null clears it, leaving the certificate unissuable until one is
+    attached). Neither changes what the certificate *is*: different identifiers
+    would be a new generation, and issuing one is not something this phase does.
 
     The two fields treat an explicit ``null`` differently, and deliberately:
     ``null`` for ``auto_renew`` is not a value, so it is ignored rather than
@@ -110,6 +113,23 @@ class CertificateGenerationOut(OutModel):
     #: The CA axis, kept separate from ``state`` so "the authority never answered"
     #: is visible as its own fact rather than folded into the lifecycle.
     revocation_state: CertificateRevocationState = CertificateRevocationState.NOT_REQUESTED
+    #: Which certificate authority this generation's order was placed with, as the
+    #: directory URL recorded on the row. Written *before* material exists, so a
+    #: failed or abandoned attempt still says which CA it spoke to, and never
+    #: rewritten: a retry at another directory is a new generation, which is what
+    #: keeps a staging order from becoming a production certificate halfway
+    #: through. NULL means no order was ever placed.
+    directory_url: str | None = None
+    #: The same value as a known directory, or NULL when this version does not
+    #: recognise the URL it finds.
+    directory: AcmeDirectory | None = None
+    #: Whether a certificate from that directory is trusted by a browser: False for
+    #: staging and for the test CA, and False for an unrecognised URL — only
+    #: production is publicly trusted, so the safe reading needs no special case.
+    #: Says nothing about whether material exists; ``issued`` on the certificate is
+    #: that question, and a failed attempt at production is publicly-trusted *and*
+    #: unissued.
+    publicly_trusted: bool = False
 
 
 class CertificateOut(OutModel):
@@ -141,7 +161,7 @@ class CertificateOut(OutModel):
     #: status string that also means "requested".
     issued: bool = False
     #: The credential this certificate's challenges may be published with. NULL
-    #: means it inherits its Domain's.
+    #: means none is attached, which is a request issuance refuses to attempt.
     dns_provider_id: UUID | None = None
     status_detail: str = ""
 

@@ -97,6 +97,7 @@ shows up immediately, not on the first request. Copy `.env.example` and adjust.
 | Auth | `ACCESS_TOKEN_TTL_MINUTES` (15), `REFRESH_TOKEN_TTL_DAYS` (14), `CORS_ORIGINS`, `LOGIN_MAX_ATTEMPTS` (5), `LOGIN_LOCKOUT_SECONDS` (900) | Short JWT access tokens held in SPA memory; opaque refresh tokens in an HttpOnly SameSite=Strict cookie. `CORS_ORIGINS` is a comma list, no trailing slash. |
 | Simulation | `SIMULATION_MODE` | `true` (the `.env.example` default) makes everything laptop-runnable: simulated agents emit heartbeats and deterministic sine-wave metrics, Docker containers and deployments are simulated, monitors probe simulated targets. The UI shows a **SIMULATION MODE** badge while active. |
 | Monitoring cadence | `SERVER_OFFLINE_AFTER_SECONDS` (90), `MONITOR_DISPATCH_INTERVAL_SECONDS` (10), `METRICS_AGGREGATION_INTERVAL_SECONDS` (60), `RAW_METRIC_RETENTION_HOURS` (24), `HOURLY_METRIC_RETENTION_DAYS` (30) | Read by the Celery beat schedule in `backend/app/tasks/celery_app.py`. |
+| Certificates / ACME | `ACME_DIRECTORY`, `ACME_ACCOUNT_EMAIL`, `CERTIFICATE_PROPAGATION_TIMEOUT_SECONDS` (120), `CERTIFICATE_VALIDATION_TIMEOUT_SECONDS` (240), `CERTIFICATE_FINALIZATION_TIMEOUT_SECONDS` (60), `CERTIFICATE_ORDER_TTL_SECONDS` (3600), `CERTIFICATE_SWEEP_INTERVAL_SECONDS` (60), `CERTIFICATE_DNS_TTL_SECONDS` (60) | `ACME_DIRECTORY` ships empty in `.env.example` and a startup validator resolves empty to `staging` outside production (the stored value is canonicalised to `staging`, not left blank), refuses empty *in* production, and refuses `production` outside production (5.4). An unknown value, Pebble in production, or production outside production abort at startup — there is no silent fallback either way. The three attempt deadlines must fit inside a 540s worker, which is why they are bounded settings. |
 | SMTP | `SMTP_HOST`, `SMTP_PORT`, `SMTP_FROM`, … | In compose `SMTP_HOST=mailpit`; mail lands in Mailpit (section 9.3). |
 | Network guard | `ALLOW_PRIVATE_TARGETS` | `true` in dev so monitors/webhooks may target private networks. Tests force `false` regardless (see `backend/tests/conftest.py`). |
 | HTTP server | `API_HOST`, `API_PORT`, `API_WORKERS` | Uvicorn settings; compose passes `--workers ${API_WORKERS:-2}`. |
@@ -239,12 +240,34 @@ make test                 # unit backend + frontend vitest — no services neede
   throwaway `hashicorp/vault:1.15` container (unique name, loopback port, generated
   TLS material) and removes it afterwards; it never touches the compose services or
   a volume. If Docker or that image is unavailable the module **skips with an
-  explicit reason** — a skipped run is not evidence, and the report will say so.
+  explicit reason** — a skipped run is not evidence, and the report will say so.- **Certificate issuance tests need no CA.** `tests/integration/test_certificate_issuance.py`
+  runs the real `issue_generation` against its three documented seams
+  (`session_factory`, `provider_factory`, `observer`): a fake CA, a fake zone and a
+  fake authoritative resolver. What it pins is this platform's flow — an attempt
+  that succeeds becomes `ISSUED` with a leaf-matching fingerprint and its TXT records
+  deleted, an attempt that fails is recorded with the CA's vocabulary, scheduled with
+  backoff and cleaned up, a finalization failure and an unconfirmed delete stay truthful,
+  a dispatch of a running attempt is refused without touching the row, a duplicate
+  dispatch creates no second order, an abandoned one is recovered as lost work, and no
+  response, event or column holds the private key or account key in the clear. The
+  sealed `acme` library seam itself (ordering, challenge, finalize, error mapping) is
+  covered in `tests/unit/test_acme_seam.py`.
+- **Real-ACME interoperability is a separate command and a separate claim.**
+  `make test-pebble` runs `tests/integration/test_certificate_pebble.py`, which drives
+  the production client adapter and `issue_generation()` against an isolated Pebble CA
+  plus two authoritative views of `pebble.test` (`docker-compose.pebble.yml`, compose
+  project `nexusops-pebble`). It needs PostgreSQL + Redis like the rest of the
+  integration suite, and starts its own stack with host networking on
+  `127.0.0.2`/`127.0.0.3` — which is why it is Linux-only and why `make test-pebble`
+  is not part of `make test`. `make pebble-up`/`make pebble-down` run that stack by
+  hand. The suite **fails** rather than skips when Docker, the stack or the directory
+  is missing, so a green run is evidence; Pebble's self-signed TLS is trusted only in
+  the `pebble` client path and its test root is never added to a system trust store.
 - Pytest configuration lives in `backend/pyproject.toml`:
   `asyncio_mode = "auto"`, `--strict-markers`, and the single custom marker
   `integration: requires PostgreSQL + Redis`. `DeprecationWarning` raised from
   `app.*` code is an error — fix the source, do not filter it.
-- The suite collects **1138** test cases today — 751 unit and 387 integration
+- The suite collects **1392** test cases today — 965 unit and 427 integration
   (`pytest --collect-only`, `-m "not integration"` / `-m "integration"` split; integration
   tests are parametrized, so a handful of functions cover many scenarios). 25 of them are the
   cross-tenant isolation gate in `tests/integration/test_tenant_isolation.py`, which
@@ -551,6 +574,12 @@ the nginx edge log — the edge sets long `proxy_read_timeout` (3600 s) and
   (details in `docs/troubleshooting.md` §13).
 - **The Makefile does not source `.env`** — host targets that need database
   credentials build them from shell variables (section 5.1 gotcha).
+- **No test in this suite talks to a public CA.** Issuance is exercised against a
+  fake CA and a fake authoritative resolver (section 5.1), and the e2e stack serves
+  DNS from `e2e/dnsmock` for one throwaway zone. A real staging issuance needs a
+  public zone you control and egress to that CA, so it cannot be reproduced end to
+  end on a laptop — treat a green suite as "the flow is right", not "Let's Encrypt
+  accepted us today".
 
 ---
 

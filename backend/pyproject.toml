@@ -26,6 +26,13 @@ dependencies = [
     "dnspython>=2.8",
     "orjson>=3.11",
     "prometheus-client>=0.23",
+    # RFC 8555 client (Phase 5.3): directory, nonce/Replay-Nonce handling, JWS
+    # signing and order polling are the library's job, never re-implemented here.
+    # ``acme`` is the same maintained client certbot ships, and it pulls
+    # ``josepy`` (declared explicitly below because app/services/acme/ imports it
+    # directly to build JWKs and compute DNS-01 values).
+    "acme>=5.1",
+    "josepy>=2.2",
 ]
 
 [project.optional-dependencies]
@@ -62,6 +69,11 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["S105", "S106", "S107"]
+# The Pebble harness starts and stops its own compose stack. The argv is built
+# from `shutil.which("docker")` plus constants and a repository path — there is
+# no untrusted input in it — but bandit cannot see that, so the check is scoped
+# to the one file that shells out.
+"tests/integration/test_certificate_pebble.py" = ["S603"]
 "backend/app/core/config.py" = []
 "**/migrations/*" = ["E501", "I001"]
 
@@ -81,6 +93,7 @@ filterwarnings = ["error::DeprecationWarning:app.*"]
 addopts = "-q --strict-markers"
 markers = [
     "integration: requires PostgreSQL + Redis",
+    "pebble: requires the isolated Pebble + authoritative-DNS stack (docker)",
 ]
 
 [tool.coverage.run]

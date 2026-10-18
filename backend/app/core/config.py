@@ -15,7 +15,14 @@ from cryptography.fernet import Fernet
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from app.models.enums import AcmeDirectory
+
 _ENV_FILE_CANDIDATES = (".env", "../.env")
+
+#: The accepted ``ACME_DIRECTORY`` values, taken from the vocabulary itself so a new
+#: member cannot be forgotten here (the enum is the closed set; this is a lookup of
+#: its values, never a second list).
+_ACME_DIRECTORY_VALUES: frozenset[str] = frozenset(member.value for member in AcmeDirectory)
 
 
 class Settings(BaseSettings):
@@ -154,6 +161,41 @@ class Settings(BaseSettings):
     metrics_aggregation_interval_seconds: int = Field(default=60, ge=10)
     raw_metric_retention_hours: int = Field(default=24, ge=1)
     hourly_metric_retention_days: int = Field(default=30, ge=1)
+
+    # --- Certificate issuance & ACME (Phase 5.3) ------------------------
+    #: Which ACME directory issuance uses. **Empty is a real value**: outside
+    #: production it means "the non-production default" (staging), and in
+    #: production it is refused — production issuance requires the operator to name
+    #: ``production`` explicitly (phase5-design.md §5.4). Accepted values are the
+    #: :class:`~app.models.enums.AcmeDirectory` members: ``staging``, ``production``
+    #: and ``pebble`` (the local test CA the integration suite runs). There is no
+    #: silent fallback in either direction: an unknown value, Pebble in production
+    #: and production outside production all fail at process start.
+    acme_directory: str = ""
+    #: Contact address registered with the CA. Optional: the CA does not require it
+    #: and this platform tracks expiry itself, but a staging/production account with
+    #: no contact gets no expiry warning from the CA either.
+    acme_account_email: str = ""
+    #: How long one attempt may wait for the TXT record to appear on the zone's
+    #: authoritative nameservers, and how long it may then wait for the CA to
+    #: validate the challenge. Both are wall-clock deadlines inside a worker whose
+    #: soft limit is 540s, and the three below plus overhead must fit inside it —
+    #: which is why they are settings with upper bounds and not loose numbers.
+    certificate_propagation_timeout_seconds: int = Field(default=120, ge=10, le=600)
+    certificate_validation_timeout_seconds: int = Field(default=240, ge=30, le=480)
+    certificate_finalization_timeout_seconds: int = Field(default=60, ge=10, le=240)
+    #: How long a generation may sit in ORDERING/CHALLENGE_PUBLISHED/VALIDATING
+    #: before the sweep treats it as abandoned by a crashed worker and recovers it
+    #: (best-effort TXT cleanup, then a failure with the backoff). Deliberately much
+    #: longer than an attempt can legitimately take: recovering a live attempt would
+    #: be a second order for one generation.
+    certificate_order_ttl_seconds: int = Field(default=3600, ge=300, le=86400)
+    #: How often the issuance sweep looks for due and abandoned generations.
+    certificate_sweep_interval_seconds: int = Field(default=60, ge=15, le=900)
+    #: TTL of the ``_acme-challenge`` TXT records this platform publishes. Short on
+    #: purpose: a record left behind by a crash expires on its own, which is the
+    #: failure mode whose cleanup we cannot guarantee.
+    certificate_dns_ttl_seconds: int = Field(default=60, ge=30, le=3600)
 
     # --- SMTP -----------------------------------------------------------
     smtp_host: str = "127.0.0.1"
@@ -319,6 +361,60 @@ class Settings(BaseSettings):
             raise ValueError(
                 "POSTGRES_APP_USER must be set when POSTGRES_APP_PASSWORD is: "
                 "the runtime connects as that role so row-level security applies"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_acme_policy(self) -> Settings:
+        """Refuse to start with an ACME directory selection that is unsafe or ambiguous.
+
+        The whole matrix is decided here so that a misconfigured deployment fails
+        before it serves a request, and so that the *same* rule cannot be applied
+        inconsistently by a task later:
+
+        * an unknown name is refused in every environment — the accepted set is the
+          :class:`AcmeDirectory` vocabulary, and there is no fallback member;
+        * ``pebble`` is refused in production: it is a test CA behind a self-signed
+          certificate, and a production deployment that trusted it would mint
+          unrunnable certificates;
+        * ``production`` is refused outside production: production issuance is an
+          explicit, deliberate act, and a development or CI process that can reach
+          the real CA burns real rate limits;
+        * unset means the non-production default (staging), and is **refused in
+          production**, where naming the directory is what makes the choice
+          explicit.
+
+        The stored value is canonicalised (lower-case, stripped) so the enum lookup
+        later is total, and the message names the variable and the accepted values —
+        never a value that could be a credential.
+        """
+        name = (self.acme_directory or "").strip().lower()
+        self.acme_directory = name
+        if not name:
+            if self.is_production:
+                raise ValueError(
+                    "ACME_DIRECTORY is required in production (set 'production'). "
+                    "Issuance would otherwise have to guess which certificate authority "
+                    "to use, and neither guess is safe."
+                )
+            self.acme_directory = AcmeDirectory.STAGING.value
+            return self
+        if name not in _ACME_DIRECTORY_VALUES:
+            raise ValueError(
+                f"ACME_DIRECTORY must be one of {sorted(_ACME_DIRECTORY_VALUES)} "
+                "(the ACME directory vocabulary); there is no fallback directory"
+            )
+        if name == AcmeDirectory.PEBBLE.value and self.is_production:
+            raise ValueError(
+                "ACME_DIRECTORY=pebble is refused in production: Pebble is the local "
+                "test certificate authority and its certificates are signed by a CA "
+                "no client trusts. Use 'production'."
+            )
+        if name == AcmeDirectory.PRODUCTION.value and not self.is_production:
+            raise ValueError(
+                "ACME_DIRECTORY=production is refused outside production: issuance from "
+                "this environment must never reach the real certificate authority. "
+                "Use 'staging' or 'pebble'."
             )
         return self
 

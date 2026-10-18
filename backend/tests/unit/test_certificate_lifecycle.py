@@ -70,6 +70,11 @@ GENERATION_FIELDS = {
     "issued_at",
     "fingerprint",
     "revocation_state",
+    # Phase 5.3 provenance: the directory the order was placed at, the same value
+    # as a known directory, and whether a certificate from it is browser-trusted.
+    "directory_url",
+    "directory",
+    "publicly_trusted",
 }
 
 #: Every field the certificate read model is allowed to expose.
@@ -473,7 +478,8 @@ def test_the_request_body_accepts_the_credential_override_and_nothing_else() -> 
         dns_provider_id="22222222-2222-2222-2222-222222222222",
     )
     assert request.dns_provider_id is not None
-    # Omitted is a value too: inherit the Domain's credential.
+    # Omitted is a value too: no credential is attached yet, which issuance refuses
+    # until PATCH supplies one.
     assert (
         CertificateCreate(
             domain_id="11111111-1111-1111-1111-111111111111",

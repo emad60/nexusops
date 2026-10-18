@@ -66,9 +66,14 @@ schema-hidden `/servers` alias); the `Server` → `Node` vocabulary; the Phase 2
 delivery promotion (project-scoped environments, config layering, secret version
 history); and the Phase 4 domains/routes surface with the nginx apply pipeline
 (HTTP only — see [domain-routing.md](domain-routing.md)). **Partly shipped since:** the
-Phase 5.1 certificate *metadata* tables and metadata-only API (2026-10-12, `37b7211` —
-identity and pre-issuance lifecycle only; no key material, no issuance).
-**Not yet shipped:** certificate issuance and TLS (domains and routes stay HTTP-only),
+Phase 5 certificate subsystem — the metadata tables and metadata-only API (5.1,
+2026-10-12, `37b7211`), the organization DEK envelope and the certificate inputs (5.2.1 /
+5.2.1.2 / 5.2.2, 2026-10-14), and **ACME issuance** (5.3, 2026-10-16): the `acme`/`josepy`
+client behind a seam, the DNS-01 order and propagation check, the attempt budget and
+backoff, the issuance worker and its sweep, and the per-generation directory provenance
+that keeps a staging certificate from being presented as a production one.
+**Not yet shipped:** certificate delivery, installation and TLS (domains and routes stay
+HTTP-only — nothing reaches a node, and no route can reference a certificate),
 real node operations beyond the container and nginx subsets, backups, teams/grants and
 billing — every later-phase entity in the companion specs.
 

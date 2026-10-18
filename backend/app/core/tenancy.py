@@ -120,6 +120,7 @@ SYSTEM_SCOPE_ALLOWED_MODULES: frozenset[str] = frozenset(
         "app/services/event_bus.py",  # raw-frame consumers are cross-org by design
         "app/services/notification_service.py",  # claims undelivered rows, dispatches frames
         "app/tasks/_util.py",  # sweep_session(), the worker-side claim helper
+        "app/tasks/certificates.py",  # certificate issuance sweep (due + abandoned dispatches)
         "app/tasks/deployments.py",  # deployment sweeper
         "app/tasks/domain_routing.py",  # domain verification sweep + platform-wide claim release
         "app/tasks/heartbeat.py",  # offline sweep

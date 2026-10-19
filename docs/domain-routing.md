@@ -28,10 +28,11 @@ revocation completes here too: releasing a competing claim discovers the nodes t
 previous owner was serving the name from and has each of them drop it, and a
 bounded reconciler repairs a node whose live configuration has diverged from the
 desired one (§8.4).
-Certificates, TLS and HTTPS redirects are **not** part of it: the schema has no
-`certificate_id` column and the redirect shape has no `to_scheme` field,
-deliberately, so no route can be configured into an HTTPS redirect before Phase 5
-owns it. Sections describing Phase 5–6 behavior are marked as such.
+Certificates, TLS and HTTPS redirects are **not** part of it: the redirect shape has no
+`to_scheme` field, deliberately, so no route can be configured into an HTTPS redirect
+before Phase 5 owns it. `routes.certificate_id` exists since **Phase 5.4.1**, but it is
+**association only** — `scheme` is still a closed `'http'` CHECK, nothing renders TLS and
+no HTTP behavior changed. Sections describing Phase 5–6 behavior are marked as such.
 
 **The repo's `nginx/` directory is the DASHBOARD edge, not a customer proxy.** It
 proxies `/api/` → the API container and `/` → the SPA container over a single
@@ -84,15 +85,18 @@ Three rows, one relationship spine: **Organization → Domain → Route**. The t
 below describe what Phase 4 shipped; rows marked *(Phase 5 target)* are **not in the
 schema yet**.
 
-> **Phase 5 target design (not shipped):** Route optionally carrying a
-> **Certificate** (`Route |o--o| Certificate` — authoritative spec:
-> [phase5-design.md](phase5-design.md) §3; overview: certificate-management.md §2).
-> The `certificates` table exists (Phase 5.1 metadata), but `routes.scheme` is a closed
-> CHECK of `'http'`, there is no `certificate_id` column, and no route can reference a
-> certificate, so a TLS listener and an HTTPS redirect are not
-> merely unwired — they are unrepresentable. Phase 5 adds them by migration, with
-> certificate material content-addressed by fingerprint so replacing it changes the
-> rendered `bundle_id` and drift stays detectable (phase5-design.md §8.3).
+> **Phase 5.4.1 (shipped):** a Route optionally references one **Certificate**
+> (`Route |o--o| Certificate` — authoritative spec: [phase5-design.md](phase5-design.md)
+> §3.5/§4.4/§10.10). The reference is the tenant-consistent pair
+> `(certificate_id, org_id) → certificates (id, org_id)` with `ON DELETE RESTRICT`, so a
+> route cannot name another organization's certificate and a certificate a route still
+> references cannot be deleted. **This is association, not activation:** `scheme` is
+> still `CHECK (scheme = 'http')`, there is no TLS listener and no HTTPS redirect, and a
+> binding that goes ineligible (domain unverified, certificate suspended/expired, route
+> disabled) is reported as such rather than rewritten. The TLS listener and the
+> `scheme` widening remain Phase 5.5, with certificate material content-addressed by
+> fingerprint so replacing it changes the rendered `bundle_id` and drift stays
+> detectable (phase5-design.md §8.3).
 
 A route's upstream may be a container on the route's node (usual case) or, later,
 an external one.
@@ -129,7 +133,8 @@ org has verified — it stays `PENDING` until it can prove ownership itself.
 | `node_id` | UUID FK → servers | The serving Node; upstream must live on it (§8) |
 | `container_id` | UUID FK, nullable | Upstream container; external upstream is a later phase |
 | `port` | Int + CHECK | 1–65535; the **host-published** port, never the container-internal one |
-| `scheme` | String(8) + CHECK | **`http` only** — `CHECK (scheme = 'http')` in Phase 4. `https` and its `certificate_id` are Phase 5 target design (§3.2 note) |
+| `scheme` | String(8) + CHECK | **`http` only** — `CHECK (scheme = 'http')`. `certificate_id` exists since 5.4.1, but `scheme='https'` and the pairing CHECK remain Phase 5.5 |
+| `certificate_id` | UUID, nullable + composite FK | Since **5.4.1**: the certificate this route is *allowed* to serve. The FK is `(certificate_id, org_id) → certificates (id, org_id)` `ON DELETE RESTRICT`, so cross-tenant references are unrepresentable and a bound certificate resists deletion. Association only — it does not make the route serve TLS |
 | `headers` / `rate_limit` / `redirect` | JSONB, nullable | Structured, allowlisted (§6, §9). `redirect` is host-only — there is no `to_scheme`, so no HTTPS redirect is expressible |
 | `enabled` | Bool | Live gate: requires domain `VERIFIED` AND upstream present |
 | `config_state` | String(16) + CHECK | `PENDING` / `IN_SYNC` / `STALE` / `FAILED` — last apply outcome on its node. `STALE` is "not confirmed live at the desired configuration", which covers both "pulled" and "awaiting the node's removal" |
@@ -328,7 +333,7 @@ makes unknown JSONB keys 422. `nginx -t` (§7) is a syntax safety net, not a def
 | `port` | Int 1–65535 | `proxy_pass` |
 | `rate_limit` | `{requests 1..10000, window ∈ (1s, 1m), burst ≤ requests}` — nginx can express only per-second and per-minute windows, so "10s" is deliberately not offered | `limit_req_zone` / `limit_req` |
 | `redirect` | `{to_host, code ∈ (301,302,307,308)}` — **host only**: there is no `to_scheme` field in Phase 4, so no route can be made to emit an HTTPS redirect. `to_host` must be a verified name in the org | fixed `return` block |
-| `certificate_id` | *not in Phase 4* — Phase 5 adds the column and its validation by migration (phase5-design.md §3.5/§4.4) | `ssl_certificate` / `ssl_certificate_key` paths, content-addressed (phase5-design.md §8.3) |
+| `certificate_id` | **not a route-create/update field** — bound only through `POST /routes/{id}/certificate` under `domain.manage` + `certificate.manage`, after coverage/verification/issuance checks (phase5-design.md §4.4). Since 5.4.1 the column exists, but it is association only and is **not** read by the renderer | Nothing yet. Phase 5.5 renders `ssl_certificate` / `ssl_certificate_key` paths, content-addressed (phase5-design.md §8.3) |
 
 Why this hard line: co-hosted domains on one node share one nginx config — a config
 injection is traffic interception across *every* route on that node
@@ -439,18 +444,24 @@ loopback address the renderer prefers — and the upstream picker lists only con
 with reported published ports, so a deploy-then-route can never silently produce an
 unreachable upstream.
 
-### 8.2 Certificate selection rule (this doc owns it) — **Phase 5 target design**
+### 8.2 Certificate selection rule (this doc owns it) — **binding implemented in 5.4.1**
 
-> Nothing below is implemented: certificate rows exist since Phase 5.1, but there is no
-> coverage check at bind time, no `certificate_id` column on `routes`, and no
-> `scheme=https` to bind to. It is recorded here because this doc owns the rule, and
-> certificate-management.md §8 implements it in Phase 5.5.
+> The coverage rule below is enforced at bind time since **Phase 5.4.1**
+> ([phase5-design.md](phase5-design.md) §4.4/§10.10). What is still absent is the
+> `scheme=https` activation target (Phase 5.5): a successful binding does not make the
+> route serve TLS.
 
 A route's HTTPS certificate must cover the hostname: exact CN/SAN preferred,
 otherwise a wildcard SAN one label deep (`*.example.com` covers `api.example.com`,
-not `a.b.example.com`). The covering check at bind time is owned by the certificate
-service ([phase5-design.md](phase5-design.md) §4.4); no covering issued cert ⇒ bind
-rejected with `CERTIFICATE_DOES_NOT_COVER_HOSTNAME`. One certificate per route.
+not `a.b.example.com` or the apex `example.com`). A wildcard **route** hostname
+(`*.example.com`) is covered only by the identical wildcard identifier. The check is
+label-wise, so `notexample.com` cannot match `example.com`. No covering issued cert ⇒
+bind rejected with `CERTIFICATE_HOSTNAME_NOT_COVERED`. One certificate per route;
+replacing it requires an explicit unbind first (`ROUTE_CERTIFICATE_CONFLICT`).
+
+Eligibility is re-derived on every read: verified domain, current generation `ISSUED`,
+not suspended, not expired, route enabled. Any failure reports `INELIGIBLE` with a
+named code — the association row is never silently rewritten or deleted.
 
 ### 8.3 Re-render triggers
 
@@ -654,10 +665,15 @@ rate-limit zones never leak stale entries after route deletion.
    (§7); uptime monitor auto-attaches (opt-out, §13). Route creation is **refused**
    on a node that fails the routing pre-flight (§5.1) with a message naming the
    conflict.
-5. **HTTPS — not shipped (Phase 5).** Request a certificate (`certificate.manage`),
-   DNS-01 via the domain's `dns_provider_id`; on `issued` + delivered, bind
-   `scheme=https` + `certificate_id` → re-render serves TLS. Full spec:
-   **certificate-management.md** (§5–§7).
+5. **Certificate association — shipped (5.4.1).** Request a certificate
+   (`certificate.manage`); once `ISSUED`, bind it to the route with
+   `POST /routes/{id}/certificate` (`domain.manage` + `certificate.manage`). The route
+   detail then reports `certificate_binding` (`UNBOUND`/`BOUND`/`INELIGIBLE`) derived
+   from current state. **No TLS is served yet** — `scheme` stays `http`.
+6. **HTTPS activation — not shipped (Phase 5.5).** Delivery (5.4) installs the
+   material on the route's node, then activation widens `scheme` and re-renders the TLS
+   block; a probe flips the route to HTTPS only after the endpoint is verified. Full
+   spec: **certificate-management.md** (§5–§7).
 6. **Operate** — sweeps keep re-proving control; NS change or lost TXT pulls routes
    until re-verified; expiry monitors page through the incident pipeline.
 7. **Decommission** — disable route → apply removes its fragment; domain delete

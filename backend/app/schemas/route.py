@@ -91,6 +91,41 @@ class RouteUpdate(APIModel):
     monitor_optout: bool | None = None
 
 
+class RouteCertificateBind(APIModel):
+    """``POST /routes/{id}/certificate`` — associate a certificate with a route.
+
+    Only ``certificate_id`` is accepted. Eligibility is *not* a client input:
+    the service derives it from the certificate's identifiers, its current
+    generation and the route's verified domain, so a caller cannot talk a route
+    into a certificate the platform would otherwise refuse.
+    """
+
+    certificate_id: UUID
+
+
+class RouteCertificateBindingOut(APIModel):
+    """What the stored association means *now* (Phase 5.4.1).
+
+    ``eligible`` is re-derived on every read from authoritative rows, so a
+    binding whose domain lost verification, whose route is disabled or whose
+    certificate was suspended reports ``INELIGIBLE`` with a named code instead of
+    looking ready to serve. No fingerprint or material appears here — delivery
+    decides that, and only the agent endpoint may hand material out.
+    """
+
+    #: ``UNBOUND`` (never bound), ``BOUND`` (association valid now) or
+    #: ``INELIGIBLE`` (association present, but it must not be used).
+    state: str
+    eligible: bool
+    #: Stable machine code explaining the state — safe to branch on in a UI.
+    code: str
+    #: One sanitized sentence. Never certificate material.
+    detail: str
+    certificate_id: UUID | None = None
+    #: The certificate's current generation number, when one exists.
+    generation: int | None = None
+
+
 class RouteOut(OutModel):
     """Route read model."""
 
@@ -108,6 +143,9 @@ class RouteOut(OutModel):
     container_ref: str | None = None
     port: int
     scheme: str
+    #: The associated certificate (Phase 5.4.1), or ``None``. Association only:
+    #: ``scheme`` stays ``http`` and nothing serves TLS yet.
+    certificate_id: UUID | None = None
     enabled: bool
     config_state: RouteConfigState
     headers: list[RouteHeader] = Field(default_factory=list)
@@ -130,9 +168,10 @@ class RouteOut(OutModel):
 
 
 class RouteDetailOut(RouteOut):
-    """Detail is the list model plus the owning domain's verification state."""
+    """Detail is the list model plus the owning domain's state and the binding."""
 
     domain_status: str
+    certificate_binding: RouteCertificateBindingOut
 
 
 class NodeProxyCapabilityOut(APIModel):

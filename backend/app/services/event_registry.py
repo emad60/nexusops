@@ -53,6 +53,10 @@ EVENT_TYPES: dict[str, str] = {
     "ROUTE_APPLY_FAILED": "Node configuration apply failed for a route",
     "ROUTE_REMOVAL_REQUESTED": "Route is out of the desired configuration; no node has confirmed it stopped serving it yet",
     "ROUTE_REMOVAL_CONFIRMED": "A node applied a configuration without this route, so it is no longer served",
+    # certificate-to-route association (Phase 5.4.1) — association only; no TLS
+    # configuration is rendered and no node operation is queued by either event.
+    "ROUTE_CERTIFICATE_BOUND": "Certificate associated with a route (association only; HTTPS is not activated)",
+    "ROUTE_CERTIFICATE_UNBOUND": "Certificate association removed from a route (the certificate itself is unchanged)",
     "NGINX_DRIFT_DETECTED": "Node configuration drifted from the desired bundle",
     "NGINX_DRIFT_RECOVERED": "Node configuration was re-applied after drift",
     # certificates (Phase 5) — a request, an issuance and a failure are three

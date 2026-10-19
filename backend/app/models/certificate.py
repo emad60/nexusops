@@ -53,7 +53,10 @@ CASCADE``); a domain that still has certificates cannot be deleted at all
 would strand material that the CA still considers valid — and neither can a DNS
 provider a certificate still names, for the same reason: a rebind to another
 credential changes which token the platform signs with, and that must be an
-operator's explicit act rather than a deletion's side effect.
+operator's explicit act rather than a deletion's side effect. A certificate that
+a route still references cannot be deleted either (``routes.certificate_id`` is
+``ON DELETE RESTRICT``): a binding is ended by unbinding it first, never as a
+side effect of deleting the thing it points at.
 """
 
 from __future__ import annotations
@@ -226,6 +229,12 @@ class Certificate(OrgScoped, TimestampMixin, Base):
         # One certificate row per name per organization. A renewal does not
         # create a second row; it creates a second generation of this one.
         UniqueConstraint("org_id", "primary_cn", name="uq_certificates_org_cn"),
+        # The referenced key of ``routes``' tenant-consistent FK, which targets
+        # ``(id, org_id)`` so a route cannot bind another organization's
+        # certificate (Phase 5.4.1). Redundant with the primary key by itself;
+        # it exists because PostgreSQL requires a unique constraint on the exact
+        # column pair a composite foreign key names.
+        UniqueConstraint("id", "org_id", name="uq_certificates_id_org"),
         CheckConstraint("char_length(primary_cn) BETWEEN 4 AND 253", name="primary_cn_length"),
         # The array shape only. Element canonicality (lowercase, punycode, no IP
         # literal) is enforced on every write through ``canonicalize_name`` —

@@ -21,10 +21,28 @@ the per-organization account, the order/publish/prove/validate/finalize flow wit
 attempt budget and backoff, the crash-recovery order document, the issuance worker and
 its sweep, and the provenance column that lets the API say whether an issued certificate
 is publicly trusted. A generation now reaches `ISSUED` with material encrypted under the
-organization DEK.
+organization DEK. **Certificate-to-route binding** shipped as **5.4.1** (2026-10-19,
+migration `e1f2a3b4c5d6` — §10.9): `routes.certificate_id` with a **tenant-consistent**
+composite FK, the explicit bind/unbind API, the derived eligibility read model, and the
+deletion guards. It is association only — the column records which certificate a route
+*will be allowed* to serve; nothing renders TLS and `scheme` is still a closed `'http'`
+CHECK.
 **Not shipped:** private-key delivery (5.4), HTTPS activation (5.5), renewal, expiry
 monitoring and revocation (5.6) — §7, §8, §9, §10.1. Nothing in the tree delivers
 certificate material or anything else to a node, and no route can serve HTTPS.
+
+**Slice order (approved, and the order this document now uses):**
+
+1. **5.4.1 — certificate-to-route binding foundation — SHIPPED** (association and
+   eligibility only; no delivery, no TLS).
+2. **5.4 — secure delivery and node installation** (consumes the binding as its target
+   set).
+3. **5.5 — HTTPS activation** (widens `scheme`, renders the TLS block, probes, flips).
+
+Binding moved ahead of delivery because delivery's target set is *derived from*
+`routes.certificate_id` (§7.4) and the database had no such column; the eligibility rule
+that gates delivery also had nowhere to live. 5.5 keeps the activation half and does not
+come earlier.
 **Key-management gate closed 2026-10-12:** the KEK provider direction is approved (§6.7)
 and its operational custody specified (§6.9), which unblocked 5.2.1 — the provider adapter
 and the organization DEK envelope, planned in §10.5 and shipped; §10.6 records the audit
@@ -70,7 +88,7 @@ point for 5.2, verified at `37b7211`).
 | Fact | Ground |
 |---|---|
 | `domains` and `routes` are tenant tables (`OrgScoped` → session guard + RLS) | `backend/app/models/routing.py` |
-| `routes.scheme` is a closed CHECK of `'http'`; there is **no** `certificate_id` column | `backend/app/models/routing.py` (`scheme_http_only`) |
+| `routes.scheme` is a closed CHECK of `'http'`; there is **no** `certificate_id` column *(5.4.1 adds the column — association only; the CHECK is untouched)* | `backend/app/models/routing.py` (`scheme_http_only`) |
 | A route's `redirect` is host-only — no `to_scheme`, so no HTTPS redirect is representable | `backend/app/models/routing.py`, `backend/app/schemas/proxy.py` (`RouteRedirect`) |
 | One verified name platform-wide, via partial unique index `lower(name) WHERE status='VERIFIED'` | `backend/app/models/routing.py` (`uq_domains_verified_name`) |
 | One nginx answer per name+prefix per node, among enabled routes only | `backend/app/models/routing.py` (`uq_routes_node_host_path`) |
@@ -392,9 +410,10 @@ Indexes / constraints (**as built in 5.1**, migration `c8d9e0f1a2b3`):
 - A certificate row is **never hard-deleted while `routes.certificate_id` references
   it** (RESTRICT). Deletion is allowed only when orphaned *and* no generation is
   `ISSUED`: 5.1 implements the second half through `current_generation_id` (non-NULL ⇒
-  material exists ⇒ 409 `CERTIFICATE_HAS_ISSUED_GENERATION`), and the first half
-  arrives with its column in 5.5 — the FK there is RESTRICT, so the database refuses a
-  delete a bound route makes invalid rather than the service guessing.
+  material exists ⇒ 409 `CERTIFICATE_HAS_ISSUED_GENERATION`), and 5.4.1 implements the
+  first half twice: the service refuses with 409 `CERTIFICATE_IN_USE` naming the bound
+  route count, and the composite FK's `ON DELETE RESTRICT` refuses the delete even if a
+  caller bypasses the service. Unbinding is an explicit act.
 
 ### 3.2 `certificate_generations` — one ACME order + one key pair
 
@@ -501,12 +520,30 @@ exposes `name`, `kind`, `scopes`, `zone_allowlist`, `verified_at`, `credential_f
 
 ### 3.5 Reused / changed existing entities
 
-- **`routes`** gains `certificate_id` (UUID FK → `certificates.id`,
-  `ON DELETE RESTRICT`, nullable) and a CHECK widened to
-  `scheme IN ('http','https')` with the pairing rule:
+- **`routes.certificate_id`** (nullable UUID, **slice 5.4.1 — shipped**): the
+  certificate this route is *allowed* to serve. It is **not** a plain FK to
+  `certificates.id`: the constraint is the pair `(certificate_id, org_id)` →
+  `certificates (id, org_id)` (`fk_routes_certificate_org`, `ON DELETE RESTRICT`), so a
+  route in one organization naming another organization's certificate is
+  **unrepresentable**, not merely refused by the service. `MATCH SIMPLE` (the default)
+  skips the check when the column is NULL, which is what an unbound route needs. The
+  referenced pair gets `uq_certificates_id_org` because PostgreSQL requires a unique
+  constraint on exactly those columns. `ix_routes_certificate_id` serves the delivery
+  target query and the deletion guard.
+- **`routes.scheme` widening (slice 5.5, not shipped)** — `scheme IN ('http','https')`
+  with the pairing rule
   `(scheme='http' AND certificate_id IS NULL) OR (scheme='https' AND certificate_id IS NOT NULL)`.
   `scheme='https'` is **only** settable through the activation path in §5.6, never
-  by a plain PATCH. **Slice: 5.5.**
+  by a plain PATCH. 5.4.1 deliberately leaves the closed `'http'` CHECK in place: adding
+  the association column must not also start serving TLS.
+- **Binding lifecycle rule (5.4.1).** A binding is a *claim*, re-evaluated from
+  authoritative rows on every read. If the domain loses verification, the certificate is
+  suspended or superseded, the route is disabled, or the hostname is moved off the
+  certificate, the association row is **not** rewritten or deleted — `evaluate` reports it
+  `INELIGIBLE` with a named code and delivery must refuse. Deletion semantics: route
+  deletion removes the route (and with it the association); certificate deletion is
+  refused while bound (service 409 + FK RESTRICT); unbinding never deletes or suspends a
+  certificate. See §10.9.
 - **`servers.proxy_state`** gains `tls` keys: the desired/confirmed certificate
   fingerprint set per node, written under the Phase 4.4 single-writer lock. No new
   column. **Slice: 5.5.**
@@ -535,7 +572,8 @@ references — no forward reference, no placeholder DEK id, no artificial provid
 |---|---|---|---|
 | **5.1** — certificate metadata & lifecycle foundations — **SHIPPED 2026-10-12 (`37b7211`, migration `c8d9e0f1a2b3`)** | `certificates` (identity + lifecycle metadata, **including `domain_id`, `status`, `current_generation_id`, `challenge_type`, `auto_renew`, `key_algorithm`, `expires_at`**), `certificate_generations` (pre-issuance states + cursors), RLS policies + grants, the two codenames and their role grants | — | 5.1 performs **no issuance**, so it needs no providers, no ACME account and no key material. The generation `state` CHECK is deliberately limited to pre-issuance states, so a material-less `ISSUED` generation is unrepresentable rather than merely discouraged. |
 | **5.2** — key envelope, providers, ACME accounts, material | `dns_providers`, `acme_accounts`; `organizations.dek_ciphertext` / `organizations.dek_generation` | `certificates`: `+dns_provider_id` (FK → `dns_providers`), `+suspended_at`, `+suspension_reason`. `certificate_generations`: `+key_ciphertext`, `+chain_ciphertext`, `+fingerprint`, `+not_before`, `+not_after`, `+deke_id`, `+issued_at`, `+revoked_at`, `+revocation_state`, `+suspended_at`, `+suspension_reason`; **widen `state`** to the full vocabulary; **add the material guard CHECK** | The FK target, the envelope and the material columns land together, so the reference is always satisfiable and the guard CHECK can be written once. |
-| 5.4 / 5.5 / 5.6 | `certificate_deliveries` (5.4); `routes.certificate_id` + widened `scheme` (5.5); `monitors.target_type` + `CERTIFICATE` (5.6) | as scoped in §10.1 | Each consumes the 5.1/5.2 foundations; none introduces an earlier dependency. |
+| **5.4.1** — certificate-to-route binding foundation — **SHIPPED 2026-10-19 (migration `e1f2a3b4c5d6`)** | `uq_certificates_id_org` (the referenced key) | `routes`: `+certificate_id` (nullable) + `ix_routes_certificate_id` + **composite** `fk_routes_certificate_org` `(certificate_id, org_id) → certificates (id, org_id)` `ON DELETE RESTRICT`. **Not** touched: `routes.scheme` and its closed `'http'` CHECK | Delivery (5.4) derives its target set from this column (§7.4), so the column must exist before delivery, not with activation. The composite FK is the tenant proof; a single-column FK would be satisfiable across organizations. |
+| 5.4 / 5.5 / 5.6 | `certificate_deliveries` (5.4); widened `scheme` (5.5); `monitors.target_type` + `CERTIFICATE` (5.6) | as scoped in §10.1 | Each consumes the 5.1/5.2/5.4.1 foundations; none introduces an earlier dependency. |
 
 **Where the 5.2 row's envelope actually landed (2026-10-14):** the row above names
 `organizations.dek_ciphertext` / `organizations.dek_generation`, which is the plan as it
@@ -646,21 +684,47 @@ cannot own 443 is refused before any certificate work.
   `/certificates`, `/certificates/{id}`, `/dns-providers`, the delivery
   endpoint (foreign node) and the certificate-target monitor.
 
-### 4.4 Route → certificate binding at write time
+### 4.4 Route → certificate binding at write time (implemented in 5.4.1)
 
-`POST /routes/{id}/certificate` (and the request-body field on create) validates:
+The binding is **explicit**, never a side effect of route create/update: `certificate_id`
+is not an accepted field on `RouteCreate`/`RouteUpdate`, and delivery requests cannot
+supply one either. The only writers are:
 
-1. the certificate is in the caller's org and its current generation is `ISSUED`;
-2. the certificate **covers** the route hostname — exact CN/SAN, or a wildcard SAN
-   **one label deep** (`*.example.com` covers `api.example.com`, not
-   `a.b.example.com`), matching domain-routing.md §10's route-coverage depth rule so
-   hostname and cert coverage cannot diverge;
-3. the route's domain is `VERIFIED` **now**;
-4. the node passes the Phase 4 routing pre-flight.
+| Endpoint | Permissions | Behaviour |
+|---|---|---|
+| `POST /routes/{id}/certificate` body `{certificate_id}` | `domain.manage` **and** `certificate.manage` | 200 with the route; idempotent for the same certificate; 409 `ROUTE_CERTIFICATE_CONFLICT` if a *different* certificate is already bound (unbind first) |
+| `DELETE /routes/{id}/certificate` | `domain.manage` **and** `certificate.manage` | 204; idempotent; deletes no certificate |
 
-A mismatch is a 422 naming the field. The covering check is owned by the certificate
-service (domain-routing.md §8.2); the error shape is `CERTIFICATE_DOES_NOT_COVER_HOSTNAME`
-with the hostname and the available identifiers.
+The service (not the schema) validates the **persisted** state, in this order:
+
+1. the route exists in the caller's organization (`ROUTE_NOT_FOUND` otherwise) and is
+   locked `FOR UPDATE`, so two conflicting binds serialize and the loser sees the
+   winner's binding;
+2. the certificate is reachable in the caller's organization — a foreign id is the same
+   404 (`CERTIFICATE_NOT_FOUND`) as a random uuid, so the endpoint is not an existence
+   oracle; the composite FK is the second line of defence;
+3. the route's domain is `VERIFIED` **now** (`DOMAIN_NOT_VERIFIED`);
+4. the certificate is not suspended (`CERTIFICATE_SUSPENDED`), its status is `ISSUED`
+   (`CERTIFICATE_NOT_ISSUED`), its **current generation** is `ISSUED`
+   (`CERTIFICATE_NOT_ISSUED`), and its validity window has not passed
+   (`CERTIFICATE_EXPIRED`);
+5. the certificate **covers** the route hostname (`CERTIFICATE_HOSTNAME_NOT_COVERED`):
+   exact identifier, or a wildcard SAN/CN **one label deep** (`*.example.com` covers
+   `api.example.com`, never `example.com` or `a.b.example.com`). A wildcard *route*
+   hostname (`*.example.com`) is covered only by the identical wildcard identifier,
+   because the route answers the whole one-label name space. Comparisons are label-wise,
+   so `notexample.com` cannot match `example.com`.
+
+Bind is allowed on a disabled route — the association is a permission, not a claim that
+TLS is serving — but `evaluate` reports it `INELIGIBLE` (`ROUTE_DISABLED`) until the route
+is enabled. There is **no** node pre-flight here: binding queues no operation and renders
+nothing, so requiring an nginx-capable node would couple association to activation.
+
+Every read of the association goes through
+`route_certificate_service.evaluate()` and reports `UNBOUND` / `BOUND` / `INELIGIBLE`
+plus a stable code. Delivery (5.4) must gate on `eligible`, never on the presence of
+`routes.certificate_id`; a binding that has become invalid is visible, not silently
+trusted, and is never rewritten by a later lifecycle event.
 
 ---
 
@@ -1242,6 +1306,17 @@ A node receives a certificate **only** if it serves a route using it. Gaining a 
 creates a delivery row; losing the last route creates a removal. This is the secret
 minimization rule (secrets-architecture.md §7, domain-model.md §3.7) applied to TLS.
 
+**The target set is a join, not the stored column.** Since 5.4.1 the association exists,
+but it is an input to this query, not a conclusion: delivery must re-evaluate the same
+eligibility rules as `route_certificate_service.evaluate()` — route enabled, domain
+`VERIFIED` now, certificate current generation `ISSUED`, not suspended, not expired,
+hostname still covered — on every target computation and again when material is handed
+out (§7.3's "generation is current"). A route whose binding went ineligible drops out of
+the target set without its row being rewritten; that is the difference between "the
+association still exists" and "the certificate may still be served". The binding is
+**not** accepted as a client input on a delivery request: a caller cannot name a
+certificate for a route, only the route's own persisted state can.
+
 ### 7.5 Recovery for an interrupted delivery
 
 A claimed delivery whose response was lost (agent crashed mid-download) must be
@@ -1526,8 +1601,9 @@ so an operator is never told a certificate is revoked when it is not.
 | **5.2.1 — KEK provider and organization DEK envelope — SHIPPED 2026-10-12 (`06e8c52`); storage relocated by **5.2.1.2** (`a7b8c9d0e1f2`, §10.6)* | The `KEKProvider` seam with the **Vault Transit** adapter and the deterministic test provider; the organization envelope (`organization_dek_envelopes.dek_ciphertext` / `dek_generation` — the plan put these on `organizations`; §10.6 moved them); org-DEK create/wrap/unwrap/rewrap; provider configuration + fail-fast startup validation; operation-scoped unwrap (no LRU) | Migration (`organization_dek_envelopes` + the `organizations` columns it retires) + provider module + envelope service + config + tests | A production configuration cannot select or fall back to a non-production provider (abort at import); the KEK never reaches application code, the DB plaintext, logs or responses; a wrap/unwrap round-trip is bound to `(org_id, purpose, dek_generation)` so a moved ciphertext is rejected; `rewrap_dek` leaves no plaintext DEK in the application; provider outage fails closed with a named error while the API stays up; **no certificate/DNS material column exists yet, so nothing can be written with a placeholder key** |
 | **5.2.2 — Providers, ACME accounts and material columns — SHIPPED 2026-10-14 (migration `b8c9d0e1f2a3`, single head; §10.7 records what landed and its evidence)** | `dns_providers` + its metadata-only API and credential storage, `acme_accounts`, the generation material columns + `deke_id`, `certificates.dns_provider_id` **FK added with its target table**, widened `state` vocabulary, **material guard CHECK**; `verify_creds` + zone allowlist | Migration + two services + write-only API + the payload-framing primitive | **An issued (or superseded/suspended/expired/revoked) generation cannot exist without `key_ciphertext`, `chain_ciphertext`, `deke_id`, `issued_at` and `not_after`** (guard CHECK rejects it); `dns_provider_id` FK resolves to a real row (no artificial provider); DNS credential never returned by any endpoint; a challenge outside `zone_allowlist` is refused; DEK rotation re-encrypts only Phase-5 rows; no existing secret re-encrypted; a `decrypt_str` mismatch fails closed |
 | **5.3 — ACME issuance (staging + pebble) — SHIPPED 2026-10-16 (migration `c9d0e1f2a3`; §10.8 records what landed, its evidence and the one acceptance criterion that was met differently)** | `acme`/`josepy` dependency behind `AcmeProvider`; per-org account; DNS-01 order → publish → propagate → validate → finalize → store; state machine; backoff | Worker task + issuance suite through the seam | Issue a certificate for a name whose TXT record the flow publishes; generation reaches `ISSUED` with `not_after` set; retry/backoff and stuck-state sweep pinned; **no production CA traffic in tests** |
+| **5.4.1 — Certificate-to-route binding foundation — SHIPPED 2026-10-19 (migration `e1f2a3b4c5d6`, §10.10)** | `routes.certificate_id` (nullable) + `ix_routes_certificate_id` + **composite, tenant-consistent** `fk_routes_certificate_org` `(certificate_id, org_id) → certificates (id, org_id)` `ON DELETE RESTRICT` + `uq_certificates_id_org`; explicit bind/unbind service and API; derived eligibility read model; certificate deletion guard | Migration + service + two endpoints + tests | Bind/unbind are organization-scoped and require **both** `domain.manage` and `certificate.manage`; a cross-organization pair is **unrepresentable** in the database and is a 404 through the API; a non-`ISSUED`, suspended, expired or non-covering certificate cannot be newly bound; a route cannot be bound to another certificate without unbinding; concurrent binds serialize on the route row; `evaluate` reports `UNBOUND`/`BOUND`/`INELIGIBLE` from current rows; certificate delete while bound is refused (409 + FK RESTRICT); `scheme` is still `'http'`, no TLS renders, existing HTTP behavior unchanged; Alembic upgrade/downgrade/drift green. |
 | **5.4 — Secure delivery** | `certificate_deliveries`, `POST /agent/certificates/{id}/material`, `certificate.install`/`.remove` op types + agent handlers, content-addressed paths, fingerprint check, no-store response policy | Endpoint + op types + agent + contract tests | **No certificate private key or chain appears in operation params, results, audit metadata, events or logs** (asserted by tests over each path, §7.6); a foreign node's delivery is 404; a superseded generation is refused; a duplicate claim is idempotent; interrupted delivery recovers within the window and not after. **Non-production only until C1–C6 (§6.6) are met.** |
-| **5.5 — HTTPS activation & verification** | Renderer TLS block, allowlisted `tls` paths, `routes.certificate_id` + widen `scheme`, `proxy_state.tls`, activation endpoint, control-plane HTTPS probe | Migration + renderer + API | HTTP keeps serving until the probe succeeds; a bad cert path fails `nginx -t` and rolls back to the HTTP tree; `scheme` flips to `https` only after `VERIFIED_ACTIVE`; content-addressed path change ⇒ different `bundle_id` ⇒ drift detected |
+| **5.5 — HTTPS activation & verification** | Renderer TLS block, allowlisted `tls` paths, `routes.scheme` widening + pairing CHECK, `proxy_state.tls`, activation endpoint, control-plane HTTPS probe | Migration + renderer + API | HTTP keeps serving until the probe succeeds; a bad cert path fails `nginx -t` and rolls back to the HTTP tree; `scheme` flips to `https` only after `VERIFIED_ACTIVE`; content-addressed path change ⇒ different `bundle_id` ⇒ drift detected |
 | **5.6 — Renewal, expiry monitor, removal, revocation** | Hourly sweep, `CERTIFICATE` monitor target, removal/`REMOVED` state, suspension on ownership loss, automated revocation with the impact safeguard, replace/split for shared certs, `REVOKED_LOCAL_ONLY` + retry | Beat schedule + monitors + API | Renewal produces a new generation and supersedes the old; an offline node stays `PENDING` without a false success; expiry monitor pages independently of uptime; ownership loss suspends + re-renders + removes-on-confirm; a shared multi-identifier cert is **never** auto-revoked while a retained identifier still serves — it is replaced/split first; removal is **never** gated on CA revocation; revoked vs local-only vs suspended are distinct |
 | **5.7 — Hardening pass** | Redaction extended to cert material (already PEM-aware), rate-limit/CAA handling, operational runbooks, backfill of docs | Docs + tests | Redaction tests cover chain+key; the platform-security-model threat rows are updated; no key material in any asserted path |
 
@@ -1742,7 +1818,8 @@ key, because no column exists to store one in.
 | 5.2.2 | `dns_providers` table, its metadata-only API, credential storage under the org DEK, `verify_creds` + `zone_allowlist`; `acme_accounts`; `certificates.dns_provider_id` FK; generation material columns + `deke_id`; widened `state`; material guard CHECK | No issuance logic, no CA contact |
 | 5.3 | The `acme`/`josepy` dependency behind an ACME-provider seam, the order/challenge/validate/finalize flow, key pair generation, encrypt-and-store, issuance task + backoff | No delivery, no activation |
 | 5.4 | `certificate_deliveries`, the material endpoint, `certificate.install`/`certificate.remove` op types and agent handlers | No HTTPS activation |
-| 5.5 | Route binding (`routes.certificate_id`, widened `scheme`), the TLS renderer block, HTTPS activation + probe | No renewal/revocation |
+| 5.4.1 *(shipped 2026-10-19)* | Certificate-to-route binding: `routes.certificate_id`, its composite tenant FK, bind/unbind API and the derived eligibility read model | No delivery, no TLS, no `scheme` change |
+| 5.5 | Widened `scheme`, the TLS renderer block, HTTPS activation + probe | No renewal/revocation |
 | 5.6 | Renewal sweep, expiry monitor, removal, revocation (CA axis + `REVOKED_LOCAL_ONLY`) | — |
 
 **Exit condition for 5.2.1:** the migration is applied and reversible (with the refusal above),
@@ -2047,6 +2124,91 @@ the manual path is exercised with `provider_factory` raising on any call.
 cleanup instructions (as opposed to the post-issuance case the Pebble test asserts) remain
 covered only by the fake-CA suite, which owns the failure vocabulary a real CA cannot be
 made to produce on demand.
+
+### 10.10 Phase 5.4.1 — certificate-to-route binding foundation (shipped 2026-10-19)
+
+**Why this slice exists and why it comes first.** The delivery eligibility rule requires a
+persisted association between a certificate and its eligible routes, and the Phase 4
+schema had no `routes.certificate_id`. Building 5.4 before that column would have meant
+either inventing the association inside delivery (an opaque side table not owned by the
+route) or accepting a client-supplied certificate on a delivery request — both let the
+caller decide eligibility. The approved order is therefore:
+
+1. **5.4.1 — binding foundation (this section, association only);**
+2. **5.4 — delivery and node installation;**
+3. **5.5 — HTTPS activation.**
+
+**Scope shipped.** One migration from `d0e1f2a3b4c5` to `e1f2a3b4c5d6` (single head):
+
+| Object | Definition | Why |
+|---|---|---|
+| `routes.certificate_id` | `UUID NULL` | The certificate the route is *allowed* to serve. Nullable: binding is optional and an unbound route serves HTTP exactly as before |
+| `fk_routes_certificate_org` | `(certificate_id, org_id) → certificates (id, org_id) ON DELETE RESTRICT` | Tenant consistency is a database fact. A single-column FK to `certificates.id` would accept a route in organization A naming organization B's certificate; `MATCH SIMPLE` lets a NULL skip the check |
+| `uq_certificates_id_org` | `UNIQUE (id, org_id)` | The referenced key PostgreSQL requires for the composite FK; redundant with the PK alone and deliberately kept for that reason |
+| `ix_routes_certificate_id` | b-tree on `certificate_id` | Delivery's target query and the certificate-deletion guard both look routes up by certificate |
+
+**Not changed:** `routes.scheme` (still `CHECK (scheme = 'http')`), the renderer, the agent
+registry, the operation specs, the nginx bundle schema and every HTTP behaviour. There is
+no `scheme=https`, no TLS server block, no certificate file path, no HTTPS redirect and no
+new node operation in this slice — association is not activation.
+
+**Service rules (`app/services/route_certificate_service.py`).** Both writes lock the
+route `FOR UPDATE`, re-read the certificate and domain from their tables, and re-evaluate
+the same rules the read path uses, so bind-time and delivery-time answers cannot diverge:
+
+| Rule | Refusal code |
+|---|---|
+| Route not visible in the caller's organization | `ROUTE_NOT_FOUND` (404) |
+| Certificate not visible in the caller's organization (foreign id or random uuid) | `CERTIFICATE_NOT_FOUND` (404, not a 403 — no existence oracle) |
+| Route already bound to a **different** certificate | `ROUTE_CERTIFICATE_CONFLICT` (409; unbind first) |
+| Domain not `VERIFIED` now | `DOMAIN_NOT_VERIFIED` (409) |
+| Certificate suspended | `CERTIFICATE_SUSPENDED` (409) |
+| Certificate status not `ISSUED`, or current generation not `ISSUED` | `CERTIFICATE_NOT_ISSUED` (409) |
+| Validity window passed | `CERTIFICATE_EXPIRED` (409) |
+| Hostname not covered by CN/SAN (wildcard one label deep) | `CERTIFICATE_HOSTNAME_NOT_COVERED` (409) |
+
+Binding the same certificate again is a no-op (200). Unbinding an unbound route is a no-op
+(204). Both publish `ROUTE_CERTIFICATE_BOUND` / `ROUTE_CERTIFICATE_UNBOUND` and write an
+audit row (`route.certificate_bound` / `route.certificate_unbound`). Neither touches the
+certificate, the route's enabled flag, `scheme`, or any node.
+
+**Lifecycle semantics — the binding is a claim, re-derived on every read.** `evaluate()`
+returns `UNBOUND`, `BOUND` (eligible now) or `INELIGIBLE` with a named code
+(`ROUTE_DISABLED`, `DOMAIN_NOT_VERIFIED`, `CERTIFICATE_SUSPENDED`,
+`CERTIFICATE_NOT_ISSUED`, `CERTIFICATE_EXPIRED`, `CERTIFICATE_HOSTNAME_NOT_COVERED`).
+Nothing rewrites or deletes the association when it goes stale:
+
+| Event | Guaranteed behaviour |
+|---|---|
+| Domain loses verification | Association stays; `evaluate` reports `DOMAIN_NOT_VERIFIED`; delivery must drop the node from the target set |
+| Certificate superseded | `current_generation_id` moves; `evaluate` requires the **current** generation to be `ISSUED` and re-reports. The binding is not retargeted automatically |
+| Certificate suspended | `CERTIFICATE_SUSPENDED`; no automatic unbind |
+| Route disabled | Association stays; `ROUTE_DISABLED`; re-enabling re-evaluates (no new bind needed) |
+| Route deleted | The route row (and the association with it) is gone; the certificate is untouched |
+| Certificate deletion while referenced | Service refuses 409 `CERTIFICATE_IN_USE` naming the route count; the FK's `RESTRICT` refuses it even if the service is bypassed. Deleting a *bound* certificate is never a cascade |
+| Downgrade of this migration while any route is bound | Refused by the migration (it would silently erase associations); unbind first |
+
+**Testing evidence.**
+
+| Claim | Evidence |
+|---|---|
+| Valid bind/unbind, and the HTTP route shape is unchanged (`scheme == 'http'`, no operation queued) | `tests/integration/test_phase541_route_binding.py` |
+| SAN/wildcard boundary rules, including apex and two-label non-matches | `tests/unit/test_route_certificate_binding.py` |
+| Cross-organization bind is 404 through the API and unrepresentable in the database | `test_phase541_route_binding.py` (API path), `test_migration_phase541.py` / composite-FK case (database path) |
+| Unauthorized bind/unbind (missing `domain.manage` **or** `certificate.manage`) | `test_phase541_route_binding.py` |
+| Unverified domain, suspended/pending/expired certificate, non-covering certificate | `test_phase541_route_binding.py` |
+| Concurrent conflicting updates serialize on the route lock | `test_phase541_route_binding.py` |
+| Certificate deletion while referenced is refused, and is possible after unbind | `test_phase541_route_binding.py`, `test_certificates.py` (delete guard) |
+| Route disablement/removal and domain-verification loss report `INELIGIBLE` without losing the association | `test_phase541_route_binding.py` |
+| RLS/tenant isolation for the new column through both API and raw-SQL paths | `test_tenant_isolation.py`, `test_phase541_route_binding.py` |
+| Upgrade, downgrade (including its refusal while bound), and model/migration drift | `test_migration_phase541.py`, `test_migration_drift.py` |
+
+**Remaining limitations.** This slice deliberately does not deliver material, install
+anything, render TLS, widen `scheme`, or claim HTTPS; those stay in 5.4 and 5.5. It also
+does not re-render or notify when a binding becomes ineligible (delivery will evaluate on
+its own schedule), and it does not add a UI for binding — the API and the route detail
+read model (`certificate_binding`) are the interface. A binding is **not** proof that the
+certificate is currently deployable: only `eligible` is, and only at the moment it is read.
 
 ---
 

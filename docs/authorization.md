@@ -85,6 +85,14 @@ plaintext certificate material, or ciphertext; the Phase 5.1 response schemas ha
 field that could carry one. This closes and implements the Phase 5 design's open item O3
 (phase5-design.md §4.1, §10.1.1).
 
+**Route↔certificate binding needs both codenames (shipped 5.4.1).**
+`POST`/`DELETE /routes/{id}/certificate` require `domain.manage` **and**
+`certificate.manage`, and the route itself is additionally resolved inside the caller's
+organization. Neither codename alone is sufficient: `certificate.manage` chooses what may
+be served, `domain.manage` owns the route that will serve it. A foreign certificate or
+route is a 404, not a 403, so the endpoints are not existence oracles
+(phase5-design.md §4.4, §10.10).
+
 **Deliberately NOT added: `node.execute`.** There is no remote shell. Operations are
 whitelisted types, each mapping to an existing or new codename (container lifecycle
 → `container.lifecycle`; nginx apply → `domain.manage`). If a legitimate need for

@@ -704,8 +704,10 @@ empty value.
 ### Domains & routes — `domains.py`, `routes.py`
 
 Phase 4, **HTTP only**: `scheme` is `http` and no endpoint accepts TLS material
-(Phase 5). Domain ownership is proved by a DNS TXT record before any route can be
-gated live — see [domain-routing.md](domain-routing.md).
+(Phase 5). Phase 5.4.1 adds the two certificate-association endpoints at the bottom of
+the table — association only; they queue no operation and render no TLS. Domain
+ownership is proved by a DNS TXT record before any route can be gated live — see
+[domain-routing.md](domain-routing.md).
 
 | Method | Path | Permission | Notes |
 |---|---|---|---|
@@ -719,9 +721,17 @@ gated live — see [domain-routing.md](domain-routing.md).
 | POST | `/routes` | `domain.manage` | domain must be verified, hostname covered by it, upstream container on the route's node and publishing the requested port, header/rate-limit/redirect inputs from closed allowlists |
 | GET · PATCH · DELETE | `/routes/{route_id}` | `domain.read` / `domain.manage` | PATCH re-validates and re-applies when the route is enabled |
 | POST | `/routes/{route_id}/enable` · `/disable` | `domain.manage` | the live gate: re-checks domain status, container state and the node's nginx pre-flight, then queues `nginx.apply` |
+| POST | `/routes/{route_id}/certificate` | `domain.manage` **+** `certificate.manage` | body `{certificate_id}`. Binds an **issued** certificate to the route after checking current state: same organization, domain `VERIFIED`, current generation `ISSUED`, not suspended/expired, hostname covered (exact or wildcard one label deep). Idempotent for the same certificate; 409 `ROUTE_CERTIFICATE_CONFLICT` if a **different** certificate is already bound (unbind first). 404 for a foreign/unknown certificate (`CERTIFICATE_NOT_FOUND`) and route (`ROUTE_NOT_FOUND`); named 409s for each eligibility failure. No `scheme` change, no TLS, no operation |
+| DELETE | `/routes/{route_id}/certificate` | `domain.manage` **+** `certificate.manage` | unbinds; 204 and idempotent. Deletes no certificate and changes no route behavior |
 | GET | `/nodes/{server_id}/route-targets` | `domain.read` | upstream picker: containers on that node with their published host ports |
 | GET | `/nodes/{server_id}/proxy/status` | `domain.read` | last applied fingerprint, provider, drift state |
 | POST | `/nodes/{server_id}/proxy/status/refresh` · `/proxy/apply` | `domain.manage` | 409 `NGINX_PREFLIGHT_FAILED` / `NODE_CAPABILITY_STALE` when the node cannot serve HTTP right now |
+
+The route list/detail models gained `certificate_id` in 5.4.1, and **`GET /routes/{route_id}`**
+also returns `certificate_binding` — `{state, eligible, code, detail, certificate_id,
+generation}` re-derived from current rows (`UNBOUND` / `BOUND` / `INELIGIBLE`). `eligible`
+is the only field a delivery decision may gate on; `state` alone does not mean the
+association is usable now.
 
 ### Certificates — `certificates.py`
 

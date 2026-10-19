@@ -71,7 +71,7 @@ from app.schemas.certificate import (
     CertificateOut,
     CertificateUpdate,
 )
-from app.services import audit_service, certificate_lifecycle, event_bus
+from app.services import audit_service, certificate_lifecycle, event_bus, route_certificate_service
 from app.services.acme.directory import directory_for_url
 
 log = get_logger("nexusops.certificates")
@@ -469,16 +469,23 @@ async def delete_certificate(
       evidence rather than cleanup. Phase 5.1 could not tell the difference
       because every generation was pre-issuance by construction.
 
-    The first half of the rule (no ``routes.certificate_id`` references it) has
-    nothing to check yet: that column arrives with the binding slice (5.5), and the
-    FK there is ``ON DELETE RESTRICT``, so the database will refuse a delete that a
-    bound route makes invalid rather than this function guessing.
+    The first half of the rule is checked here since the binding column arrived
+    (Phase 5.4.1): a certificate a route still references is refused with
+    ``CERTIFICATE_IN_USE``, and the composite FK's ``ON DELETE RESTRICT`` is the
+    database backstop if this check is ever bypassed. Unbinding is an explicit
+    act; deleting the certificate must not double as one.
 
     A pre-issuance generation carries no material, so removing a certificate that
     merely *asked* for one strands nothing — which is what keeps this endpoint
     useful.
     """
     certificate = await get_certificate(db, certificate_id)
+    bound_routes = await route_certificate_service.bound_route_count(db, certificate.id)
+    if bound_routes:
+        raise Conflict(
+            f"{bound_routes} route(s) are still bound to this certificate. Unbind them first.",
+            code="CERTIFICATE_IN_USE",
+        )
     if certificate.current_generation_id is not None:
         raise Conflict(
             "This certificate has an issued generation and cannot be deleted; revoke it first",

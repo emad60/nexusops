@@ -8,14 +8,18 @@ codenames with their role matrix, and the metadata-only certificate API (commit
 migration `c9d0e1f2a3`): the ACME client behind a seam, DNS-01 publication with a real
 propagation check, the per-organization account registration, the order-to-material flow
 with its budget and backoff, the worker and its sweep. A generation now reaches `ISSUED`
-with material encrypted under the organization DEK. **Nothing is delivered**: there is
-still no TLS listener, no material endpoint and no activation — the schema has no
-`certificate_id` column on `routes` and `routes.scheme` is a closed CHECK of `'http'`
+with material encrypted under the organization DEK. **Certificate-to-route binding
+shipped as 5.4.1** (2026-10-19, migration `e1f2a3b4c5d6`): `routes.certificate_id` with a
+tenant-consistent composite FK, explicit bind/unbind, and a derived eligibility read
+model — **association only**. **Nothing is delivered**: there is still no TLS listener,
+no material endpoint and no activation — `routes.scheme` is still a closed CHECK of
+`'http'` and the binding column is not read by the renderer
 (`backend/app/models/routing.py`). Every remaining shape below is **Phase 5 design**, not
 shipped behavior; where a shape below *is* in the tree, §1 says which slice put it there. The authoritative Phase 5 design (architecture, threat model, key
 hierarchy, delivery mechanism, slices and acceptance criteria) is
 [phase5-design.md](phase5-design.md); this document is the subsystem overview and defers
-to it on every decision where the two differ. The **HTTP half** of the surrounding
+to it on every decision where the two differ. **Slice order:** binding foundation
+(5.4.1, shipped) → delivery and installation (5.4) → HTTPS activation (5.5). The **HTTP half** of the surrounding
 subsystem — domains, routes, TXT verification, the nginx renderer and the `nginx.*`
 operations — **shipped in Phase 4** and is described in
 [domain-routing.md](domain-routing.md).
@@ -123,9 +127,12 @@ naming the exact obsolete values. §5.2 has the workflow; phase5-design.md §10.
 per-module record and the evidence.
 
 **Not shipped (the rest of this document):** private-key delivery, installation, HTTPS
-activation, renewal, expiry monitoring and revocation. `routes.scheme` cannot be set to
-`https` and there is no `certificate_id` column, so an HTTPS route is not merely
-unwired — it is unrepresentable until Phase 5.5 adds it by migration. An `ISSUED`
+activation, renewal, expiry monitoring and revocation. `routes.certificate_id` now
+exists (5.4.1) and records which certificate a route is allowed to serve, but
+`routes.scheme` still cannot be set to `https`, so an HTTPS route remains
+unrepresentable until Phase 5.5 widens the CHECK. A binding is not activation: the
+route keeps serving HTTP, and eligibility is re-derived on every read rather than
+inferred from the column. An `ISSUED`
 generation is now **written by the issuance flow** and remains **unrepresentable
 without material**: the material guard CHECK rejects that row, so the guarantee 5.1 got
 from a truncated CHECK is kept by a constraint. Nothing outside the control plane's own
@@ -171,14 +178,12 @@ back through the API.
 ## 2. Certificate entity
 
 **In the schema, empty, and guarded (Phase 5.1 + 5.2.2).** Identity, the lifecycle
-vocabulary, the material columns and the credential references exist; **no row has ever
-held material**, because nothing in the tree can write one. The shipped Route table has
-no `certificate_id` column and
-`scheme` is a closed CHECK of `'http'` (`backend/app/models/routing.py`); Phase 5 adds
-the column and widens the CHECK by migration. The design is that a Route carries an
-optional `certificate_id`, so one certificate may serve many routes while a route
-binds at most one (the spine ER line `Route |o--o| Certificate` understates this to
-0..1:0..1; the Route table is authoritative). One row per requested certificate.
+vocabulary, the material columns and the credential references exist. The Route table
+carries an optional `certificate_id` since **5.4.1**, so one certificate may serve many
+routes while a route binds at most one (the spine ER line `Route |o--o| Certificate`
+understates this to 0..1:0..1; the Route table is authoritative). `scheme` remains a
+closed CHECK of `'http'` (`backend/app/models/routing.py`); Phase 5.5 widens it by
+migration. One row per requested certificate.
 
 **Generation model (decided in phase5-design.md §3.2).** A certificate row is the
 *identity*; each ACME order + key pair is a separate **generation** row
@@ -250,9 +255,13 @@ stateDiagram-v2
     FAILED --> [*]: deleted with its certificate once unreferenced
 ```
 
-Certificate is referenced by `routes.certificate_id` (domain-model.md §2.4). A
-certificate row is never hard-deleted while any route references it (RESTRICT, same
-policy as roles); delete is allowed only when orphaned.
+Certificate is referenced by `routes.certificate_id` (domain-model.md §2.4) through the
+tenant-consistent composite FK `(certificate_id, org_id) → certificates (id, org_id)`
+`ON DELETE RESTRICT` (5.4.1). A certificate row is never hard-deleted while any route
+references it: the service refuses with 409 `CERTIFICATE_IN_USE` naming the bound route
+count, and the FK refuses even a bypassing caller. Delete is allowed only when orphaned
+and no generation is `ISSUED`; unbinding is an explicit operation that neither deletes
+nor suspends the certificate.
 
 ## 3. API surface and permissions
 
@@ -269,6 +278,13 @@ refusing with a named code instead of pretending (`CERTIFICATE_ALREADY_ISSUED`,
 and `/{id}/routes` rows below are **design** (5.4–5.6), and `POST`/`GET` do not contain
 the delivery fields this table's design-era wording implies — the authoritative shipped
 shape is docs/api.md §6.
+
+**Binding endpoints (shipped 5.4.1) live on the route, not on the certificate:**
+`POST /routes/{id}/certificate` and `DELETE /routes/{id}/certificate`, each requiring
+**both** `domain.manage` and `certificate.manage`. They are the only writers of
+`routes.certificate_id`; the column is not accepted on route create/update or on any
+delivery request, so a caller cannot make eligibility a client input (api.md §5,
+phase5-design.md §4.4).
 
 Codenames per authorization.md §2: `certificate.read`, `certificate.manage` —
 **registered in Phase 5.1** (`backend/app/core/permissions.py`, seeded into the stored
@@ -289,7 +305,7 @@ the `nginx` capability.
 | `POST /certificates/{id}/retry` | `certificate.manage` | Pull the next attempt forward and dispatch it — `202 Accepted`, or a named 409 refusal |
 | `POST /certificates/{id}/renew` | `certificate.manage` | Force reissue outside the window (5.6) |
 | `POST /certificates/{id}/revoke` | `certificate.manage` | ACME revocation; delivers removal ops |
-| `DELETE /certificates/{id}` | `certificate.manage` | Only when no routes reference it |
+| `DELETE /certificates/{id}` | `certificate.manage` | Only when no routes reference it (5.4.1: 409 `CERTIFICATE_IN_USE`) |
 | `GET /certificates/{id}/routes` | `certificate.read` | Routes serving this cert (= delivery targets) |
 
 All routes run under `X-Org-Id` resolution and the session guard (multi-tenancy.md §2-3);
@@ -617,6 +633,12 @@ backoff a real CA cannot be made to produce on demand.
 `node_id`s. A node receives a certificate only if it serves a route using it
 (domain-model.md §3.7). Adding a route to an already-issued certificate enqueues one
 delivery; removing the last route using it on a node enqueues a `certificate.remove`.
+The stored association is only an **input**: delivery must re-evaluate the same rules as
+`route_certificate_service.evaluate()` on every target computation — domain `VERIFIED`
+now, current generation `ISSUED`, certificate not suspended or expired, hostname still
+covered, route enabled. A binding that has gone stale drops out of the target set and is
+never silently retargeted. This is why the association column is a foundation for 5.4,
+not an HTTPS instruction.
 
 Delivery is an **Operation** (whitelisted type — the agent pulls; no remote shell):
 

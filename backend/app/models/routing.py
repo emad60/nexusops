@@ -13,9 +13,20 @@ Phase-4 boundary decisions recorded in the schema rather than only in prose:
   names are unique platform-wide through a partial unique index on
   ``lower(name) WHERE status = 'VERIFIED'`` — that index is what makes
   anti-takeover a database fact instead of an application convention.
-* Routes are HTTP-only (``scheme`` is a closed check of ``'http'``, and there is
-  no ``certificate_id`` column). Phase 5 adds HTTPS by migration, not by
+* Routes are HTTP-only in Phase 4 and remain so: ``scheme`` is a closed check of
+  ``'http'``. Phase 5.4.1 adds ``certificate_id`` **without** touching that
+  check — the column records which certificate a route is *allowed* to serve,
+  and nothing in this tree renders a TLS server block or flips ``scheme``.
+  HTTPS activation arrives as a later migration that widens ``scheme``, not by
   softening a constraint now.
+* ``certificate_id`` is a **tenant-consistent** reference: the foreign key is the
+  pair ``(certificate_id, org_id)`` against ``certificates (id, org_id)``, so a
+  route pointing at another organization's certificate is unrepresentable in the
+  database rather than merely refused by the service. ``ORG_ID`` being part of
+  the key is why a bare ``certificates.id`` FK would not have been enough.
+* ``ON DELETE RESTRICT`` on that pair: deleting a certificate a route depends on
+  must be an explicit act (unbind, then delete), never a deletion's side effect
+  that silently strips a live association.
 """
 
 from __future__ import annotations
@@ -29,6 +40,7 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     String,
@@ -142,6 +154,20 @@ class Route(OrgScoped, TimestampMixin, Base):
         ),
         Index("ix_routes_domain", "domain_id"),
         Index("ix_routes_org_state", "org_id", "config_state"),
+        Index("ix_routes_certificate_id", "certificate_id"),
+        # Tenant-consistent reference (Phase 5.4.1). The pair is the key, so a
+        # route in organization A cannot name a certificate in organization B
+        # even if both ids are valid — a plain single-column FK would accept
+        # that and leave the isolation guarantee to the service layer.
+        # ``MATCH SIMPLE`` (the default) means a NULL ``certificate_id`` skips
+        # the check entirely, which is what an unbound route needs.
+        # RESTRICT: the certificate cannot disappear out from under a binding.
+        ForeignKeyConstraint(
+            ["certificate_id", "org_id"],
+            ["certificates.id", "certificates.org_id"],
+            name="fk_routes_certificate_org",
+            ondelete="RESTRICT",
+        ),
     )
 
     id: Mapped[uuid.UUID] = uuid_pk()
@@ -164,6 +190,14 @@ class Route(OrgScoped, TimestampMixin, Base):
     port: Mapped[int] = mapped_column(Integer, nullable=False)
     #: HTTP only in Phase 4. Phase 5 adds https through its own migration.
     scheme: Mapped[str] = mapped_column(String(8), default="http", nullable=False)
+    #: The certificate this route is allowed to serve once HTTPS is activated
+    #: (Phase 5.4.1). ``NULL`` = unbound. Association only: this column does not
+    #: make the route serve TLS, does not widen ``scheme`` and is not read by the
+    #: HTTP renderer. Delivery re-evaluates eligibility from authoritative state
+    #: on every read, so a binding whose domain lost verification, whose route is
+    #: disabled, or whose certificate was superseded reports ineligible rather
+    #: than silently serving something else.
+    certificate_id: Mapped[uuid.UUID | None] = mapped_column(nullable=True)
     headers: Mapped[list[dict[str, Any]]] = mapped_column(
         JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
     )

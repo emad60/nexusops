@@ -17,14 +17,25 @@ from app.api.deps import AuthContext, require_permission
 from app.core.db import get_session
 from app.core.pagination import Page, PageParams, page_params
 from app.models.enums import RouteConfigState
-from app.schemas.route import RouteCreate, RouteDetailOut, RouteOut, RouteUpdate
-from app.services import route_service
+from app.schemas.route import (
+    RouteCertificateBind,
+    RouteCertificateBindingOut,
+    RouteCreate,
+    RouteDetailOut,
+    RouteOut,
+    RouteUpdate,
+)
+from app.services import route_certificate_service, route_service
 
 router = APIRouter(prefix="/routes", tags=["routes"])
 
 DbDep = Annotated[AsyncSession, Depends(get_session)]
 ReadCtx = Annotated[AuthContext, Depends(require_permission("domain.read"))]
 ManageCtx = Annotated[AuthContext, Depends(require_permission("domain.manage"))]
+#: Binding is the one route mutation that also needs ``certificate.manage``: it
+#: changes which certificate a node would eventually be trusted with, so the
+#: route permission alone is not enough.
+CertificateManageCtx = Annotated[AuthContext, Depends(require_permission("certificate.manage"))]
 
 
 async def _serialize_many(db: AsyncSession, rows: list) -> list[RouteOut]:
@@ -91,7 +102,19 @@ async def get_route(
     route = await route_service.get_route(db, route_id)
     payload = (await _serialize_many(db, [route]))[0]
     domain_status = await _domain_status(db, route.domain_id)
-    return RouteDetailOut(**payload.model_dump(), domain_status=domain_status)
+    binding = await route_certificate_service.evaluate(db, route)
+    return RouteDetailOut(
+        **payload.model_dump(),
+        domain_status=domain_status,
+        certificate_binding=RouteCertificateBindingOut(
+            state=binding.state,
+            eligible=binding.eligible,
+            code=binding.code,
+            detail=binding.detail,
+            certificate_id=binding.certificate_id,
+            generation=binding.generation,
+        ),
+    )
 
 
 @router.patch("/{route_id}", response_model=RouteOut)
@@ -138,6 +161,43 @@ async def delete_route(
     ctx: ManageCtx,
 ) -> None:
     await route_service.delete_route(db, ctx, route_id=route_id, request=request)
+
+
+@router.post("/{route_id}/certificate", response_model=RouteOut)
+async def bind_route_certificate(
+    route_id: uuid.UUID,
+    payload: RouteCertificateBind,
+    request: Request,
+    db: DbDep,
+    _domain: ManageCtx,
+    ctx: CertificateManageCtx,
+) -> RouteOut:
+    """Associate an issued certificate with a route (association only).
+
+    No ``scheme`` change, no TLS configuration and no node operation: the
+    response records the association and re-derives whether it is currently
+    usable. Both ``domain.manage`` and ``certificate.manage`` are required.
+    """
+    route = await route_certificate_service.bind_certificate(
+        db,
+        ctx,
+        route_id=route_id,
+        certificate_id=payload.certificate_id,
+        request=request,
+    )
+    return (await _serialize_many(db, [route]))[0]
+
+
+@router.delete("/{route_id}/certificate", status_code=status.HTTP_204_NO_CONTENT)
+async def unbind_route_certificate(
+    route_id: uuid.UUID,
+    request: Request,
+    db: DbDep,
+    _domain: ManageCtx,
+    ctx: CertificateManageCtx,
+) -> None:
+    """Remove the association. Idempotent, and it deletes no certificate."""
+    await route_certificate_service.unbind_certificate(db, ctx, route_id=route_id, request=request)
 
 
 async def _domain_status(db: AsyncSession, domain_id: uuid.UUID) -> str:

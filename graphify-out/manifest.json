@@ -504,9 +504,9 @@
     "semantic_hash": "260e52e38b9bb594aa25326219966b78"
   },
   "backend/app/schemas/meta.py": {
-    "mtime": 1792357770.5412698,
-    "seen": 1792364279.636127,
-    "ast_hash": "2eb0aef924495796fb77947be9715cca",
+    "mtime": 1792443463.4130743,
+    "seen": 1792445897.557891,
+    "ast_hash": "a325087c9df90ee0f07a6b058b1391ab",
     "semantic_hash": ""
   },
   "backend/app/schemas/metric.py": {
@@ -624,9 +624,9 @@
     "semantic_hash": ""
   },
   "backend/app/services/event_registry.py": {
-    "mtime": 1792357286.4702966,
-    "seen": 1792364279.6361692,
-    "ast_hash": "4751285d0366862ec21052b25a8c4fa5",
+    "mtime": 1792441981.253041,
+    "seen": 1792445897.5579338,
+    "ast_hash": "52221462cd3c2eb7db58c778240fc04c",
     "semantic_hash": ""
   },
   "backend/app/services/incident_service.py": {
@@ -1494,9 +1494,9 @@
     "semantic_hash": ""
   },
   "docs/api.md": {
-    "mtime": 1792362009.5960352,
-    "seen": 1792364279.6364143,
-    "ast_hash": "9f15fb08715aea760e2218d6f3aa091c",
+    "mtime": 1792442850.8560605,
+    "seen": 1792445897.5581987,
+    "ast_hash": "36db778155b917225ff107decc90241b",
     "semantic_hash": ""
   },
   "docs/architecture.md": {
@@ -1560,15 +1560,15 @@
     "semantic_hash": ""
   },
   "docs/authorization.md": {
-    "mtime": 1791761665.239379,
-    "seen": 1791761773.4552472,
-    "ast_hash": "1346ac0eba4d105b8277f31a0a7f6ab1",
+    "mtime": 1792442949.1630628,
+    "seen": 1792445897.5582006,
+    "ast_hash": "2a9623dff7e7569b7033d9697fef0f50",
     "semantic_hash": ""
   },
   "docs/certificate-management.md": {
-    "mtime": 1792365818.8008246,
-    "seen": 1792365941.6871686,
-    "ast_hash": "daf79ccdb9b245d53ffcca4acc559707",
+    "mtime": 1792442781.7300591,
+    "seen": 1792445897.5582016,
+    "ast_hash": "232e7a6319d761da250abcdf1cc649df",
     "semantic_hash": ""
   },
   "docs/deployment-architecture.md": {
@@ -1578,15 +1578,15 @@
     "semantic_hash": ""
   },
   "docs/domain-model.md": {
-    "mtime": 1792277005.8606765,
-    "seen": 1792280425.195978,
-    "ast_hash": "dc59117866ae5b98079bd9a596f0b25f",
+    "mtime": 1792442964.156063,
+    "seen": 1792445897.5582054,
+    "ast_hash": "a461ba88e5b6335cbb8c1adc9e0c77d1",
     "semantic_hash": ""
   },
   "docs/domain-routing.md": {
-    "mtime": 1791940986.6458783,
-    "seen": 1791941046.0844784,
-    "ast_hash": "e325d7eff5efc4d23d6176a04a269091",
+    "mtime": 1792442732.9603238,
+    "seen": 1792445897.5582066,
+    "ast_hash": "19e56f4913174848534b6b66e178138f",
     "semantic_hash": ""
   },
   "docs/multi-tenancy.md": {
@@ -1614,9 +1614,9 @@
     "semantic_hash": ""
   },
   "docs/product-roadmap.md": {
-    "mtime": 1792276983.3546762,
-    "seen": 1792280425.195987,
-    "ast_hash": "4fb8d48ec081b53261633fccf1a1aef1",
+    "mtime": 1792442903.0420618,
+    "seen": 1792445897.5582142,
+    "ast_hash": "2151b3e76b97166b19874277775185fd",
     "semantic_hash": ""
   },
   "docs/secrets-architecture.md": {
@@ -1992,9 +1992,9 @@
     "semantic_hash": ""
   },
   "backend/app/api/v1/routes.py": {
-    "mtime": 1791671372.8298025,
-    "seen": 1791674448.1673257,
-    "ast_hash": "8721849b332488f4f20113ce9cf2d880",
+    "mtime": 1792443005.892064,
+    "seen": 1792445897.5578122,
+    "ast_hash": "057c37d10d00189a52f462fe2709e7ca",
     "semantic_hash": ""
   },
   "backend/app/core/dnsname.py": {
@@ -2004,9 +2004,9 @@
     "semantic_hash": ""
   },
   "backend/app/models/routing.py": {
-    "mtime": 1791671194.3588126,
-    "seen": 1791674448.167386,
-    "ast_hash": "4c0caa9d6026dd2d7242f06070dcd685",
+    "mtime": 1792441914.3080397,
+    "seen": 1792445897.5578518,
+    "ast_hash": "2770da181b6572d4bccc5bd5aebaa6b5",
     "semantic_hash": ""
   },
   "backend/app/providers/nginx.py": {
@@ -2034,9 +2034,9 @@
     "semantic_hash": ""
   },
   "backend/app/schemas/route.py": {
-    "mtime": 1791742049.6375928,
-    "seen": 1791744723.924385,
-    "ast_hash": "861dc3502e67dee5b98f94bcdd7f030a",
+    "mtime": 1792441956.3240047,
+    "seen": 1792445897.5578997,
+    "ast_hash": "41cf4370c1fad0b1de4b5a613912592f",
     "semantic_hash": ""
   },
   "backend/app/services/dns_verifier.py": {
@@ -2160,9 +2160,9 @@
     "semantic_hash": ""
   },
   "docs/phase5-design.md": {
-    "mtime": 1792365798.6248257,
-    "seen": 1792365941.6871781,
-    "ast_hash": "5a9fed87184e2b9817641b3cea26200f",
+    "mtime": 1792442707.0980573,
+    "seen": 1792445897.5582113,
+    "ast_hash": "2337570a04fba4dee37fd45459d4b462",
     "semantic_hash": ""
   },
   "backend/alembic/versions/20261012_1200-c8d9e0f1a2b3_phase5_certificate_metadata.py": {
@@ -2178,9 +2178,9 @@
     "semantic_hash": ""
   },
   "backend/app/models/certificate.py": {
-    "mtime": 1792362562.2760048,
-    "seen": 1792364279.6360765,
-    "ast_hash": "dfdcfa0cd39c37d7eb610cf23f6b4b42",
+    "mtime": 1792441921.7300398,
+    "seen": 1792445897.5578408,
+    "ast_hash": "dbd161a20fa2273ae6353cd9aa5779c5",
     "semantic_hash": ""
   },
   "backend/app/schemas/certificate.py": {
@@ -2196,9 +2196,9 @@
     "semantic_hash": ""
   },
   "backend/app/services/certificate_service.py": {
-    "mtime": 1792357099.7047594,
-    "seen": 1792364279.6361554,
-    "ast_hash": "f01b85eb904ddd132f0e76bbaea5aacb",
+    "mtime": 1792441997.8810415,
+    "seen": 1792445897.55792,
+    "ast_hash": "75263e56a5f06f782d9dc8512bafcc71",
     "semantic_hash": ""
   },
   "backend/tests/integration/test_certificates.py": {
@@ -2511,6 +2511,36 @@
     "mtime": 1792362909.7639856,
     "seen": 1792364279.6362402,
     "ast_hash": "b8d106c5a0310f68b9e913a405c92cf5",
+    "semantic_hash": ""
+  },
+  "backend/alembic/versions/20261019_1000-e1f2a3b4c5d6_phase541_route_certificate_binding.py": {
+    "mtime": 1792442025.1250422,
+    "seen": 1792445897.5577812,
+    "ast_hash": "44687bcc36cde2d0944e2da1c64ff5a7",
+    "semantic_hash": ""
+  },
+  "backend/app/services/route_certificate_service.py": {
+    "mtime": 1792443005.893064,
+    "seen": 1792445897.5579522,
+    "ast_hash": "a916ce97aabf4bcd367e72d7e4ff7c3c",
+    "semantic_hash": ""
+  },
+  "backend/tests/integration/test_migration_phase541.py": {
+    "mtime": 1792443005.9210641,
+    "seen": 1792445897.5580075,
+    "ast_hash": "6c2220d29d3404979c626fca71658ad2",
+    "semantic_hash": ""
+  },
+  "backend/tests/integration/test_phase541_route_binding.py": {
+    "mtime": 1792444133.7280893,
+    "seen": 1792445897.5580177,
+    "ast_hash": "4d5ac9184584f14bfdb123afaf3a91fd",
+    "semantic_hash": ""
+  },
+  "backend/tests/unit/test_route_certificate_binding.py": {
+    "mtime": 1792443005.9210641,
+    "seen": 1792445897.5580795,
+    "ast_hash": "25534e05078899192a331af3ff8c5820",
     "semantic_hash": ""
   }
 }

@@ -260,6 +260,49 @@ async def test_binding_does_not_touch_http_serving_or_queue_work(client, owner, 
     assert detail["url"].startswith("http://")
 
 
+async def test_a_client_cannot_supply_the_binding_as_a_route_field(client, owner, org_db):
+    """The association is only writable through the validated bind endpoint.
+
+    A delivery request in 5.4 will name routes, never certificates; the same must
+    hold for route writes, or a caller could attach a certificate the platform
+    would have refused (unverified domain, covering the wrong name) by posting it
+    as an ordinary field. ``extra="forbid"`` makes that a 422 rather than a
+    silently ignored key, so neither create nor patch can carry one.
+    """
+    node, _agent_token, container_id = await _proxy_ready_node(client, owner)
+    domain = await _verified_domain(client, owner, "field.example.com")
+    certificate = await _certificate(org_db, owner, domain=domain)
+
+    created = await _create_route(
+        client,
+        owner,
+        domain=domain,
+        node_id=node["id"],
+        container_id=container_id,
+        certificate_id=certificate["id"],
+    )
+    assert created.status_code == 422, created.text
+    assert created.json()["error"]["code"] == "VALIDATION_ERROR"
+    assert any("certificate_id" in item["loc"] for item in created.json()["error"]["details"])
+
+    route = (
+        await _create_route(
+            client, owner, domain=domain, node_id=node["id"], container_id=container_id
+        )
+    ).json()
+    patched = await client.patch(
+        f"{API}/routes/{route['id']}",
+        headers=owner["headers"],
+        json={"certificate_id": certificate["id"]},
+    )
+    assert patched.status_code == 422, patched.text
+    assert any("certificate_id" in item["loc"] for item in patched.json()["error"]["details"])
+
+    detail = await _route_detail(client, owner, route)
+    assert detail["certificate_id"] is None
+    assert detail["certificate_binding"]["state"] == "UNBOUND"
+
+
 # --- 2. SAN coverage, including wildcard boundaries ----------------------------
 
 

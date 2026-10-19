@@ -2532,9 +2532,9 @@
     "semantic_hash": ""
   },
   "backend/tests/integration/test_phase541_route_binding.py": {
-    "mtime": 1792444133.7280893,
-    "seen": 1792445897.5580177,
-    "ast_hash": "4d5ac9184584f14bfdb123afaf3a91fd",
+    "mtime": 1792446614.1971447,
+    "seen": 1792446677.494974,
+    "ast_hash": "ff314c7bfc19412d402db5398ae81fe3",
     "semantic_hash": ""
   },
   "backend/tests/unit/test_route_certificate_binding.py": {
